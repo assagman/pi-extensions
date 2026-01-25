@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { AssistantMessage } from "@mariozechner/pi-ai";
 import {
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -23,6 +24,59 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
+
+// -- Model Display Colors --
+// Provider: Teal (#17917F)
+// Model: Green (#85B06A)
+// Thinking Level: Gradient from Tan (#A17E57) to Bright Red (#F24C38)
+const MODEL_DISPLAY_COLORS = {
+  provider: { r: 23, g: 145, b: 127 },   // #17917F - teal
+  model: { r: 133, g: 176, b: 106 },     // #85B06A - green
+  thinking: {
+    off: null, // hidden
+    minimal: { r: 161, g: 126, b: 87 },  // #A17E57 - tan (lowest)
+    low: { r: 181, g: 114, b: 79 },      // #B5724F
+    medium: { r: 202, g: 101, b: 72 },   // #CA6548
+    high: { r: 222, g: 89, b: 64 },      // #DE5940
+    xhigh: { r: 242, g: 76, b: 56 },     // #F24C38 - bright red (highest)
+  },
+} as const;
+
+type ThinkingLevel = keyof typeof MODEL_DISPLAY_COLORS.thinking;
+
+const rgb = (r: number, g: number, b: number, text: string): string =>
+  `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
+
+const formatModelDisplay = (
+  provider: string | undefined,
+  modelId: string | undefined,
+  thinkingLevel: ThinkingLevel | undefined,
+  hasReasoning: boolean
+): string => {
+  const parts: string[] = [];
+
+  // Provider
+  if (provider) {
+    const { r, g, b } = MODEL_DISPLAY_COLORS.provider;
+    parts.push(rgb(r, g, b, provider));
+  }
+
+  // Model
+  if (modelId) {
+    const { r, g, b } = MODEL_DISPLAY_COLORS.model;
+    parts.push(rgb(r, g, b, modelId));
+  } else {
+    parts.push("no-model");
+  }
+
+  // Thinking level (only for reasoning models)
+  if (hasReasoning && thinkingLevel && thinkingLevel !== "off") {
+    const { r, g, b } = MODEL_DISPLAY_COLORS.thinking[thinkingLevel]!;
+    parts.push(rgb(r, g, b, thinkingLevel));
+  }
+
+  return parts.join(":");
+};
 
 // Local type definition for Tool - not exported from @mariozechner/pi-coding-agent main index
 // biome-ignore lint/suspicious/noExplicitAny: Tool types require any for compatibility with pi-coding-agent
@@ -1025,6 +1079,11 @@ export default function (pi: ExtensionAPI) {
     } catch (error) {
       console.error("[mu] Failed to rebuild tool results from session:", error);
     }
+
+    // Enable enhanced model display footer
+    if (modelDisplayEnabled) {
+      enableModelDisplayFooter(ctx);
+    }
   });
 
   // Track tool results as they come in.
@@ -1482,4 +1541,190 @@ export default function (pi: ExtensionAPI) {
   for (const [name, factory, render] of tools) {
     override(name, factory, render);
   }
+
+  // ---------------------------------------------------------------------------
+  // Enhanced Model Display Footer
+  // ---------------------------------------------------------------------------
+  // Format: provider:model:thinkingLevel with custom colors
+  // - Provider: #17917F (teal)
+  // - Model: #85B06A (green)
+  // - Thinking: gradient #A17E57 (tan) → #F24C38 (bright red)
+
+  let modelDisplayEnabled = true;
+
+  const enableModelDisplayFooter = (ctx: ExtensionContext | ExtensionCommandContext) => {
+    if (!ctx.hasUI) return;
+
+    ctx.ui.setFooter((tui, theme, footerData) => {
+      const unsub = footerData.onBranchChange(() => tui.requestRender());
+
+      return {
+        dispose: unsub,
+        invalidate() {},
+        render(width: number): string[] {
+          // Compute tokens from session (single pass)
+          let totalInput = 0;
+          let totalOutput = 0;
+          let totalCacheRead = 0;
+          let totalCacheWrite = 0;
+          let totalCost = 0;
+          let lastAssistant: AssistantMessage | null = null;
+
+          for (const e of ctx.sessionManager.getBranch()) {
+            if (e.type === "message" && e.message.role === "assistant") {
+              const m = e.message as AssistantMessage;
+              totalInput += m.usage.input;
+              totalOutput += m.usage.output;
+              totalCacheRead += m.usage.cacheRead;
+              totalCacheWrite += m.usage.cacheWrite;
+              totalCost += m.usage.cost.total;
+              lastAssistant = m;
+            }
+          }
+
+          const contextTokens = lastAssistant
+            ? lastAssistant.usage.input + lastAssistant.usage.output +
+              lastAssistant.usage.cacheRead + lastAssistant.usage.cacheWrite
+            : 0;
+          const contextWindow = ctx.model?.contextWindow || 0;
+          const contextPercentValue = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;
+          const contextPercent = contextPercentValue.toFixed(1);
+
+          // Format working directory with git branch
+          let pwd = process.cwd();
+          const home = process.env.HOME || process.env.USERPROFILE;
+          if (home && pwd.startsWith(home)) {
+            pwd = `~${pwd.slice(home.length)}`;
+          }
+
+          const branch = footerData.getGitBranch();
+          if (branch) {
+            pwd = `${pwd} (${branch})`;
+          }
+
+          // Add session name if set
+          const sessionName = ctx.sessionManager.getSessionName();
+          if (sessionName) {
+            pwd = `${pwd} • ${sessionName}`;
+          }
+
+          // Truncate path if too long
+          if (pwd.length > width) {
+            const half = Math.floor(width / 2) - 2;
+            if (half > 1) {
+              const start = pwd.slice(0, half);
+              const endLen = half - 1;
+              const end = pwd.slice(pwd.length - endLen);
+              pwd = `${start}...${end}`;
+            } else {
+              pwd = pwd.slice(0, Math.max(1, width));
+            }
+          }
+
+          // Format token counts
+          const fmt = (n: number) => {
+            if (n < 1000) return n.toString();
+            if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+            if (n < 1000000) return `${Math.round(n / 1000)}k`;
+            if (n < 10000000) return `${(n / 1000000).toFixed(1)}M`;
+            return `${Math.round(n / 1000000)}M`;
+          };
+
+          // Build stats line
+          const statsParts: string[] = [];
+          if (totalInput) statsParts.push(`↑${fmt(totalInput)}`);
+          if (totalOutput) statsParts.push(`↓${fmt(totalOutput)}`);
+          if (totalCacheRead) statsParts.push(`R${fmt(totalCacheRead)}`);
+          if (totalCacheWrite) statsParts.push(`W${fmt(totalCacheWrite)}`);
+
+          // Cost with subscription indicator
+          const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
+          if (totalCost || usingSubscription) {
+            const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
+            statsParts.push(costStr);
+          }
+
+          // Context percentage with color coding
+          let contextPercentStr: string;
+          const contextPercentDisplay = `${contextPercent}%/${fmt(contextWindow)}`;
+          if (contextPercentValue > 90) {
+            contextPercentStr = theme.fg("error", contextPercentDisplay);
+          } else if (contextPercentValue > 70) {
+            contextPercentStr = theme.fg("warning", contextPercentDisplay);
+          } else {
+            contextPercentStr = contextPercentDisplay;
+          }
+          statsParts.push(contextPercentStr);
+
+          const statsLeft = statsParts.join(" ");
+
+          // Build model display: provider:model:thinkingLevel
+          const model = ctx.model;
+          const provider = model?.provider;
+          const modelId = model?.id;
+          const thinkingLevel = pi.getThinkingLevel() as ThinkingLevel;
+          const hasReasoning = model?.reasoning ?? false;
+
+          const rightSide = formatModelDisplay(provider, modelId, thinkingLevel, hasReasoning);
+
+          // Calculate padding
+          const statsLeftWidth = visibleWidth(statsLeft);
+          const rightSideWidth = visibleWidth(rightSide);
+          const minPadding = 2;
+          const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
+
+          let statsLine: string;
+          if (totalNeeded <= width) {
+            const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
+            statsLine = statsLeft + padding + rightSide;
+          } else {
+            const availableForRight = width - statsLeftWidth - minPadding;
+            if (availableForRight > 3) {
+              const truncatedRight = truncateToWidth(rightSide, availableForRight);
+              const truncatedWidth = visibleWidth(truncatedRight);
+              const padding = " ".repeat(width - statsLeftWidth - truncatedWidth);
+              statsLine = statsLeft + padding + truncatedRight;
+            } else {
+              statsLine = statsLeft;
+            }
+          }
+
+          // Apply dim styling
+          const dimStatsLeft = theme.fg("dim", statsLeft);
+          const remainder = statsLine.slice(statsLeft.length);
+          const dimRemainder = theme.fg("dim", remainder.replace(rightSide, "")) + rightSide;
+
+          const lines = [theme.fg("dim", pwd), dimStatsLeft + dimRemainder];
+
+          // Add extension statuses
+          const extensionStatuses = footerData.getExtensionStatuses();
+          if (extensionStatuses.size > 0) {
+            const sortedStatuses = Array.from(extensionStatuses.entries())
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([, text]) => text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim());
+            const statusLine = sortedStatuses.join(" ");
+            lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+          }
+
+          return lines;
+        },
+      };
+    });
+  };
+
+  // Command to toggle model display
+  pi.registerCommand("mu-model", {
+    description: "mu: toggle enhanced model display in footer",
+    handler: async (_args, ctx) => {
+      modelDisplayEnabled = !modelDisplayEnabled;
+
+      if (modelDisplayEnabled) {
+        enableModelDisplayFooter(ctx);
+        ctx.ui.notify("Enhanced model display enabled", "info");
+      } else {
+        ctx.ui.setFooter(undefined);
+        ctx.ui.notify("Default footer restored", "info");
+      }
+    },
+  });
 }
