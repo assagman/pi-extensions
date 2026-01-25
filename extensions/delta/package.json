@@ -1,0 +1,26 @@
+{
+  "name": "delta",
+  "version": "1.0.0",
+  "description": "Phase-gate workflow + phase-boundary compaction: requirements → design → plan → implement ↔ test → review → deliver",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "install": "./install.sh",
+    "uninstall": "./uninstall.sh"
+  },
+  "pi": {
+    "extensions": ["./dist/index.js"]
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "^0.32.15"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5"
+  }
+}

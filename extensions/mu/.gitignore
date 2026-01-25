@@ -1,0 +1,31 @@
+# Build output
+dist/
+
+# Dependencies
+node_modules/
+bun.lock
+package-lock.json
+
+# TypeScript
+*.tsbuildinfo
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Env
+.env*
+!.env.example
+
+# Pi workflow artifacts
+.delta/
+
+# Coverage
+coverage/
+*.lcov
+
+# Logs
+*.log

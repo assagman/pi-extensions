@@ -1,0 +1,25 @@
+{
+  "name": "theta",
+  "version": "1.0.0",
+  "description": "Pi extension for code review using critique",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "install": "./install.sh",
+    "uninstall": "./uninstall.sh"
+  },
+  "pi": {
+    "extensions": ["./dist/index.js"]
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "^0.32.15"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.10",
+    "typescript": "^5"
+  }
+}

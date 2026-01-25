@@ -1,0 +1,25 @@
+{
+  "name": "mu",
+  "version": "1.0.0",
+  "description": "Condenses tool call/result output in Pi transcript while preserving full outputs",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "install": "./install.sh",
+    "uninstall": "./uninstall.sh"
+  },
+  "pi": {
+    "extensions": ["./dist/index.js"]
+  },
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5"
+  }
+}
