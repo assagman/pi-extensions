@@ -71,11 +71,8 @@ const formatModelDisplay = (
 
   // Thinking level (only for reasoning models)
   if (hasReasoning && thinkingLevel && thinkingLevel !== "off") {
-    const color = MODEL_DISPLAY_COLORS.thinking[thinkingLevel];
-    if (color) {
-      const { r, g, b } = color;
-      parts.push(rgb(r, g, b, thinkingLevel));
-    }
+    const { r, g, b } = MODEL_DISPLAY_COLORS.thinking[thinkingLevel]!;
+    parts.push(rgb(r, g, b, thinkingLevel));
   }
 
   return parts.join(":");
@@ -1082,6 +1079,11 @@ export default function (pi: ExtensionAPI) {
     } catch (error) {
       console.error("[mu] Failed to rebuild tool results from session:", error);
     }
+
+    // Enable enhanced model display footer
+    if (modelDisplayEnabled) {
+      enableModelDisplayFooter(ctx);
+    }
   });
 
   // Track tool results as they come in.
@@ -1545,8 +1547,8 @@ export default function (pi: ExtensionAPI) {
   // ---------------------------------------------------------------------------
   // Format: provider:model:thinkingLevel with custom colors
   // - Provider: #17917F (teal)
-  // - Model: #8B9117 (olive)
-  // - Thinking: gradient #176291 (blue) → #915017 (orange)
+  // - Model: #85B06A (green)
+  // - Thinking: gradient #A17E57 (tan) → #F24C38 (bright red)
 
   let modelDisplayEnabled = true;
 
@@ -1560,12 +1562,13 @@ export default function (pi: ExtensionAPI) {
         dispose: unsub,
         invalidate() {},
         render(width: number): string[] {
-          // Compute tokens from session
+          // Compute tokens from session (single pass)
           let totalInput = 0;
           let totalOutput = 0;
           let totalCacheRead = 0;
           let totalCacheWrite = 0;
           let totalCost = 0;
+          let lastAssistant: AssistantMessage | null = null;
 
           for (const e of ctx.sessionManager.getBranch()) {
             if (e.type === "message" && e.message.role === "assistant") {
@@ -1575,17 +1578,9 @@ export default function (pi: ExtensionAPI) {
               totalCacheRead += m.usage.cacheRead;
               totalCacheWrite += m.usage.cacheWrite;
               totalCost += m.usage.cost.total;
+              lastAssistant = m;
             }
           }
-
-          // Get last assistant message for context calculation
-          const assistantMessages: AssistantMessage[] = [];
-          for (const e of ctx.sessionManager.getBranch()) {
-            if (e.type === "message" && e.message.role === "assistant") {
-              assistantMessages.push(e.message as AssistantMessage);
-            }
-          }
-          const lastAssistant = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
 
           const contextTokens = lastAssistant
             ? lastAssistant.usage.input + lastAssistant.usage.output +
@@ -1616,9 +1611,10 @@ export default function (pi: ExtensionAPI) {
           // Truncate path if too long
           if (pwd.length > width) {
             const half = Math.floor(width / 2) - 2;
-            if (half > 0) {
+            if (half > 1) {
               const start = pwd.slice(0, half);
-              const end = pwd.slice(-(half - 1));
+              const endLen = half - 1;
+              const end = pwd.slice(pwd.length - endLen);
               pwd = `${start}...${end}`;
             } else {
               pwd = pwd.slice(0, Math.max(1, width));
@@ -1715,13 +1711,6 @@ export default function (pi: ExtensionAPI) {
       };
     });
   };
-
-  // Auto-enable on session start
-  pi.on("session_start", async (_e, ctx) => {
-    if (modelDisplayEnabled) {
-      enableModelDisplayFooter(ctx);
-    }
-  });
 
   // Command to toggle model display
   pi.registerCommand("mu-model", {
