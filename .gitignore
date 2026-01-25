@@ -140,3 +140,6 @@ vite.config.ts.timestamp-*
 
 # extension artifacts
 **/.delta/
+
+# Bun
+bun.lock

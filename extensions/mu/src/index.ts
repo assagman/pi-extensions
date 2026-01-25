@@ -1,4 +1,9 @@
+import { createHash } from "node:crypto";
 import {
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+  type ToolResultEvent,
   createBashTool,
   createEditTool,
   createFindTool,
@@ -7,24 +12,20 @@ import {
   createReadTool,
   createWriteTool,
   getMarkdownTheme,
-  type ExtensionAPI,
-  type ExtensionCommandContext,
-  type ExtensionContext,
-  type ToolResultEvent,
 } from "@mariozechner/pi-coding-agent";
-import { createHash } from "crypto";
 import {
+  type Component,
+  type KeyId,
   Markdown,
   Text,
   matchesKey,
-  visibleWidth,
   truncateToWidth,
+  visibleWidth,
   wrapTextWithAnsi,
-  type KeyId,
-  type Component,
 } from "@mariozechner/pi-tui";
 
 // Local type definition for Tool - not exported from @mariozechner/pi-coding-agent main index
+// biome-ignore lint/suspicious/noExplicitAny: Tool types require any for compatibility with pi-coding-agent
 type Tool<TParameters = any> = {
   name: string;
   label: string;
@@ -34,23 +35,24 @@ type Tool<TParameters = any> = {
     id: string,
     params: TParameters,
     signal?: AbortSignal,
-    onUpdate?: (event: ToolResultEvent) => void,
+    onUpdate?: (event: ToolResultEvent) => void
   ) => Promise<ToolResultEvent>;
-  renderCall?: (args: TParameters, theme: any) => Component;
-  renderResult?: (result: unknown, options: unknown, theme: any) => Component;
+  renderCall?: (args: TParameters, theme: MuTheme) => Component;
+  renderResult?: (result: unknown, options: unknown, theme: MuTheme) => Component;
 };
 
 // -- Type Definitions --
 interface MuTheme {
-  fg: (color: any, text: string) => string;
-  bg: (color: any, text: string) => string;
+  fg: (color: string, text: string) => string;
+  bg: (color: string, text: string) => string;
 }
 
 interface ThemeWithAnsi extends MuTheme {
-  getFgAnsi?: (color: any) => string;
+  getFgAnsi?: (color: string) => string;
 }
 
 type ToolParams = Record<string, unknown>;
+// biome-ignore lint/suspicious/noExplicitAny: Factory return type varies
 type ToolFactory = (cwd: string) => any;
 
 const MU_CONFIG = {
@@ -75,10 +77,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const splitGraphemes = (value: string): string[] => {
   if (!value) return [];
   if (GRAPHEME_SEGMENTER) {
-    return Array.from(
-      GRAPHEME_SEGMENTER.segment(value),
-      (segment) => segment.segment,
-    );
+    return Array.from(GRAPHEME_SEGMENTER.segment(value), (segment) => segment.segment);
   }
   return Array.from(value);
 };
@@ -88,8 +87,7 @@ const splitGraphemes = (value: string): string[] => {
 function formatReadLoc(offset?: number, limit?: number): string {
   if (offset === undefined && limit === undefined) return "";
   const start = offset ?? 1;
-  const end =
-    limit === undefined ? "end" : start + Math.max(0, Number(limit) - 1);
+  const end = limit === undefined ? "end" : start + Math.max(0, Number(limit) - 1);
   return `@L${start}-${end}`;
 }
 
@@ -239,12 +237,7 @@ export default function (pi: ExtensionAPI) {
       componentRegistry.clear();
     }
 
-    constructor(
-      textGenerator: () => string,
-      toolName: string,
-      args: unknown,
-      theme: MuTheme,
-    ) {
+    constructor(textGenerator: () => string, toolName: string, args: unknown, theme: MuTheme) {
       this.textGenerator = textGenerator;
       this.sig = getSignature(toolName, args);
       this.theme = theme;
@@ -253,7 +246,7 @@ export default function (pi: ExtensionAPI) {
       if (!componentRegistry.has(this.sig)) {
         componentRegistry.set(this.sig, new Set());
       }
-      componentRegistry.get(this.sig)!.add(this);
+      componentRegistry.get(this.sig)?.add(this);
       PulsingToolLine.instances.add(this);
 
       // Start global timer if needed
@@ -335,6 +328,7 @@ export default function (pi: ExtensionAPI) {
             if (i >= line.length) break;
 
             if (line[i] === "\x1b") {
+              // biome-ignore lint/suspicious/noControlCharactersInRegex: Intentional ANSI escape sequence matching
               const match = line.slice(i).match(/^\x1b\[[0-9;]*m/);
               if (match) {
                 currentLine += match[0];
@@ -399,18 +393,15 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Sine wave pulse
-      const pulse =
-        (Math.sin(PulsingToolLine.frame * MU_CONFIG.PULSE_SPEED) + 1) / 2; // 0..1
-      const factor =
-        MU_CONFIG.PULSE_MIN_BRIGHTNESS +
-        (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * pulse;
+      const pulse = (Math.sin(PulsingToolLine.frame * MU_CONFIG.PULSE_SPEED) + 1) / 2; // 0..1
+      const factor = MU_CONFIG.PULSE_MIN_BRIGHTNESS + (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * pulse;
 
       let pulsedColor = "";
       const m = accentAnsi.match(/38;2;(\d+);(\d+);(\d+)/);
-      if (m) {
-        const r = Math.floor(parseInt(m[1]!) * factor);
-        const g = Math.floor(parseInt(m[2]!) * factor);
-        const b = Math.floor(parseInt(m[3]!) * factor);
+      if (m?.[1] && m[2] && m[3]) {
+        const r = Math.floor(Number.parseInt(m[1], 10) * factor);
+        const g = Math.floor(Number.parseInt(m[2], 10) * factor);
+        const b = Math.floor(Number.parseInt(m[3], 10) * factor);
         pulsedColor = `\x1b[38;2;${r};${g};${b}m`;
       } else {
         // Fallback for non-truecolor: blink or dim?
@@ -482,10 +473,7 @@ export default function (pi: ExtensionAPI) {
   const MU_TOOL_RESULT_ENTRY_TYPE = "mu_tool_result_full_v1";
 
   // toolCallId -> full tool result content (text-only). Used to restore full tool output in the LLM context.
-  const fullToolResultContentById = new Map<
-    string,
-    StoredToolResultContent[]
-  >();
+  const fullToolResultContentById = new Map<string, StoredToolResultContent[]>();
 
   // Evict oldest entries from fullToolResultContentById when it exceeds MU_CONFIG.MAX_TOOL_RESULTS
   const evictOldestFromFullResults = (): void => {
@@ -533,7 +521,7 @@ export default function (pi: ExtensionAPI) {
 
   const withMuDetails = (
     details: unknown,
-    meta: Record<string, unknown>,
+    meta: Record<string, unknown>
   ): Record<string, unknown> => {
     if (!details || typeof details !== "object") {
       return { [MU_DETAILS_KEY]: meta };
@@ -554,10 +542,7 @@ export default function (pi: ExtensionAPI) {
     };
   };
 
-  const summarizeToolInput = (
-    toolName: string,
-    input: Record<string, unknown>,
-  ): string => {
+  const summarizeToolInput = (toolName: string, input: Record<string, unknown>): string => {
     switch (toolName) {
       case "bash": {
         const command = typeof input.command === "string" ? input.command : "";
@@ -565,8 +550,7 @@ export default function (pi: ExtensionAPI) {
       }
       case "read": {
         const path = typeof input.path === "string" ? input.path : "";
-        const offset =
-          typeof input.offset === "number" ? input.offset : undefined;
+        const offset = typeof input.offset === "number" ? input.offset : undefined;
         const limit = typeof input.limit === "number" ? input.limit : undefined;
         const loc = formatReadLoc(offset, limit);
         return [path, loc].filter(Boolean).join(" ");
@@ -574,14 +558,12 @@ export default function (pi: ExtensionAPI) {
       case "ls":
         return typeof input.path === "string" ? input.path : "";
       case "grep": {
-        const p =
-          input.pattern !== undefined ? JSON.stringify(input.pattern) : "";
+        const p = input.pattern !== undefined ? JSON.stringify(input.pattern) : "";
         const where = typeof input.path === "string" ? `in ${input.path}` : "";
         return preview(`${p} ${where}`.trim());
       }
       case "find": {
-        const p =
-          input.pattern !== undefined ? JSON.stringify(input.pattern) : "";
+        const p = input.pattern !== undefined ? JSON.stringify(input.pattern) : "";
         const where = typeof input.path === "string" ? `in ${input.path}` : "";
         return preview(`${p} ${where}`.trim());
       }
@@ -596,8 +578,7 @@ export default function (pi: ExtensionAPI) {
         if (c.type === "text") return typeof c.text === "string" ? c.text : "";
         if (c.type === "image") {
           const mt = typeof c.mimeType === "string" ? c.mimeType : "";
-          const len =
-            typeof c.dataLength === "number" ? c.dataLength : undefined;
+          const len = typeof c.dataLength === "number" ? c.dataLength : undefined;
           return `[image ${mt}${len ? ` ${len} chars` : ""}]`;
         }
         return `[${c.type}]`;
@@ -629,10 +610,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Collect toolCallId -> args from assistant messages on the current branch.
-    const toolCallsById = new Map<
-      string,
-      { toolName: string; input: Record<string, unknown> }
-    >();
+    const toolCallsById = new Map<string, { toolName: string; input: Record<string, unknown> }>();
 
     for (const entry of entries) {
       if (!isRecord(entry) || entry.type !== "message") continue;
@@ -645,8 +623,7 @@ export default function (pi: ExtensionAPI) {
       for (const block of content) {
         if (!isRecord(block)) continue;
         if (block.type !== "toolCall") continue;
-        if (typeof block.id !== "string" || typeof block.name !== "string")
-          continue;
+        if (typeof block.id !== "string" || typeof block.name !== "string") continue;
 
         const args = block.arguments;
         toolCallsById.set(block.id, {
@@ -661,10 +638,7 @@ export default function (pi: ExtensionAPI) {
       if (!isRecord(entry)) continue;
 
       // 1) mu persisted full tool results
-      if (
-        entry.type === "custom" &&
-        entry.customType === MU_TOOL_RESULT_ENTRY_TYPE
-      ) {
+      if (entry.type === "custom" && entry.customType === MU_TOOL_RESULT_ENTRY_TYPE) {
         const data = entry.data;
         if (!isRecord(data)) continue;
 
@@ -676,17 +650,11 @@ export default function (pi: ExtensionAPI) {
         const exitCode = data.exitCode;
         const duration = data.duration;
 
-        if (typeof toolCallId !== "string" || typeof toolName !== "string")
-          continue;
+        if (typeof toolCallId !== "string" || typeof toolName !== "string") continue;
 
-        const ts =
-          typeof entry.timestamp === "string"
-            ? Date.parse(entry.timestamp)
-            : Date.now();
+        const ts = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Date.now();
 
-        const storedContent = Array.isArray(content)
-          ? (content as StoredToolResultContent[])
-          : [];
+        const storedContent = Array.isArray(content) ? (content as StoredToolResultContent[]) : [];
 
         recentToolResults.push({
           toolCallId,
@@ -700,10 +668,7 @@ export default function (pi: ExtensionAPI) {
         });
 
         // If the persisted content is text-only, also keep it around for restoring LLM context.
-        if (
-          storedContent.length > 0 &&
-          storedContent.every((c) => c.type === "text")
-        ) {
+        if (storedContent.length > 0 && storedContent.every((c) => c.type === "text")) {
           fullToolResultContentById.set(toolCallId, storedContent);
         }
 
@@ -719,8 +684,7 @@ export default function (pi: ExtensionAPI) {
       const msg = entry.message;
       if (!isRecord(msg) || msg.role !== "toolResult") continue;
 
-      const toolCallId =
-        typeof msg.toolCallId === "string" ? msg.toolCallId : undefined;
+      const toolCallId = typeof msg.toolCallId === "string" ? msg.toolCallId : undefined;
       if (!toolCallId) continue;
       if (fullToolResultIds.has(toolCallId)) continue;
 
@@ -730,10 +694,7 @@ export default function (pi: ExtensionAPI) {
           : (toolCallsById.get(toolCallId)?.toolName ?? "");
       const input = toolCallsById.get(toolCallId)?.input ?? {};
 
-      const ts =
-        typeof entry.timestamp === "string"
-          ? Date.parse(entry.timestamp)
-          : Date.now();
+      const ts = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Date.now();
 
       recentToolResults.push({
         toolCallId,
@@ -769,10 +730,7 @@ export default function (pi: ExtensionAPI) {
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
   };
 
-  const formatArgsFull = (
-    input: Record<string, unknown>,
-    innerWidth: number,
-  ): string[] => {
+  const formatArgsFull = (input: Record<string, unknown>, innerWidth: number): string[] => {
     const entries = Object.entries(input ?? {});
     if (entries.length === 0) return ["  (none)"];
     const lines: string[] = [];
@@ -790,10 +748,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
       // For short values, show inline
-      if (
-        valStr.length <= innerWidth - k.length - 6 &&
-        !valStr.includes("\n")
-      ) {
+      if (valStr.length <= innerWidth - k.length - 6 && !valStr.includes("\n")) {
         lines.push(`  ${k}: ${valStr}`);
       } else {
         // Multi-line: show key on its own line, then indented value
@@ -813,13 +768,13 @@ export default function (pi: ExtensionAPI) {
     private contentLines: string[] = [];
     private cachedWidth = 0;
     private theme: MuTheme;
-    private done: (result: void) => void;
+    private done: (result: undefined) => void;
 
     constructor(
       items: StoredToolResult[],
       startIndex: number,
       theme: MuTheme,
-      done: (result: void) => void,
+      done: (result: undefined) => void
     ) {
       this.items = items;
       this.currentIndex = startIndex;
@@ -841,17 +796,11 @@ export default function (pi: ExtensionAPI) {
       // ── Header ──
       const icon = TOOL_ICON[r.toolName] ?? "⚙";
       const idShort = r.toolCallId.slice(0, 12);
-      const statusIcon = r.isError
-        ? th.fg("error", "✗ error")
-        : th.fg("success", "✓ ok");
-      const exitStr =
-        r.exitCode !== undefined ? th.fg("dim", ` exit=${r.exitCode}`) : "";
+      const statusIcon = r.isError ? th.fg("error", "✗ error") : th.fg("success", "✓ ok");
+      const exitStr = r.exitCode !== undefined ? th.fg("dim", ` exit=${r.exitCode}`) : "";
       const headerLeft = `${th.fg("accent", `${icon} ${r.toolName}`)} ${th.fg("dim", `#${idShort}`)}`;
       const headerRight = `${statusIcon}${exitStr}`;
-      const headerGap = Math.max(
-        1,
-        innerW - visibleWidth(headerLeft) - visibleWidth(headerRight),
-      );
+      const headerGap = Math.max(1, innerW - visibleWidth(headerLeft) - visibleWidth(headerRight));
       lines.push(`${headerLeft}${" ".repeat(headerGap)}${headerRight}`);
 
       // ── Separator ──
@@ -890,14 +839,9 @@ export default function (pi: ExtensionAPI) {
 
       // ── Footer metadata ──
       const durationStr =
-        r.duration !== undefined
-          ? `${th.fg("dim", "⏱")} ${formatDuration(r.duration)}`
-          : "";
+        r.duration !== undefined ? `${th.fg("dim", "⏱")} ${formatDuration(r.duration)}` : "";
       const timeStr = `${th.fg("dim", "⏲")} ${formatTimestamp(r.timestamp)}`;
-      const navStr = th.fg(
-        "dim",
-        `[${this.currentIndex + 1}/${this.items.length}]`,
-      );
+      const navStr = th.fg("dim", `[${this.currentIndex + 1}/${this.items.length}]`);
       const metaParts = [durationStr, timeStr, navStr].filter(Boolean);
       lines.push(metaParts.join(th.fg("dim", "  │  ")));
 
@@ -911,7 +855,7 @@ export default function (pi: ExtensionAPI) {
         // Clamp scroll after rebuild
         this.scrollOffset = Math.min(
           this.scrollOffset,
-          Math.max(0, this.contentLines.length - this.viewportHeight(width)),
+          Math.max(0, this.contentLines.length - this.viewportHeight(width))
         );
       }
 
@@ -924,23 +868,16 @@ export default function (pi: ExtensionAPI) {
       result.push(th.fg("border", `╭─${"─".repeat(innerW)}─╮`));
 
       // Visible content window
-      const visibleLines = this.contentLines.slice(
-        this.scrollOffset,
-        this.scrollOffset + vpHeight,
-      );
+      const visibleLines = this.contentLines.slice(this.scrollOffset, this.scrollOffset + vpHeight);
       for (const line of visibleLines) {
         const padded = this.padLine(line, innerW);
-        result.push(
-          `${th.fg("border", "│")} ${padded} ${th.fg("border", "│")}`,
-        );
+        result.push(`${th.fg("border", "│")} ${padded} ${th.fg("border", "│")}`);
       }
 
       // Fill remaining viewport if content is short
       const remaining = vpHeight - visibleLines.length;
       for (let i = 0; i < remaining; i++) {
-        result.push(
-          `${th.fg("border", "│")} ${" ".repeat(innerW)} ${th.fg("border", "│")}`,
-        );
+        result.push(`${th.fg("border", "│")} ${" ".repeat(innerW)} ${th.fg("border", "│")}`);
       }
 
       // Bottom border
@@ -952,11 +889,11 @@ export default function (pi: ExtensionAPI) {
           ? ""
           : th.fg(
               "dim",
-              ` ${Math.round((this.scrollOffset / Math.max(1, this.contentLines.length - vpHeight)) * 100)}%`,
+              ` ${Math.round((this.scrollOffset / Math.max(1, this.contentLines.length - vpHeight)) * 100)}%`
             );
       const helpLine = th.fg(
         "dim",
-        `↑↓/jk scroll  [/] prev/next  g/G top/bot  esc close${scrollPct}`,
+        `↑↓/jk scroll  [/] prev/next  g/G top/bot  esc close${scrollPct}`
       );
       result.push(truncateToWidth(helpLine, width));
 
@@ -966,8 +903,7 @@ export default function (pi: ExtensionAPI) {
     private viewportHeight(_width: number): number {
       // Reserve: 1 top border + 1 bottom border + 1 help line = 3 chrome lines
       // Use process.stdout for terminal height, fallback 24
-      const termHeight =
-        (typeof process !== "undefined" && process.stdout?.rows) || 24;
+      const termHeight = (typeof process !== "undefined" && process.stdout?.rows) || 24;
       // 90% of terminal height minus chrome
       return Math.max(5, Math.floor(termHeight * 0.85) - 3);
     }
@@ -993,15 +929,9 @@ export default function (pi: ExtensionAPI) {
       } else if (matchesKey(data, "up") || matchesKey(data, "k")) {
         this.scrollOffset = Math.max(this.scrollOffset - 1, 0);
       } else if (matchesKey(data, "pageDown") || matchesKey(data, "ctrl+d")) {
-        this.scrollOffset = Math.min(
-          this.scrollOffset + Math.floor(vpHeight / 2),
-          maxScroll,
-        );
+        this.scrollOffset = Math.min(this.scrollOffset + Math.floor(vpHeight / 2), maxScroll);
       } else if (matchesKey(data, "pageUp") || matchesKey(data, "ctrl+u")) {
-        this.scrollOffset = Math.max(
-          this.scrollOffset - Math.floor(vpHeight / 2),
-          0,
-        );
+        this.scrollOffset = Math.max(this.scrollOffset - Math.floor(vpHeight / 2), 0);
       } else if (matchesKey(data, "g")) {
         this.scrollOffset = 0;
       } else if (matchesKey(data, "shift+g")) {
@@ -1030,9 +960,7 @@ export default function (pi: ExtensionAPI) {
     dispose(): void {}
   }
 
-  const openToolResultViewer = async (
-    ctx: ExtensionContext | ExtensionCommandContext,
-  ) => {
+  const openToolResultViewer = async (ctx: ExtensionContext | ExtensionCommandContext) => {
     if (!ctx.hasUI) return;
 
     if (recentToolResults.length === 0) {
@@ -1048,11 +976,10 @@ export default function (pi: ExtensionAPI) {
       const summary = summarizeToolInput(r.toolName, r.input);
       const exitCodeStr = r.exitCode !== undefined ? ` exit=${r.exitCode}` : "";
       const errorFlag = r.isError ? ` [error${exitCodeStr}]` : "";
-      const durationStr =
-        r.duration !== undefined ? ` ${formatDuration(r.duration)}` : "";
+      const durationStr = r.duration !== undefined ? ` ${formatDuration(r.duration)}` : "";
       const line = preview(
         `${i + 1}. ${icon} ${r.toolName} #${idShort} ${summary}`.trim(),
-        MU_CONFIG.VIEWER_OPTION_MAX_LENGTH,
+        MU_CONFIG.VIEWER_OPTION_MAX_LENGTH
       );
       return `${line}${errorFlag}${durationStr}`;
     });
@@ -1082,7 +1009,7 @@ export default function (pi: ExtensionAPI) {
           width: "92%",
           maxHeight: "92%",
         },
-      },
+      }
     );
   };
 
@@ -1109,20 +1036,16 @@ export default function (pi: ExtensionAPI) {
   // Full outputs are persisted for /mu-tools and restored for the LLM via pi.on("context").
   pi.on("tool_result", (e: ToolResultEvent) => {
     const storedContent = sanitizeToolContent(e.content);
-    const isTextOnly =
-      storedContent.length > 0 && storedContent.every((c) => c.type === "text");
+    const isTextOnly = storedContent.length > 0 && storedContent.every((c) => c.type === "text");
 
-    const isAgentsbox =
-      typeof e.toolName === "string" && e.toolName.startsWith("agentsbox_");
+    const isAgentsbox = typeof e.toolName === "string" && e.toolName.startsWith("agentsbox_");
     const detailsRecord = isRecord(e.details) ? e.details : undefined;
 
     // agentsbox returns failures as successful tool results with details.error + isError: true.
     // The extension wrapper reports e.isError=false in that case, so we treat details.error as error-like.
     const agentsboxErrorLike = isAgentsbox
       ? Boolean(
-          e.isError ||
-          detailsRecord?.isError === true ||
-          typeof detailsRecord?.error === "string",
+          e.isError || detailsRecord?.isError === true || typeof detailsRecord?.error === "string"
         )
       : false;
 
@@ -1130,16 +1053,13 @@ export default function (pi: ExtensionAPI) {
 
     // Extract exitCode from bash tool details
     const exitCode =
-      e.toolName === "bash" &&
-      detailsRecord &&
-      typeof detailsRecord.exitCode === "number"
+      e.toolName === "bash" && detailsRecord && typeof detailsRecord.exitCode === "number"
         ? detailsRecord.exitCode
         : undefined;
 
     // Compute duration from tracked start time
     const callStart = toolCallStartTimes.get(e.toolCallId);
-    const duration =
-      callStart !== undefined ? Date.now() - callStart : undefined;
+    const duration = callStart !== undefined ? Date.now() - callStart : undefined;
     toolCallStartTimes.delete(e.toolCallId);
 
     const stored: StoredToolResult = {
@@ -1156,10 +1076,7 @@ export default function (pi: ExtensionAPI) {
     recentToolResults.push(stored);
 
     if (recentToolResults.length > MU_CONFIG.MAX_TOOL_RESULTS) {
-      recentToolResults.splice(
-        0,
-        recentToolResults.length - MU_CONFIG.MAX_TOOL_RESULTS,
-      );
+      recentToolResults.splice(0, recentToolResults.length - MU_CONFIG.MAX_TOOL_RESULTS);
     }
 
     const isBuiltin = BUILTIN_TOOL_NAMES.has(e.toolName);
@@ -1254,13 +1171,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Restore full tool outputs for the LLM context (while keeping transcript redacted).
+  // biome-ignore lint/suspicious/noExplicitAny: Event type not exported from pi-coding-agent
   pi.on("context" as any, (e: any) => {
     let changed = false;
     const msgs = (e.messages as unknown[]).map((m) => {
       if (!isRecord(m)) return m;
       if (m.role !== "toolResult") return m;
-      const toolCallId =
-        typeof m.toolCallId === "string" ? m.toolCallId : undefined;
+      const toolCallId = typeof m.toolCallId === "string" ? m.toolCallId : undefined;
       if (!toolCallId) return m;
 
       const full = fullToolResultContentById.get(toolCallId);
@@ -1273,7 +1190,8 @@ export default function (pi: ExtensionAPI) {
       };
     });
 
-    return changed ? { messages: msgs } as any : undefined;
+    // biome-ignore lint/suspicious/noExplicitAny: Return type matches pi event handler
+    return changed ? ({ messages: msgs } as any) : undefined;
   });
 
   pi.registerShortcut(MU_TOOL_VIEWER_SHORTCUT, {
@@ -1297,11 +1215,7 @@ export default function (pi: ExtensionAPI) {
   function override(
     name: string,
     factory: ToolFactory,
-    renderCondensed: (
-      args: any,
-      details: any,
-      theme: MuTheme,
-    ) => string,
+    renderCondensed: (args: ToolParams, details: ToolParams, theme: MuTheme) => string
   ) {
     // Create a dummy instance to get metadata and original renderer
     const dummy = factory(process.cwd());
@@ -1311,7 +1225,7 @@ export default function (pi: ExtensionAPI) {
         id: string,
         params: ToolParams,
         signal?: AbortSignal,
-        onUpdate?: (event: ToolResultEvent) => void,
+        onUpdate?: (event: ToolResultEvent) => void
       ) => Promise<ToolResultEvent>;
     };
 
@@ -1326,6 +1240,7 @@ export default function (pi: ExtensionAPI) {
       name,
       label: dummy.label,
       description: dummy.description,
+      // biome-ignore lint/suspicious/noExplicitAny: Type coercion for pi tool registration
       parameters: dummy.parameters as any,
 
       async execute(id, params, _onUpdate, ctx, signal) {
@@ -1346,14 +1261,17 @@ export default function (pi: ExtensionAPI) {
           const errorText =
             content
               .filter((c: unknown) => isRecord(c) && c.type === "text")
-              .map((c: unknown) => (typeof (c as any).text === "string" ? (c as any).text : ""))
+              .map((c: unknown) =>
+                typeof (c as Record<string, unknown>).text === "string"
+                  ? (c as Record<string, unknown>).text
+                  : ""
+              )
               .join("\n") || "Command failed";
 
           // Include exit code in error message so renderResult can parse it back
           const details = isRecord(result.details) ? result.details : undefined;
           const exitCode = details?.exitCode;
-          const exitPrefix =
-            typeof exitCode === "number" ? `[mu_exit_code:${exitCode}] ` : "";
+          const exitPrefix = typeof exitCode === "number" ? `[mu_exit_code:${exitCode}] ` : "";
 
           const err = new Error(`${exitPrefix}${errorText}`);
           if (details && typeof details.stack === "string") {
@@ -1365,7 +1283,7 @@ export default function (pi: ExtensionAPI) {
         return result;
       },
 
-      renderCall(args: any, theme: MuTheme) {
+      renderCall(args: ToolParams, theme: MuTheme) {
         // Create a generator that re-computes text on each render
         // For write/edit, this captures live-updated args (content grows during write)
         const textGenerator = () => renderCondensed(args, {}, theme).trimEnd();
@@ -1378,11 +1296,7 @@ export default function (pi: ExtensionAPI) {
         const content = Array.isArray(result.content) ? result.content : [];
         const details = isRecord(result.details) ? result.details : undefined;
         const extractText = (item: unknown): string =>
-          isRecord(item) &&
-          item.type === "text" &&
-          typeof item.text === "string"
-            ? item.text
-            : "";
+          isRecord(item) && item.type === "text" && typeof item.text === "string" ? item.text : "";
 
         // For bash: extract exit code from details or content
         // Note: Pi's renderResult doesn't pass isError, so we detect errors via:
@@ -1392,18 +1306,15 @@ export default function (pi: ExtensionAPI) {
         let exitCode: number | undefined;
         let isErrorDetected = false;
         if (name === "bash") {
-          exitCode =
-            typeof details?.exitCode === "number"
-              ? details.exitCode
-              : undefined;
+          exitCode = typeof details?.exitCode === "number" ? details.exitCode : undefined;
 
           if (exitCode === undefined) {
             const text = content.map(extractText).join("\n");
 
             // Try mu marker first (most specific - inserted by our execute())
             let match = text.match(/\[mu_exit_code:(\d+)\]/);
-            if (match) {
-              const parsed = parseInt(match[1]!, 10);
+            if (match?.[1]) {
+              const parsed = Number.parseInt(match[1], 10);
               if (!Number.isNaN(parsed)) {
                 exitCode = parsed;
                 isErrorDetected = true;
@@ -1414,8 +1325,8 @@ export default function (pi: ExtensionAPI) {
             // This is specific enough to not match source code
             if (exitCode === undefined) {
               match = text.match(/Command exited with code (\d+)/i);
-              if (match) {
-                const parsed = parseInt(match[1]!, 10);
+              if (match?.[1]) {
+                const parsed = Number.parseInt(match[1], 10);
                 if (!Number.isNaN(parsed)) {
                   exitCode = parsed;
                   isErrorDetected = true;
@@ -1432,7 +1343,7 @@ export default function (pi: ExtensionAPI) {
           const rawText = content.map(extractText).join("\n");
 
           // Clean up bash error output for display
-          let errorMsg = rawText
+          const errorMsg = rawText
             .replace(/\[mu_exit_code:\d+\]\s*/g, "") // Remove mu marker
             .replace(/^\/bin\/(?:ba)?sh:\s*/gm, "") // Remove shell prefix
             .replace(/Command exited with code \d+\s*/gi, "") // Remove duplicate exit line
@@ -1452,7 +1363,7 @@ export default function (pi: ExtensionAPI) {
             rawText.replace(/\[mu_exit_code:\d+\]\s*/g, ""),
             0,
             0,
-            getMarkdownTheme(),
+            getMarkdownTheme()
           );
         }
 
@@ -1473,11 +1384,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Define tools configuration
-  const tools: [
-    string,
-    ToolFactory,
-    (a: any, d: any, t: MuTheme) => string,
-  ][] = [
+  const tools: [string, ToolFactory, (a: ToolParams, d: ToolParams, t: MuTheme) => string][] = [
     [
       "bash",
       createBashTool,
@@ -1490,8 +1397,7 @@ export default function (pi: ExtensionAPI) {
       "read",
       createReadTool,
       (args, _details, t) => {
-        const offset =
-          typeof args.offset === "number" ? args.offset : undefined;
+        const offset = typeof args.offset === "number" ? args.offset : undefined;
         const limit = typeof args.limit === "number" ? args.limit : undefined;
         const info = formatReadLoc(offset, limit);
         const infoColored = info ? t.fg("dim", info) : "";
@@ -1505,27 +1411,15 @@ export default function (pi: ExtensionAPI) {
       (args, details, t) => {
         const pattern = args.pattern !== undefined ? String(args.pattern) : "";
         const where = typeof args.path === "string" ? args.path : ".";
-        const glob =
-          args.glob !== undefined ? `glob: ${JSON.stringify(args.glob)}` : "";
+        const glob = args.glob !== undefined ? `glob: ${JSON.stringify(args.glob)}` : "";
         const ignoreCase = args.ignoreCase === true ? "ignoreCase: true" : "";
         const literal = args.literal === true ? "literal: true" : "";
-        const context =
-          typeof args.context === "number" ? `context: ${args.context}` : "";
-        const limit =
-          typeof args.limit === "number" ? `limit: ${args.limit}` : "";
+        const context = typeof args.context === "number" ? `context: ${args.context}` : "";
+        const limit = typeof args.limit === "number" ? `limit: ${args.limit}` : "";
         const detailsRecord = isRecord(details) ? details : {};
         const matches =
-          typeof detailsRecord.matches === "number"
-            ? `matches: ${detailsRecord.matches}`
-            : "";
-        const parts = [
-          glob,
-          ignoreCase,
-          literal,
-          context,
-          limit,
-          matches,
-        ].filter(Boolean);
+          typeof detailsRecord.matches === "number" ? `matches: ${detailsRecord.matches}` : "";
+        const parts = [glob, ignoreCase, literal, context, limit, matches].filter(Boolean);
         const info = parts.length ? t.fg("dim", `(${parts.join(", ")})`) : "";
         return `${t.fg("accent", "grep")} ${t.fg("text", JSON.stringify(pattern))} ${t.fg("text", where)} ${info}`.trimEnd();
       },
@@ -1536,13 +1430,10 @@ export default function (pi: ExtensionAPI) {
       (args, details, t) => {
         const pattern = args.pattern !== undefined ? String(args.pattern) : "";
         const where = typeof args.path === "string" ? args.path : ".";
-        const limit =
-          typeof args.limit === "number" ? `limit: ${args.limit}` : "";
+        const limit = typeof args.limit === "number" ? `limit: ${args.limit}` : "";
         const detailsRecord = isRecord(details) ? details : {};
         const count =
-          typeof detailsRecord.count === "number"
-            ? `count: ${detailsRecord.count}`
-            : "";
+          typeof detailsRecord.count === "number" ? `count: ${detailsRecord.count}` : "";
         const parts = [limit, count].filter(Boolean);
         const info = parts.length ? t.fg("dim", `(${parts.join(", ")})`) : "";
         return `${t.fg("accent", "find")} ${t.fg("text", JSON.stringify(pattern))} ${t.fg("text", where)} ${info}`.trimEnd();
@@ -1577,8 +1468,7 @@ export default function (pi: ExtensionAPI) {
         const oldLines = oldText ? oldText.split("\n").length : 0;
         const newLines = newText ? newText.split("\n").length : 0;
         const delta = newLines - oldLines;
-        const deltaStr =
-          delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : "±0";
+        const deltaStr = delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : "±0";
         const info =
           oldLines > 0 || newLines > 0
             ? t.fg("dim", `(${oldLines}→${newLines} lines, ${deltaStr})`)
@@ -1589,5 +1479,7 @@ export default function (pi: ExtensionAPI) {
   ];
 
   // Register all tools
-  tools.forEach(([name, factory, render]) => override(name, factory, render));
+  for (const [name, factory, render] of tools) {
+    override(name, factory, render);
+  }
 }
