@@ -1,4 +1,7 @@
 // @ts-nocheck
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { StringEnum } from "@mariozechner/pi-ai";
 /**
  * Delta Extension - Structured gated workflow for pi coding agent
  *
@@ -12,20 +15,29 @@
  * Toggle: Ctrl+Alt+L | Command: /delta [status|cancel]
  */
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
-import { StringEnum } from "@mariozechner/pi-ai";
 import { Text } from "@mariozechner/pi-tui";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { ProgressManager, type Phase, type GateVerdict, type IssueClass } from "./progress.js";
+import { Type } from "@sinclair/typebox";
+
+// Local type definitions to avoid any
+interface ThemeLike {
+  fg(color: string, text: string): string;
+  bold(text: string): string;
+}
+
+interface ToolResult {
+  content?: Array<{ type: string; text?: string }>;
+  isError?: boolean;
+}
+
 import {
   DEFAULT_ARTIFACT_DIR,
   getDefaultArtifactPath,
+  getPhaseEmoji,
   getPhaseGoal,
   getPhaseInstructions,
-  getPhaseEmoji,
   getPhaseLabel,
 } from "./phases.js";
+import { type GateVerdict, type IssueClass, type Phase, ProgressManager } from "./progress.js";
 
 export default function delta(pi: ExtensionAPI) {
   let progress: ProgressManager;
@@ -46,14 +58,20 @@ export default function delta(pi: ExtensionAPI) {
       if (data && data.currentPhase !== "done" && data.currentPhase !== "failed") {
         enabled = true;
         active = true;
-        ctx.ui.notify(`Δ resumed: ${getPhaseLabel(data.currentPhase)} (loop ${data.loopCount})`, "info");
+        ctx.ui.notify(
+          `Δ resumed: ${getPhaseLabel(data.currentPhase)} (loop ${data.loopCount})`,
+          "info"
+        );
       }
     }
 
     // Restore from session entries
     const entries = ctx.sessionManager.getEntries();
     const deltaEntry = entries
-      .filter((e: { type: string; customType?: string }) => e.type === "custom" && e.customType === "delta-state")
+      .filter(
+        (e: { type: string; customType?: string }) =>
+          e.type === "custom" && e.customType === "delta-state"
+      )
       .pop() as { data?: { enabled: boolean } } | undefined;
 
     if (deltaEntry?.data?.enabled && !active) {
@@ -139,7 +157,8 @@ export default function delta(pi: ExtensionAPI) {
         });
 
         // Use the same instruction marker so session_before_compact picks it up
-        const compactInstructions = `[DELTA_PHASE_RESET]\nManual compaction triggered by user. Replace prior conversational context with ONLY phase goal, summaries, and artifact paths.`;
+        const compactInstructions =
+          "[DELTA_PHASE_RESET]\nManual compaction triggered by user. Replace prior conversational context with ONLY phase goal, summaries, and artifact paths.";
 
         ctx.compact({
           customInstructions: compactInstructions,
@@ -160,7 +179,7 @@ export default function delta(pi: ExtensionAPI) {
 
   // --- Phase Steering (inject instructions before each agent turn) ---
 
-  pi.on("before_agent_start", async (event, ctx) => {
+  pi.on("before_agent_start", async (event, _ctx) => {
     if (!enabled || !active) return;
 
     const phase = progress.getPhase();
@@ -193,7 +212,7 @@ ${phaseInstructions}
 `;
 
     return {
-      systemPrompt: event.systemPrompt + "\n" + deltaBlock,
+      systemPrompt: `${event.systemPrompt}\n${deltaBlock}`,
     };
   });
 
@@ -279,9 +298,12 @@ ${phaseInstructions}
     // Keep only our last delta-phase-reset marker message (if present) to remove the entire prior phase conversation.
     const marker = [...event.branchEntries]
       .reverse()
-      .find((e: any) => e?.type === "custom_message" && e?.customType === "delta-phase-reset") as any;
+      .find(
+        (e: { type?: string; customType?: string }) =>
+          e?.type === "custom_message" && e?.customType === "delta-phase-reset"
+      ) as { id?: string } | undefined;
 
-    const firstKeptEntryId = (marker?.id as string | undefined) || event.preparation.firstKeptEntryId;
+    const firstKeptEntryId = marker?.id || event.preparation.firstKeptEntryId;
 
     // Build a minimal phase-oriented summary (NOT a conversation summary).
     const summary = `## Δ Delta Phase Reset\n\n**Current phase:** ${phase}\n**Phase goal:** ${getPhaseGoal(phase)}\n\n${progress.getContextForPhase(phase)}\n\n---\n\nNotes:\n- This summary is intentionally minimal to reduce review bias/context inertia.\n- Read the referenced artifact files for details.`;
@@ -337,7 +359,10 @@ Call this when you have finished your work for the current phase.
       ),
 
       checks: Type.Optional(
-        Type.Object({}, { additionalProperties: Type.Boolean(), description: "Gate checklist booleans" })
+        Type.Object(
+          {},
+          { additionalProperties: Type.Boolean(), description: "Gate checklist booleans" }
+        )
       ),
 
       evidence: Type.Optional(
@@ -348,7 +373,10 @@ Call this when you have finished your work for the current phase.
       ),
 
       artifacts: Type.Optional(
-        Type.Object({}, { additionalProperties: Type.String(), description: "Artifacts inline or as pointers" })
+        Type.Object(
+          {},
+          { additionalProperties: Type.String(), description: "Artifacts inline or as pointers" }
+        )
       ),
     }),
 
@@ -395,12 +423,17 @@ Call this when you have finished your work for the current phase.
         };
       }
 
-      if (isReviewPhase && verdict && verdict !== "approved" && (!params.reasons || params.reasons.length === 0)) {
+      if (
+        isReviewPhase &&
+        verdict &&
+        verdict !== "approved" &&
+        (!params.reasons || params.reasons.length === 0)
+      ) {
         return {
           content: [
             {
               type: "text" as const,
-              text: `Error: reasons[] is required for non-approved verdicts on gate phases.`,
+              text: "Error: reasons[] is required for non-approved verdicts on gate phases.",
             },
           ],
           isError: true,
@@ -410,8 +443,10 @@ Call this when you have finished your work for the current phase.
       // Validate artifact pointer (required for all actionable phases)
       ensureArtifactDir(ctx);
       const expected = getDefaultArtifactPath(currentPhase);
-      const phaseFile = (params.artifacts as any)?.phaseFile as string | undefined;
-      const needsPhaseFile = currentPhase !== "idle" && currentPhase !== "done" && currentPhase !== "failed";
+      const artifacts = params.artifacts as Record<string, string> | undefined;
+      const phaseFile = artifacts?.phaseFile;
+      const needsPhaseFile =
+        currentPhase !== "idle" && currentPhase !== "done" && currentPhase !== "failed";
 
       if (needsPhaseFile) {
         if (!phaseFile || !phaseFile.trim()) {
@@ -432,7 +467,7 @@ Call this when you have finished your work for the current phase.
         // This prevents reusing a previous phase's artifact (e.g. passing requirements.md for design phase).
         // We allow some flexibility (absolute/relative), but the filename should match.
         if (expected && !phaseFile.endsWith(path.basename(expected))) {
-           return {
+          return {
             content: [
               {
                 type: "text" as const,
@@ -461,7 +496,7 @@ Call this when you have finished your work for the current phase.
             // Check for empty files
             const stats = fs.statSync(resolved);
             if (stats.size < 10) {
-               return {
+              return {
                 content: [
                   {
                     type: "text" as const,
@@ -484,9 +519,9 @@ Call this when you have finished your work for the current phase.
         verdict,
         issueClass,
         reasons: params.reasons as string[] | undefined,
-        checks: params.checks as any,
-        evidence: params.evidence as any,
-        artifacts: params.artifacts as any,
+        checks: params.checks as Record<string, boolean> | undefined,
+        evidence: params.evidence as { commands?: string[]; outputs?: string[] } | undefined,
+        artifacts: params.artifacts as Record<string, string> | undefined,
       });
 
       // Determine next phase
@@ -505,13 +540,19 @@ Call this when you have finished your work for the current phase.
         const completedViaDeliver = currentPhase === "deliver";
         const abandoned = isReviewPhase && verdict === "abandoned";
         const blocked = isReviewPhase && verdict === "blocked";
-        const capped = isReviewPhase && verdict === "needs_changes" && (data?.gateRejectionCount ?? 0) >= (data?.maxGateRejections ?? 0);
+        const capped =
+          isReviewPhase &&
+          verdict === "needs_changes" &&
+          (data?.gateRejectionCount ?? 0) >= (data?.maxGateRejections ?? 0);
 
         let text = `✅ Δ workflow completed. ${data?.loopCount ?? 0} loop(s) used.`;
         if (!completedViaDeliver) {
-          if (abandoned) text = `⚠️ Δ workflow ended (abandoned). ${data?.loopCount ?? 0} loop(s) used.`;
-          else if (blocked) text = `✗ Δ workflow ended (blocked). ${data?.loopCount ?? 0} loop(s) used.`;
-          else if (capped) text = `⚠️ Δ workflow ended (gate rejection cap reached). ${data?.loopCount ?? 0} loop(s) used.`;
+          if (abandoned)
+            text = `⚠️ Δ workflow ended (abandoned). ${data?.loopCount ?? 0} loop(s) used.`;
+          else if (blocked)
+            text = `✗ Δ workflow ended (blocked). ${data?.loopCount ?? 0} loop(s) used.`;
+          else if (capped)
+            text = `⚠️ Δ workflow ended (gate rejection cap reached). ${data?.loopCount ?? 0} loop(s) used.`;
         }
 
         return {
@@ -533,7 +574,8 @@ Call this when you have finished your work for the current phase.
 
       if (ctx.hasUI) ctx.ui.notify("Δ will compact context after this phase", "info");
 
-      const forcedToDeliver = currentPhase === "review_impl" && verdict === "needs_changes" && nextPhase === "deliver";
+      const forcedToDeliver =
+        currentPhase === "review_impl" && verdict === "needs_changes" && nextPhase === "deliver";
       const msg = forcedToDeliver
         ? `⚠️ Max rework loops reached. Advancing to: ${getPhaseEmoji(nextPhase)} ${getPhaseLabel(nextPhase).toUpperCase()}\n\nDelta will compact/reset context now. STOP after this. Continue with the new phase only after the next user prompt.`
         : `→ Phase advanced to: ${getPhaseEmoji(nextPhase)} ${getPhaseLabel(nextPhase).toUpperCase()}\n\nDelta will compact/reset context now. STOP after this. Continue with the new phase only after the next user prompt.`;
@@ -541,7 +583,7 @@ Call this when you have finished your work for the current phase.
       return { content: [{ type: "text" as const, text: msg }] };
     },
 
-    renderCall(args: Record<string, unknown>, theme: any) {
+    renderCall(args: Record<string, unknown>, theme: ThemeLike) {
       const summary = ((args.summary as string) || "").slice(0, 60);
       const verdict = args.verdict ? ` [${args.verdict}]` : "";
       let text = theme.fg("toolTitle", theme.bold("delta_advance"));
@@ -554,7 +596,7 @@ Call this when you have finished your work for the current phase.
       return new Text(text, 0, 0);
     },
 
-    renderResult(result: any, _options: { expanded: boolean }, theme: any) {
+    renderResult(result: ToolResult, _options: { expanded: boolean }, theme: ThemeLike) {
       const textContent = result.content?.[0];
       const text = textContent?.type === "text" ? textContent.text : "(no output)";
       const isError = result.isError;
@@ -627,9 +669,12 @@ Call this when you have finished your work for the current phase.
     });
 
     const lines = [pipeline.join("  ")];
-    if (data.loopCount > 0) lines.push(ctx.ui.theme.fg("warning", `⟳ Loop ${data.loopCount}/${data.maxLoops}`));
+    if (data.loopCount > 0)
+      lines.push(ctx.ui.theme.fg("warning", `⟳ Loop ${data.loopCount}/${data.maxLoops}`));
     if (data.gateRejectionCount > 0)
-      lines.push(ctx.ui.theme.fg("warning", `rej ${data.gateRejectionCount}/${data.maxGateRejections}`));
+      lines.push(
+        ctx.ui.theme.fg("warning", `rej ${data.gateRejectionCount}/${data.maxGateRejections}`)
+      );
 
     ctx.ui.setWidget("delta", lines);
   }

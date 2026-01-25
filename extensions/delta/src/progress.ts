@@ -4,8 +4,8 @@
  * Tracks gated workflow phases + artifacts/evidence for resumability.
  */
 import * as fs from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
 
 export type Phase =
   | "idle"
@@ -160,7 +160,8 @@ function bumpGateStats(data: ProgressData, phase: Phase, verdict: GateVerdict | 
 }
 
 // Best-effort migration from Delta v2.0.0 schema (explore→plan→review_plan→implement→test→review_impl)
-function migrateFromV1(raw: any, sessionId: string): ProgressData { 
+// biome-ignore lint/suspicious/noExplicitAny: Legacy migration requires flexible types
+function migrateFromV1(raw: any, sessionId: string): ProgressData {
   const now = nowMs();
   const goal = String(raw?.goal ?? "");
 
@@ -201,7 +202,9 @@ function migrateFromV1(raw: any, sessionId: string): ProgressData {
     designReview: "",
     plan: String(raw?.plan ?? ""),
     planReview: String(raw?.planReview ?? ""),
-    implementationLog: Array.isArray(raw?.implementationLog) ? raw.implementationLog.map(String) : [],
+    implementationLog: Array.isArray(raw?.implementationLog)
+      ? raw.implementationLog.map(String)
+      : [],
     testResults: String(raw?.testResults ?? ""),
     deliveryNotes: "",
 
@@ -321,7 +324,8 @@ export class ProgressManager {
       // Backfill compact summaries from legacy fields if phaseSummaries is empty.
       if (Object.keys(this.data.phaseSummaries).length === 0) {
         if (this.data.requirements) this.data.phaseSummaries.requirements = this.data.requirements;
-        if (this.data.requirementsReview) this.data.phaseSummaries.review_requirements = this.data.requirementsReview;
+        if (this.data.requirementsReview)
+          this.data.phaseSummaries.review_requirements = this.data.requirementsReview;
         if (this.data.design) this.data.phaseSummaries.design = this.data.design;
         if (this.data.designReview) this.data.phaseSummaries.review_design = this.data.designReview;
         if (this.data.plan) this.data.phaseSummaries.plan = this.data.plan;
@@ -456,7 +460,10 @@ export class ProgressManager {
     this.save();
   }
 
-  getNextPhase(currentPhase: Phase, params?: { verdict?: GateVerdict; issueClass?: IssueClass }): Phase {
+  getNextPhase(
+    currentPhase: Phase,
+    params?: { verdict?: GateVerdict; issueClass?: IssueClass }
+  ): Phase {
     if (!this.data) return "idle";
 
     const verdict = params?.verdict;
@@ -519,7 +526,6 @@ export class ProgressManager {
             return "design";
           case "req_gap":
             return "requirements";
-          case "plan_gap":
           default:
             return "plan";
         }
@@ -593,7 +599,7 @@ export class ProgressManager {
         .map((e) => {
           const v = e.verdict ? `${e.verdict}` : "(no verdict)";
           const cls = e.issueClass ? `/${e.issueClass}` : "";
-          const reason = e.reasons && e.reasons[0] ? ` — ${e.reasons[0].slice(0, 160)}` : "";
+          const reason = e.reasons?.[0] ? ` — ${e.reasons[0].slice(0, 160)}` : "";
           return `[Loop ${e.loop}] ${e.phase}: ${v}${cls}${reason}`;
         })
         .join("\n");

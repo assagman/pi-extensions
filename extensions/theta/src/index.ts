@@ -19,7 +19,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (_event, _ctx) => {
     // notification suppressed to avoid noise during dev, can be enabled for debugging
     // ctx.ui.notify("Theta extension loaded", "info");
     // console.log("Theta extension loaded");
