@@ -7,7 +7,7 @@ DIST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dist"
 
 # Build
 echo "Building $EXT_NAME..."
-npm run build
+bun run build
 
 # Verify dist exists
 if [ ! -d "$DIST_DIR" ]; then
@@ -19,4 +19,4 @@ fi
 mkdir -p "$TARGET_DIR"
 ln -sfn "$DIST_DIR" "$TARGET_DIR/$EXT_NAME"
 
-echo "✅ Deployed: $DIST_DIR → $TARGET_DIR/$EXT_NAME"
+echo "✅ Installed: $DIST_DIR → $TARGET_DIR/$EXT_NAME"

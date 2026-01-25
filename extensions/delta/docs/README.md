@@ -11,8 +11,8 @@ Phase-gate workflow extension for Pi coding agent.
 ## Installation
 
 ```bash
-npm install
-npm run deploy
+bun install
+./install.sh
 ```
 
 ## Usage

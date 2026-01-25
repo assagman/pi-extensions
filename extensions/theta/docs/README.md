@@ -14,15 +14,14 @@ Theta is a Pi extension for first-class code review workflows. It integrates wit
 
 Ensure `critique` is installed:
 ```bash
-npm install -g critique
-# or
 bun add -g critique
 ```
 
 Install Theta:
 ```bash
-# In your pi extensions directory or via settings.json
-npm install
+# In your pi extensions directory
+bun install
+./install.sh
 ```
 
 ## Usage
@@ -36,6 +35,6 @@ The agent can use `theta_diff` to see what changed and `theta_review` to perform
 ## Development
 
 ```bash
-npm install
-npm test
+bun install
+bun test
 ```

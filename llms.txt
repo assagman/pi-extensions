@@ -1,0 +1,23 @@
+# pi-extensions
+
+> Monorepo of TypeScript extensions for the Pi coding agent. Extensions enhance Pi with workflow management, output condensation, and code review capabilities.
+
+This repository contains three Pi coding agent extensions built with TypeScript/ESM. Each extension follows a standard structure with src/, docs/, dist/, install.sh, and uninstall.sh.
+
+## Extensions
+
+- [delta](extensions/delta/docs/README.md): Phase-gate workflow extension for structured development (requirements → design → plan → implement ↔ test → review → deliver)
+- [mu](extensions/mu/docs/README.md): Condenses tool call/result output in Pi transcript while preserving full outputs for LLM context
+- [theta](extensions/theta/docs/README.md): Code review extension using critique for visual diff sharing
+
+## Documentation
+
+- [README](README.md): Repository overview and installation instructions
+- [AGENTS](AGENTS.md): Instructions for AI coding agents working on this codebase
+- [delta/ARCHITECTURE](extensions/delta/docs/ARCHITECTURE.md): Delta extension technical architecture
+- [mu/ARCHITECTURE](extensions/mu/docs/ARCHITECTURE.md): Mu extension technical architecture
+- [theta/CHANGELOG](extensions/theta/docs/CHANGELOG.md): Theta extension changelog
+
+## Optional
+
+- [LICENSE](LICENSE): MIT License
