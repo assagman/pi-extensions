@@ -300,8 +300,7 @@ class BoxedToolCard implements Component {
 
     const icon = TOOL_ICONS[this.toolName] ?? "⚙";
     const content = this.textGenerator();
-    const innerW = width - 4;
-    const border = rgb(color, "│");
+    const innerW = width - 2;
 
     let statusStr: string;
     if (status === "running") {
@@ -320,15 +319,7 @@ class BoxedToolCard implements Component {
     // For bash: render multiline with full command, no truncation
     if (this.toolName === "bash") {
       const rawCmd = typeof this.args.command === "string" ? this.args.command : "";
-      const lines = this.renderBashMultiline(
-        rawCmd,
-        icon,
-        color,
-        border,
-        rightPart,
-        rightLen,
-        innerW
-      );
+      const lines = this.renderBashMultiline(rawCmd, icon, color, rightPart, rightLen, innerW);
       this.lastWidth = width;
       this.cachedLines = this.needsLeadingSpace ? ["", ...lines] : lines;
       return this.cachedLines;
@@ -342,7 +333,7 @@ class BoxedToolCard implements Component {
     const leftLen = visibleWidth(leftTrunc);
     const padding = " ".repeat(Math.max(0, innerW - leftLen - rightLen));
 
-    const line = `${border} ${leftTrunc}${padding}${rightPart} ${border}`;
+    const line = `${leftTrunc}${padding}${rightPart}`;
 
     this.lastWidth = width;
     this.cachedLines = this.needsLeadingSpace ? ["", line] : [line];
@@ -353,7 +344,6 @@ class BoxedToolCard implements Component {
     rawCmd: string,
     icon: string,
     color: ColorKey,
-    border: string,
     rightPart: string,
     rightLen: number,
     innerW: number
@@ -373,7 +363,7 @@ class BoxedToolCard implements Component {
       const fallback = `${prefix}${rgb("white", truncateToWidth(rawCmd, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
       const fallbackLen = visibleWidth(fallback);
       const padding = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
-      return [`${border} ${fallback}${padding}${rightPart} ${border}`];
+      return [`${fallback}${padding}${rightPart}`];
     }
 
     // Split command preserving original line breaks, then wrap each segment
@@ -410,21 +400,17 @@ class BoxedToolCard implements Component {
         const lineContent = `${prefix}${rgb("white", line)}`;
         const lineLen = visibleWidth(lineContent);
         const padding = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
-        resultLines.push(`${border} ${lineContent}${padding}${rightPart} ${border}`);
+        resultLines.push(`${lineContent}${padding}${rightPart}`);
       } else {
         // Continuation: indent + command + padding
         const lineContent = `${indent}${rgb("white", line)}`;
-        const lineLen = visibleWidth(lineContent);
-        const padding = " ".repeat(Math.max(0, innerW - lineLen));
-        resultLines.push(`${border} ${lineContent}${padding} ${border}`);
+        resultLines.push(lineContent);
       }
     }
 
     return resultLines.length > 0
       ? resultLines
-      : [
-          `${border} ${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart} ${border}`,
-        ];
+      : [`${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart}`];
   }
 
   invalidate(): void {
@@ -563,17 +549,14 @@ class MuToolsOverlay implements Component {
 
   render(width: number): string[] {
     const lines: string[] = [];
-    const innerW = width - 4;
+    const innerW = width - 2;
 
     const titleText = "μ Tools";
-    const titlePad = Math.max(0, Math.floor((innerW - titleText.length) / 2));
-    const topBorder = `${rgb("teal", "╭")}${rgb("teal", "─".repeat(titlePad))} ${rgb("amber", titleText)} ${rgb("teal", "─".repeat(Math.max(0, innerW - titlePad - titleText.length - 2)))}${rgb("teal", "╮")}`;
-    lines.push(topBorder);
+    const titleLine = `${rgb("amber", titleText)} ${rgb("teal", "─".repeat(Math.max(0, innerW - titleText.length - 1)))}`;
+    lines.push(titleLine);
 
     if (this.options.length === 0) {
-      lines.push(
-        `${rgb("teal", "│")} ${rgb("dim", "No tool results yet").padEnd(innerW)} ${rgb("teal", "│")}`
-      );
+      lines.push(rgb("dim", "No tool results yet"));
     } else {
       const visibleCount = Math.min(10, this.options.length);
       const maxScroll = Math.max(0, this.options.length - visibleCount);
@@ -598,36 +581,33 @@ class MuToolsOverlay implements Component {
         const dur = opt.duration !== undefined ? `${(opt.duration / 1000).toFixed(1)}s` : "";
         const durStr = rgb("dim", dur.padStart(6));
 
-        const label = truncateToWidth(opt.label, innerW - 16);
-        const line = `${rgb("teal", "│")} ${pointer}${statusSym} ${rgb("teal", icon)} ${label}${" ".repeat(Math.max(0, innerW - visibleWidth(label) - 14))}${durStr} ${rgb("teal", "│")}`;
+        const label = truncateToWidth(opt.label, innerW - 14);
+        const line = `${pointer}${statusSym} ${rgb("teal", icon)} ${label}${" ".repeat(Math.max(0, innerW - visibleWidth(label) - 12))}${durStr}`;
         lines.push(line);
       }
     }
 
-    const divider = `${rgb("teal", "├")}${rgb("teal", "─".repeat(innerW))}${rgb("teal", "┤")}`;
+    const divider = rgb("teal", "─".repeat(innerW));
     lines.push(divider);
 
     const selected = this.options[this.selectedIndex];
     if (selected) {
       const args = Object.entries(selected.args).slice(0, 3);
       for (const [k, v] of args) {
-        const val = typeof v === "string" ? preview(v, innerW - k.length - 6) : JSON.stringify(v);
-        const argLine = `${rgb("teal", "│")} ${rgb("dim", k)}: ${rgb("white", val)}`;
-        lines.push(truncateToWidth(argLine, width - 2).padEnd(width - 2) + rgb("teal", "│"));
+        const val = typeof v === "string" ? preview(v, innerW - k.length - 4) : JSON.stringify(v);
+        const argLine = `${rgb("dim", k)}: ${rgb("white", val)}`;
+        lines.push(truncateToWidth(argLine, innerW));
       }
       if (args.length === 0) {
-        lines.push(
-          `${rgb("teal", "│")} ${rgb("dim", "(no args)").padEnd(innerW)} ${rgb("teal", "│")}`
-        );
+        lines.push(rgb("dim", "(no args)"));
       }
     } else {
-      lines.push(`${rgb("teal", "│")} ${" ".repeat(innerW)} ${rgb("teal", "│")}`);
+      lines.push("");
     }
 
-    const bottomBorder = `${rgb("teal", "╰")}${rgb("teal", "─".repeat(innerW))}${rgb("teal", "╯")}`;
-    lines.push(bottomBorder);
+    lines.push(rgb("teal", "─".repeat(innerW)));
 
-    const help = `  ${rgb("dim", "↑↓ navigate   enter expand   esc close")}`;
+    const help = rgb("dim", "↑↓ navigate   enter expand   esc close");
     lines.push(help);
 
     return lines;
@@ -804,7 +784,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       if (!origRender) return;
 
       comp.render = (w: number): string[] => {
-        const origLines: string[] = origRender(w - 4);
+        const origLines: string[] = origRender(w - 2);
 
         // Filter out empty/spacer lines and strip ANSI to get raw text
         const cleanLines: string[] = [];
@@ -820,13 +800,10 @@ const setupUIPatching = (ctx: ExtensionContext) => {
 
         if (cleanLines.length === 0) return [];
 
-        // Heavy left accent in teal, text in teal (bright)
-        const border = rgb("teal", "┃");
-
         // Add blank line before user message for separation
         const result = [""];
         for (const line of cleanLines) {
-          result.push(`${border} ${rgb("teal", line)}`);
+          result.push(rgb("teal", line));
         }
         return result;
       };
@@ -855,11 +832,6 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       const THINKING_STYLE = {
         icon: "󰛨",
         color: "violet" as ColorKey,
-        border: "┊",
-      };
-      const ANSWER_STYLE = {
-        color: "orange" as ColorKey,
-        border: "║",
       };
 
       // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
@@ -875,26 +847,23 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         const isThinking = isThinkingBlock(block);
 
         if (isThinking) {
-          // Thinking blocks: dotted left border with icon
+          // Thinking blocks: icon prefix on first line
           block.render = (w: number): string[] => {
-            const lines: string[] = orig(w - 4);
-            const borderStyled = rgb(THINKING_STYLE.color, THINKING_STYLE.border);
+            const lines: string[] = orig(w - 2);
             const iconStyled = rgb(THINKING_STYLE.color, THINKING_STYLE.icon);
 
             return lines.map((line: string, i: number) => {
               if (i === 0) {
-                return `${borderStyled} ${iconStyled} ${line}`;
+                return `${iconStyled} ${line}`;
               }
-              return `${borderStyled}   ${line}`;
+              return `  ${line}`;
             });
           };
         } else {
-          // Final answer blocks: double-line left border only
+          // Final answer blocks: no border, just content
           block.render = (w: number): string[] => {
-            const lines: string[] = orig(w - 2);
-            const borderStyled = rgb(ANSWER_STYLE.color, ANSWER_STYLE.border);
-
-            return lines.map((line: string) => `${borderStyled} ${line}`);
+            const lines: string[] = orig(w);
+            return lines;
           };
         }
       };
@@ -925,7 +894,6 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       rawCmd: string,
       icon: string,
       color: ColorKey,
-      border: string,
       rightPart: string,
       rightLen: number,
       innerW: number,
@@ -956,7 +924,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         const fallback = `${prefix}${rgb("white", truncateToWidth(rawCmd, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
         const fallbackLen = visibleWidth(fallback);
         const padding = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
-        return [`${border} ${fallback}${padding}${rightPart} ${border}`];
+        return [`${fallback}${padding}${rightPart}`];
       }
 
       const cmdLines = rawCmd.split("\n");
@@ -987,20 +955,16 @@ const setupUIPatching = (ctx: ExtensionContext) => {
           const lineContent = `${prefix}${rgb("white", line)}`;
           const lineLen = visibleWidth(lineContent);
           const padding = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
-          resultLines.push(`${border} ${lineContent}${padding}${rightPart} ${border}`);
+          resultLines.push(`${lineContent}${padding}${rightPart}`);
         } else {
           const lineContent = `${indent}${rgb("white", line)}`;
-          const lineLen = visibleWidth(lineContent);
-          const padding = " ".repeat(Math.max(0, innerW - lineLen));
-          resultLines.push(`${border} ${lineContent}${padding} ${border}`);
+          resultLines.push(lineContent);
         }
       }
 
       return resultLines.length > 0
         ? resultLines
-        : [
-            `${border} ${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart} ${border}`,
-          ];
+        : [`${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart}`];
     };
 
     // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
@@ -1080,8 +1044,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         const dur = completedDurations.get(sig) ?? (status !== "running" ? 0 : elapsed);
         const timerStr = dur >= 1000 ? ` ${(dur / 1000).toFixed(1)}s` : "";
 
-        const innerW = width - 4;
-        const border = rgb(color, "│");
+        const innerW = width - 2;
 
         const statusStr = rgb(color, sym);
         const timerColored = rgb("dim", timerStr);
@@ -1095,7 +1058,6 @@ const setupUIPatching = (ctx: ExtensionContext) => {
             rawCmd,
             icon,
             color,
-            border,
             rightPart,
             rightLen,
             innerW,
@@ -1132,7 +1094,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         const leftLen = visibleWidth(leftTrunc);
 
         const padding = " ".repeat(Math.max(0, innerW - leftLen - rightLen));
-        const line = `${border} ${leftTrunc}${padding}${rightPart} ${border}`;
+        const line = `${leftTrunc}${padding}${rightPart}`;
 
         // Add leading blank line if this tool follows a user message
         if (tool._mu_leading_space) {
