@@ -1,23 +1,16 @@
 # Theta
 
-Theta is a Pi extension for first-class code review workflows. It integrates with `git` for diffing and `critique` for sharing visual reviews.
+Theta is a Pi extension for interactive code review workflows. It provides a 3-column TUI dashboard for reviewing git diffs.
 
 ## Features
 
-- **TUI Dashboard:** Interactive terminal UI for reviewing changes (`/review`).
-- **Agent Tools:**
-  - `theta_diff`: Allows the agent to inspect code changes.
-  - `theta_review`: Allows the agent to generate review analysis (and optional `critique.work` links).
-- **Critique Integration:** Uses `critique` CLI to generate sharable review links when available.
+- **3-Column Layout:** Commits | Files | Diff
+- **Commit History:** Browse commits with dynamic loading (50 per batch)
+- **Uncommitted Changes:** Auto-detected and shown as first entry
+- **Interactive Navigation:** Vim-style panel switching and scrolling
 
 ## Installation
 
-Ensure `critique` is installed:
-```bash
-bun add -g critique
-```
-
-Install Theta:
 ```bash
 # In your pi extensions directory
 bun install
@@ -26,15 +19,47 @@ bun install
 
 ## Usage
 
-### Commands
-- `/theta`: Open the interactive dashboard. Use `j`/`k` to navigate files and `q` to exit.
+### Command
+- `/theta`: Open the interactive dashboard
 
-### Agent
-The agent can use `theta_diff` to see what changed and `theta_review` to perform a full review analysis.
+### Layout
+
+```
+┌──────────────┬──────────────┬────────────────────────────────────────────┐
+│ COMMITS      │ FILES        │ DIFF                                       │
+│ (20%)        │ (20%)        │ (60%)                                      │
+├──────────────┼──────────────┼────────────────────────────────────────────┤
+│▸ Uncommitted │▸ +2 -1 foo.ts│ @@ -1,3 +1,5 @@                            │
+│  abc1234 Fix │  +5 -3 bar.ts│ +import { x } from 'y';                    │
+│  def5678 Add │              │  function main() {                         │
+│  ghi9012 Ref │              │ -  return null;                            │
+│  ...         │              │ +  return 42;                              │
+└──────────────┴──────────────┴────────────────────────────────────────────┘
+```
+
+### Keybindings
+
+| Key | Action |
+|-----|--------|
+| `h` | Switch to left panel |
+| `l` | Switch to right panel |
+| `j` / `↓` | Navigate down / scroll |
+| `k` / `↑` | Navigate up / scroll |
+| `PgUp` / `C-u` | Fast scroll up |
+| `PgDn` / `C-d` | Fast scroll down |
+| `q` / `Esc` | Exit dashboard |
+
+### Panels
+
+| Panel | Behavior |
+|-------|----------|
+| **Commits** | Select commit to view. "Uncommitted" appears when changes exist. Dynamic loading when scrolling near bottom. |
+| **Files** | Select file to view its diff. Shows +additions/-deletions. |
+| **Diff** | Scroll through diff content. Syntax colored (+/-/@@). |
 
 ## Development
 
 ```bash
 bun install
-bun test
+bun run build
 ```
