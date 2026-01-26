@@ -806,32 +806,27 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       comp.render = (w: number): string[] => {
         const origLines: string[] = origRender(w - 4);
 
-        // Filter out empty/spacer lines
+        // Filter out empty/spacer lines and strip ANSI to get raw text
         const cleanLines: string[] = [];
         const ansiEscape = String.raw`\x1b\[[0-9;]*m`;
         const ansiRegex = new RegExp(ansiEscape, "g");
         for (const line of origLines) {
           const stripped = line.replace(ansiRegex, "").trim();
           if (stripped.length > 0) {
-            cleanLines.push(line.replace(/^\s+/, ""));
+            // Keep raw text, we'll apply our own styling
+            cleanLines.push(stripped);
           }
         }
 
         if (cleanLines.length === 0) return [];
 
-        // Minimal user input style: dim chevron, subtle border
-        const chevron = rgb("gray", "›");
-        const border = rgb("dim", "┊");
+        // Heavy left accent in teal, text in teal (bright)
+        const border = rgb("teal", "┃");
 
         // Add blank line before user message for separation
         const result = [""];
-        for (let i = 0; i < cleanLines.length; i++) {
-          const line = cleanLines[i];
-          if (i === 0) {
-            result.push(`${border} ${chevron} ${line}`);
-          } else {
-            result.push(`${border}   ${line}`);
-          }
+        for (const line of cleanLines) {
+          result.push(`${border} ${rgb("teal", line)}`);
         }
         return result;
       };
