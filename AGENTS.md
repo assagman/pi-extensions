@@ -77,12 +77,12 @@ extension/
 ## Adding a New Extension
 
 1. Create directory: `extensions/<name>/`
-2. Initialize: `bun init`
+2. Initialize: `npm init`
 3. Create structure matching convention above
 4. Add dependencies:
    ```bash
-   bun add @mariozechner/pi-coding-agent @mariozechner/pi-tui
-   bun add -D typescript @types/node
+   npm install @mariozechner/pi-coding-agent @mariozechner/pi-tui
+   npm install -D typescript @types/node
    ```
 5. Implement `src/index.ts` exporting Pi extension
 6. Create `install.sh` and `uninstall.sh` (copy from existing)
@@ -93,14 +93,14 @@ extension/
 ```bash
 # Build single extension
 cd extensions/<name>
-bun install
-bun run build
+npm install
+npm run build
 
 # Install (build + symlink)
 ./install.sh
 
 # Clean
-bun run clean
+npm run clean
 ```
 
 ## Key Dependencies
@@ -145,7 +145,7 @@ pi  # Start Pi agent, test extension features
 | Task | Command |
 |------|---------|
 | Add extension | Create dir, copy structure, implement |
-| Build | `bun run build` |
+| Build | `npm run build` |
 | Install | `./install.sh` |
 | Remove | `./uninstall.sh` |
-| Clean | `bun run clean` |
+| Clean | `npm run clean` |

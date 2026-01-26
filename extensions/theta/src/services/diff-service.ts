@@ -1,6 +1,6 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
-import { parsePatchFiles, type FileDiffMetadata, type Hunk } from "@pierre/diffs";
+import { type FileDiffMetadata, type Hunk, parsePatchFiles } from "@pierre/diffs";
 
 const execAsync = promisify(exec);
 
@@ -173,15 +173,11 @@ export class DiffService {
         const showCmd = file
           ? `git show ${sha} --format="" --relative -- ${file}`
           : `git show ${sha} --format="" --relative`;
-        try {
-          const { stdout } = await execAsync(showCmd, {
-            cwd: process.cwd(),
-            maxBuffer: 1024 * 1024 * 10,
-          });
-          raw = stdout;
-        } catch (showError) {
-          throw showError;
-        }
+        const { stdout } = await execAsync(showCmd, {
+          cwd: process.cwd(),
+          maxBuffer: 1024 * 1024 * 10,
+        });
+        raw = stdout;
       } else {
         throw e;
       }

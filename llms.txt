@@ -1,12 +1,12 @@
 # pi-extensions
 
-> Monorepo of TypeScript extensions for the Pi coding agent. Extensions enhance Pi with workflow management, output condensation, and code review capabilities.
+> Monorepo of TypeScript extensions for the Pi coding agent. Extensions enhance Pi with persistent memory, output condensation, and code review capabilities.
 
 This repository contains three Pi coding agent extensions built with TypeScript/ESM. Each extension follows a standard structure with src/, docs/, dist/, install.sh, and uninstall.sh.
 
 ## Extensions
 
-- [delta](extensions/delta/docs/README.md): Phase-gate workflow extension for structured development (requirements → design → plan → implement ↔ test → review → deliver)
+- [delta](extensions/delta/docs/README.md): Persistent memory extension with SQLite-backed storage for tasks, notes, key-value pairs, and episodic events
 - [mu](extensions/mu/docs/README.md): Condenses tool call/result output in Pi transcript while preserving full outputs for LLM context
 - [theta](extensions/theta/docs/README.md): Code review extension using critique for visual diff sharing
 

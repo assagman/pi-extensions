@@ -7,7 +7,7 @@
   },
   "files": {
     "include": ["extensions/**/*.ts", "extensions/**/*.json", "*.json", "*.md"],
-    "ignore": ["**/node_modules/**", "**/dist/**", "**/.delta/**", "bun.lock"]
+    "ignore": ["**/node_modules/**", "**/dist/**", "**/.delta/**", "package-lock.json"]
   },
   "organizeImports": {
     "enabled": true,
