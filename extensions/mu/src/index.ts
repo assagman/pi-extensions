@@ -4,6 +4,8 @@ import {
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
+  type SessionStartEvent,
+  type ToolCallEvent,
   type ToolResultEvent,
   createBashTool,
   createEditTool,
@@ -18,6 +20,7 @@ import {
   type Component,
   type KeyId,
   Markdown,
+  type TUI,
   Text,
   matchesKey,
   truncateToWidth,
@@ -25,77 +28,228 @@ import {
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
 
-// -- Model Display Colors --
-// Provider: Teal (#17917F)
-// Model: Green (#85B06A)
-// Thinking Level: Gradient from Tan (#A17E57) to Bright Red (#F24C38)
-const MODEL_DISPLAY_COLORS = {
-  provider: { r: 23, g: 145, b: 127 },   // #17917F - teal
-  model: { r: 133, g: 176, b: 106 },     // #85B06A - green
-  thinking: {
-    off: null, // hidden
-    minimal: { r: 161, g: 126, b: 87 },  // #A17E57 - tan (lowest)
-    low: { r: 181, g: 114, b: 79 },      // #B5724F
-    medium: { r: 202, g: 101, b: 72 },   // #CA6548
-    high: { r: 222, g: 89, b: 64 },      // #DE5940
-    xhigh: { r: 242, g: 76, b: 56 },     // #F24C38 - bright red (highest)
-  },
+// =============================================================================
+// THEME COLORS (Orange Premium Palette)
+// =============================================================================
+const C = {
+  orange: { r: 255, g: 159, b: 67 },
+  green: { r: 38, g: 222, b: 129 },
+  red: { r: 238, g: 90, b: 82 },
+  yellow: { r: 254, g: 211, b: 48 },
+  dim: { r: 92, g: 92, b: 92 },
+  gray: { r: 140, g: 140, b: 140 },
+  teal: { r: 84, g: 160, b: 160 },
+  amber: { r: 254, g: 202, b: 87 },
+  white: { r: 220, g: 220, b: 220 },
+  violet: { r: 167, g: 139, b: 250 },
+  cyan: { r: 34, g: 211, b: 238 },
 } as const;
 
-type ThinkingLevel = keyof typeof MODEL_DISPLAY_COLORS.thinking;
+type ColorKey = keyof typeof C;
 
-const rgb = (r: number, g: number, b: number, text: string): string =>
-  `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
-
-const formatModelDisplay = (
-  provider: string | undefined,
-  modelId: string | undefined,
-  thinkingLevel: ThinkingLevel | undefined,
-  hasReasoning: boolean
-): string => {
-  const parts: string[] = [];
-
-  // Provider
-  if (provider) {
-    const { r, g, b } = MODEL_DISPLAY_COLORS.provider;
-    parts.push(rgb(r, g, b, provider));
-  }
-
-  // Model
-  if (modelId) {
-    const { r, g, b } = MODEL_DISPLAY_COLORS.model;
-    parts.push(rgb(r, g, b, modelId));
-  } else {
-    parts.push("no-model");
-  }
-
-  // Thinking level (only for reasoning models)
-  if (hasReasoning && thinkingLevel && thinkingLevel !== "off") {
-    const { r, g, b } = MODEL_DISPLAY_COLORS.thinking[thinkingLevel]!;
-    parts.push(rgb(r, g, b, thinkingLevel));
-  }
-
-  return parts.join(":");
+const rgb = (c: ColorKey, text: string): string => {
+  const { r, g, b } = C[c];
+  return `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
 };
 
-// Local type definition for Tool - not exported from @mariozechner/pi-coding-agent main index
-// biome-ignore lint/suspicious/noExplicitAny: Tool types require any for compatibility with pi-coding-agent
-type Tool<TParameters = any> = {
-  name: string;
-  label: string;
-  description: string;
-  parameters: unknown;
-  execute: (
-    id: string,
-    params: TParameters,
-    signal?: AbortSignal,
-    onUpdate?: (event: ToolResultEvent) => void
-  ) => Promise<ToolResultEvent>;
-  renderCall?: (args: TParameters, theme: MuTheme) => Component;
-  renderResult?: (result: unknown, options: unknown, theme: MuTheme) => Component;
+const rgbPulse = (c: ColorKey, text: string, brightness: number): string => {
+  const { r, g, b } = C[c];
+  const f = Math.max(0.3, Math.min(1, brightness));
+  return `\x1b[38;2;${Math.round(r * f)};${Math.round(g * f)};${Math.round(b * f)}m${text}\x1b[0m`;
 };
 
-// -- Type Definitions --
+// =============================================================================
+// STATUS CONFIGURATION
+// =============================================================================
+type ToolStatus = "pending" | "running" | "success" | "failed" | "canceled";
+
+const STATUS: Record<ToolStatus, { sym: string; color: ColorKey }> = {
+  pending: { sym: "◌", color: "dim" },
+  running: { sym: "●", color: "orange" },
+  success: { sym: "", color: "green" },
+  failed: { sym: "", color: "red" },
+  canceled: { sym: "", color: "gray" },
+};
+
+const TOOL_ICONS: Record<string, string> = {
+  bash: "󰆍",
+  read: "󰈙",
+  write: "󰷈",
+  edit: "󰏫",
+  grep: "󰍉",
+  find: "󰍉",
+  ls: "󰉋",
+};
+
+// =============================================================================
+// MU CONFIG
+// =============================================================================
+const MU_CONFIG = {
+  MAX_TOOL_RESULTS: 200,
+  MAX_COMPLETED_DURATIONS: 500,
+  PREVIEW_LENGTH: 140,
+  VIEWER_OPTION_MAX_LENGTH: 200,
+  SIGNATURE_HASH_LENGTH: 16,
+  PULSE_INTERVAL_MS: 50,
+  PULSE_SPEED: 0.2,
+  PULSE_MIN_BRIGHTNESS: 0.4,
+} as const;
+
+const MU_TOOL_VIEWER_SHORTCUT = "ctrl+alt+o";
+
+// =============================================================================
+// BOTTOM-PINNED LAYOUT: render() HOOK (SPACER INJECTION)
+// =============================================================================
+// Hooks into TUI.render() to inject spacer lines at a specific marker position.
+// This ensures the footer is ALWAYS fixed to the bottom regardless of content height.
+
+const SPACER_MARKER = "\x00_MU_SPACER_\x00";
+
+// State for the bottom-pinned layout
+interface BottomPinnedState {
+  installed: boolean;
+  resizeListener: (() => void) | null;
+  origRender: ((width: number) => string[]) | null;
+}
+
+const bottomPinnedState: BottomPinnedState = {
+  installed: false,
+  resizeListener: null,
+  origRender: null,
+};
+
+// Install the render hook on TUI
+const installBottomPinnedHook = (tui: TUI) => {
+  // biome-ignore lint/suspicious/noExplicitAny: Accessing TUI internals
+  const tuiAny = tui as any;
+
+  if (tuiAny._mu_bottomPinnedInstalled) return;
+  tuiAny._mu_bottomPinnedInstalled = true;
+
+  // Listen for terminal resize
+  bottomPinnedState.resizeListener = () => {
+    tui.requestRender?.();
+  };
+  process.stdout.on("resize", bottomPinnedState.resizeListener);
+
+  // Store original render
+  const origRender = tui.render.bind(tui);
+  bottomPinnedState.origRender = origRender;
+
+  // Patch render to inject spacer
+  tui.render = function (width: number): string[] {
+    const lines = origRender(width);
+
+    // Find our marker
+    const markerIndex = lines.indexOf(SPACER_MARKER);
+    if (markerIndex === -1) return lines;
+
+    // If disabled, remove marker (collapse spacer)
+    if (tuiAny._mu_bottomPinnedDisabled) {
+      lines.splice(markerIndex, 1);
+      return lines;
+    }
+
+    // Calculate needed spacer
+    // contentHeight = lines.length - 1 (marker itself)
+    // spacerHeight = terminal.height - contentHeight
+    const contentHeight = lines.length - 1;
+    const spacerHeight = this.terminal.rows - contentHeight;
+
+    if (spacerHeight > 0) {
+      // Replace marker with blank lines
+      const spacerLines = Array(spacerHeight).fill("");
+      lines.splice(markerIndex, 1, ...spacerLines);
+    } else {
+      // Content overflows, collapse spacer
+      lines.splice(markerIndex, 1);
+    }
+
+    return lines;
+  };
+};
+
+// Cleanup function
+const uninstallBottomPinnedHook = (tui: TUI) => {
+  // biome-ignore lint/suspicious/noExplicitAny: Accessing TUI internals
+  const tuiAny = tui as any;
+
+  if (bottomPinnedState.resizeListener) {
+    process.stdout.off("resize", bottomPinnedState.resizeListener);
+    bottomPinnedState.resizeListener = null;
+  }
+
+  // Restore original render if we saved it
+  if (bottomPinnedState.origRender) {
+    tui.render = bottomPinnedState.origRender;
+    bottomPinnedState.origRender = null;
+  }
+
+  tuiAny._mu_bottomPinnedDisabled = true;
+  tuiAny._mu_bottomPinnedInstalled = false;
+};
+
+// =============================================================================
+// UTILITIES
+// =============================================================================
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  v !== null && typeof v === "object" && !Array.isArray(v);
+
+const preview = (text: string, max = 140): string => {
+  const s = (text ?? "").replace(/\s+/g, " ").trim();
+  return s.length <= max ? s : `${s.slice(0, max - 3)}...`;
+};
+
+const formatReadLoc = (offset?: number, limit?: number): string => {
+  if (offset === undefined && limit === undefined) return "";
+  const start = offset ?? 1;
+  const end = limit === undefined ? "end" : start + Math.max(0, Number(limit) - 1);
+  return `@L${start}-${end}`;
+};
+
+const computeSignature = (name: string, args: Record<string, unknown>): string => {
+  const hash = createHash("sha256");
+  hash.update(name);
+  hash.update(JSON.stringify(args));
+  return hash.digest("hex").slice(0, MU_CONFIG.SIGNATURE_HASH_LENGTH);
+};
+
+// =============================================================================
+// TOOL STATE TRACKING
+// =============================================================================
+interface ToolState {
+  toolCallId: string;
+  sig: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  startTime: number;
+  status: ToolStatus;
+  exitCode?: number;
+  duration?: number;
+}
+
+const activeToolsById = new Map<string, ToolState>();
+const toolStatesBySig = new Map<string, ToolState[]>();
+const fullToolResultContentById = new Map<string, unknown>();
+const cardInstanceCountBySig = new Map<string, number>();
+
+const getToolStateByIndex = (sig: string, index: number): ToolState | undefined => {
+  const states = toolStatesBySig.get(sig);
+  return states?.[index];
+};
+
+const getToolState = (sig: string): ToolState | undefined => {
+  const states = toolStatesBySig.get(sig);
+  return states?.[states.length - 1];
+};
+
+// Track if next tool card should have leading space (after user message)
+let nextToolNeedsLeadingSpace = false;
+const _toolLeadingSpaceByToolCallId = new Map<string, boolean>();
+
+// =============================================================================
+// MU THEME INTERFACE
+// =============================================================================
 interface MuTheme {
   fg: (color: string, text: string) => string;
   bg: (color: string, text: string) => string;
@@ -105,980 +259,1114 @@ interface ThemeWithAnsi extends MuTheme {
   getFgAnsi?: (color: string) => string;
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: Tool types require any
+type Tool<T = any> = {
+  name: string;
+  label: string;
+  description: string;
+  parameters: unknown;
+  execute: (
+    id: string,
+    params: T,
+    signal?: AbortSignal,
+    onUpdate?: (e: ToolResultEvent) => void
+  ) => Promise<ToolResultEvent>;
+  renderCall?: (args: T, theme: MuTheme) => Component;
+  renderResult?: (result: unknown, options: unknown, theme: MuTheme) => Component;
+};
+
 type ToolParams = Record<string, unknown>;
 // biome-ignore lint/suspicious/noExplicitAny: Factory return type varies
 type ToolFactory = (cwd: string) => any;
 
-const MU_CONFIG = {
-  MAX_TOOL_RESULTS: 200,
-  MAX_COMPLETED_DURATIONS: 500,
-  PREVIEW_LENGTH: 140,
-  VIEWER_OPTION_MAX_LENGTH: 200,
-  SIGNATURE_HASH_LENGTH: 16,
-  PULSE_INTERVAL_MS: 50,
-  PULSE_SPEED: 0.2,
-  PULSE_MIN_BRIGHTNESS: 0.3,
+// =============================================================================
+// MODEL DISPLAY COLORS
+// =============================================================================
+const MODEL_COLORS = {
+  provider: { r: 23, g: 145, b: 127 },
+  model: { r: 133, g: 176, b: 106 },
+  thinking: {
+    off: null,
+    minimal: { r: 161, g: 126, b: 87 },
+    low: { r: 181, g: 114, b: 79 },
+    medium: { r: 202, g: 101, b: 72 },
+    high: { r: 222, g: 89, b: 64 },
+    xhigh: { r: 242, g: 76, b: 56 },
+  },
 } as const;
+
+type ThinkingLevel = keyof typeof MODEL_COLORS.thinking;
+
+const rgbRaw = (r: number, g: number, b: number, text: string): string =>
+  `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
+
+// Progress bar with green→yellow→red gradient based on percentage
+const progressBar = (percent: number, width = 5): string => {
+  const filled = Math.round((percent / 100) * width);
+  const empty = width - filled;
+
+  // Gradient color: green (0%) → yellow (50%) → red (100%)
+  const getColor = (p: number): { r: number; g: number; b: number } => {
+    if (p <= 50) {
+      // Green to Yellow (0-50%)
+      const t = p / 50;
+      return {
+        r: Math.round(38 + (254 - 38) * t), // green.r → yellow.r
+        g: Math.round(222 + (211 - 222) * t), // green.g → yellow.g
+        b: Math.round(129 + (48 - 129) * t), // green.b → yellow.b
+      };
+    }
+    // Yellow to Red (50-100%)
+    const t = (p - 50) / 50;
+    return {
+      r: Math.round(254 + (238 - 254) * t), // yellow.r → red.r
+      g: Math.round(211 + (90 - 211) * t), // yellow.g → red.g
+      b: Math.round(48 + (82 - 48) * t), // yellow.b → red.b
+    };
+  };
+
+  const color = getColor(percent);
+  const filledStr = "█".repeat(filled);
+  const emptyStr = "░".repeat(empty);
+
+  return rgbRaw(color.r, color.g, color.b, filledStr) + rgb("dim", emptyStr);
+};
+
+const formatModelDisplay = (
+  provider: string | undefined,
+  modelId: string | undefined,
+  thinkingLevel: ThinkingLevel | undefined,
+  hasReasoning: boolean
+): string => {
+  const parts: string[] = [];
+  if (provider) {
+    const { r, g, b } = MODEL_COLORS.provider;
+    parts.push(rgbRaw(r, g, b, provider));
+  }
+  if (modelId) {
+    const { r, g, b } = MODEL_COLORS.model;
+    parts.push(rgbRaw(r, g, b, modelId));
+  } else {
+    parts.push("no-model");
+  }
+  if (hasReasoning && thinkingLevel && thinkingLevel !== "off") {
+    const c = MODEL_COLORS.thinking[thinkingLevel];
+    if (c) parts.push(rgbRaw(c.r, c.g, c.b, thinkingLevel));
+  }
+  return parts.join(":");
+};
+
+// =============================================================================
+// BOXED TOOL CARD COMPONENT
+// =============================================================================
+class BoxedToolCard implements Component {
+  private textGenerator: () => string;
+  private toolName: string;
+  private args: Record<string, unknown>;
+  private theme: MuTheme;
+  private sig: string;
+  private instanceIndex: number;
+  private pulsePhase = 0;
+  private pulseTimer: ReturnType<typeof setInterval> | null = null;
+  private _invalidate?: () => void;
+  private lastWidth = 0;
+  private cachedLines: string[] = [];
+  private needsLeadingSpace: boolean;
+
+  constructor(
+    textGenerator: () => string,
+    toolName: string,
+    args: Record<string, unknown>,
+    theme: MuTheme
+  ) {
+    this.textGenerator = textGenerator;
+    this.toolName = toolName;
+    this.args = args;
+    this.theme = theme;
+    this.sig = computeSignature(toolName, args);
+    this.instanceIndex = cardInstanceCountBySig.get(this.sig) ?? 0;
+    cardInstanceCountBySig.set(this.sig, this.instanceIndex + 1);
+    this.needsLeadingSpace = nextToolNeedsLeadingSpace;
+    nextToolNeedsLeadingSpace = false;
+  }
+
+  private getStatus(): ToolStatus {
+    const state = getToolStateByIndex(this.sig, this.instanceIndex);
+    return state?.status ?? "pending";
+  }
+
+  private getElapsed(): number {
+    const state = getToolStateByIndex(this.sig, this.instanceIndex);
+    if (!state) return 0;
+    if (state.duration !== undefined) return state.duration;
+    return Date.now() - state.startTime;
+  }
+
+  private formatElapsed(): string {
+    const ms = this.getElapsed();
+    if (ms < 1000) return "";
+    const s = ms / 1000;
+    return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m${Math.floor(s % 60)}s`;
+  }
+
+  private startPulse(): void {
+    if (this.pulseTimer) return;
+    this.pulseTimer = setInterval(() => {
+      this.pulsePhase += MU_CONFIG.PULSE_SPEED;
+      this._invalidate?.();
+    }, MU_CONFIG.PULSE_INTERVAL_MS);
+  }
+
+  private stopPulse(): void {
+    if (this.pulseTimer) {
+      clearInterval(this.pulseTimer);
+      this.pulseTimer = null;
+    }
+  }
+
+  render(width: number): string[] {
+    const status = this.getStatus();
+    const { sym, color } = STATUS[status];
+    const elapsed = this.formatElapsed();
+
+    if (status === "running") {
+      this.startPulse();
+    } else {
+      this.stopPulse();
+    }
+
+    const icon = TOOL_ICONS[this.toolName] ?? "⚙";
+    const content = this.textGenerator();
+    const innerW = width - 2;
+
+    let statusStr: string;
+    if (status === "running") {
+      const brightness =
+        MU_CONFIG.PULSE_MIN_BRIGHTNESS +
+        (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * (0.5 + 0.5 * Math.sin(this.pulsePhase));
+      statusStr = rgbPulse(color, sym, brightness);
+    } else {
+      statusStr = rgb(color, sym);
+    }
+
+    const timerStr = elapsed ? rgb("dim", ` ${elapsed}`) : "";
+    const rightPart = `${statusStr}${timerStr}`;
+    const rightLen = visibleWidth(rightPart);
+
+    // For bash: render multiline with full command, no truncation
+    if (this.toolName === "bash") {
+      const rawCmd = typeof this.args.command === "string" ? this.args.command : "";
+      const lines = this.renderBashMultiline(rawCmd, icon, color, rightPart, rightLen, innerW);
+      this.lastWidth = width;
+      this.cachedLines = this.needsLeadingSpace ? ["", ...lines] : lines;
+      return this.cachedLines;
+    }
+
+    // Default: single-line truncated rendering for other tools
+    const leftMax = innerW - rightLen - 1;
+    const iconColored = rgb(color, icon);
+    const leftContent = `${iconColored} ${content}`;
+    const leftTrunc = truncateToWidth(leftContent, leftMax);
+    const leftLen = visibleWidth(leftTrunc);
+    const padding = " ".repeat(Math.max(0, innerW - leftLen - rightLen));
+
+    const line = `${leftTrunc}${padding}${rightPart}`;
+
+    this.lastWidth = width;
+    this.cachedLines = this.needsLeadingSpace ? ["", line] : [line];
+    return this.cachedLines;
+  }
+
+  private renderBashMultiline(
+    rawCmd: string,
+    icon: string,
+    color: ColorKey,
+    rightPart: string,
+    rightLen: number,
+    innerW: number
+  ): string[] {
+    const iconColored = rgb(color, icon);
+    const prefix = `${iconColored} ${rgb(color, "bash")} ${rgb("dim", "$")} `;
+    const prefixLen = visibleWidth(prefix);
+    const indent = " ".repeat(prefixLen);
+
+    // Available width for command text on first line (needs room for status)
+    const firstLineWidth = innerW - prefixLen - rightLen - 1;
+    // Continuation lines have full width minus indent
+    const contLineWidth = innerW - prefixLen;
+
+    if (firstLineWidth <= 0 || contLineWidth <= 0) {
+      // Terminal too narrow, show truncated
+      const fallback = `${prefix}${rgb("white", truncateToWidth(rawCmd, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
+      const fallbackLen = visibleWidth(fallback);
+      const padding = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
+      return [`${fallback}${padding}${rightPart}`];
+    }
+
+    // Split command preserving original line breaks, then wrap each segment
+    const cmdLines = rawCmd.split("\n");
+    const allWrapped: string[] = [];
+
+    for (const cmdLine of cmdLines) {
+      if (allWrapped.length === 0) {
+        // First segment uses first-line width
+        const wrapped = wrapTextWithAnsi(cmdLine, firstLineWidth);
+        if (wrapped.length === 0) {
+          allWrapped.push("");
+        } else {
+          allWrapped.push(wrapped[0]);
+          // Remaining from first segment use continuation width
+          if (wrapped.length > 1) {
+            const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contLineWidth);
+            allWrapped.push(...rewrapped);
+          }
+        }
+      } else {
+        // Subsequent segments use continuation width
+        const wrapped = wrapTextWithAnsi(cmdLine, contLineWidth);
+        allWrapped.push(...(wrapped.length > 0 ? wrapped : [""]));
+      }
+    }
+
+    const resultLines: string[] = [];
+
+    for (let i = 0; i < allWrapped.length; i++) {
+      const line = allWrapped[i];
+      if (i === 0) {
+        // First line: prefix + command + padding + status
+        const lineContent = `${prefix}${rgb("white", line)}`;
+        const lineLen = visibleWidth(lineContent);
+        const padding = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+        resultLines.push(`${lineContent}${padding}${rightPart}`);
+      } else {
+        // Continuation: indent + command + padding
+        const lineContent = `${indent}${rgb("white", line)}`;
+        resultLines.push(lineContent);
+      }
+    }
+
+    return resultLines.length > 0
+      ? resultLines
+      : [`${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart}`];
+  }
+
+  invalidate(): void {
+    this._invalidate?.();
+  }
+
+  setInvalidate(fn: () => void): void {
+    this._invalidate = fn;
+  }
+
+  dispose(): void {
+    this.stopPulse();
+  }
+}
+
+// =============================================================================
+// TOOL RESULT DETAIL VIEWER
+// =============================================================================
+interface ToolResultOption {
+  key: string;
+  toolName: string;
+  sig: string;
+  label: string;
+  args: Record<string, unknown>;
+  result: unknown;
+  startTime: number;
+  duration?: number;
+  isError: boolean;
+}
+
+const toolResultOptions: ToolResultOption[] = [];
 
 const GRAPHEME_SEGMENTER =
   typeof Intl !== "undefined" && "Segmenter" in Intl
     ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
     : null;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-
-const splitGraphemes = (value: string): string[] => {
+const _splitGraphemes = (value: string): string[] => {
   if (!value) return [];
   if (GRAPHEME_SEGMENTER) {
-    return Array.from(GRAPHEME_SEGMENTER.segment(value), (segment) => segment.segment);
+    return Array.from(GRAPHEME_SEGMENTER.segment(value), (s) => s.segment);
   }
   return Array.from(value);
 };
 
-// -- Helper Functions --
+class ToolResultDetailViewer implements Component {
+  private option: ToolResultOption;
+  private scrollOffset = 0;
+  private lines: string[] = [];
+  private theme: ThemeWithAnsi;
 
-function formatReadLoc(offset?: number, limit?: number): string {
-  if (offset === undefined && limit === undefined) return "";
-  const start = offset ?? 1;
-  const end = limit === undefined ? "end" : start + Math.max(0, Number(limit) - 1);
-  return `@L${start}-${end}`;
-}
+  constructor(option: ToolResultOption, theme: ThemeWithAnsi) {
+    this.option = option;
+    this.theme = theme;
+  }
 
-function preview(text: string, max: number = MU_CONFIG.PREVIEW_LENGTH): string {
-  const s = (text ?? "").replace(/\s+/g, " ").trim();
-  if (s.length <= max) return s;
-  return `${s.slice(0, Math.max(0, max - 3))}...`;
-}
+  render(width: number): string[] {
+    const { toolName, args, result, duration, isError } = this.option;
+    const out: string[] = [];
 
-function formatArgsInline(input: Record<string, unknown>): string {
-  const entries = Object.entries(input ?? {});
-  if (entries.length === 0) return "";
+    const header = `${rgb("amber", "─")} ${rgb("amber", toolName)} ${rgb("dim", "─".repeat(Math.max(0, width - toolName.length - 4)))}`;
+    out.push(header);
 
-  const fmtVal = (v: unknown): string => {
-    if (v === null) return "null";
-    if (v === undefined) return "undefined";
-    if (typeof v === "string") return JSON.stringify(preview(v));
-    if (typeof v === "number" || typeof v === "boolean") return String(v);
-    try {
-      return preview(JSON.stringify(v));
-    } catch (error) {
-      console.error("[mu] Failed to serialize value:", error);
-      return "[unserializable]";
+    const argLines = Object.entries(args).map(([k, v]) => {
+      const val = typeof v === "string" ? preview(v, 80) : JSON.stringify(v);
+      return `  ${rgb("teal", k)}: ${rgb("white", val)}`;
+    });
+    out.push(...argLines);
+
+    if (duration !== undefined) {
+      out.push(`  ${rgb("dim", `duration: ${(duration / 1000).toFixed(2)}s`)}`);
     }
-  };
 
-  const parts = entries.map(([k, v]) => `${k}: ${fmtVal(v)}`);
-  return `(${parts.join(", ")})`;
+    out.push("");
+
+    const content = Array.isArray((result as { content?: unknown[] })?.content)
+      ? (result as { content: unknown[] }).content
+      : [];
+    const text = content
+      .filter((c) => isRecord(c) && c.type === "text")
+      .map((c) => (c as { text?: string }).text ?? "")
+      .join("\n");
+
+    const resultColor = isError ? "red" : "green";
+    out.push(rgb(resultColor, isError ? "─ Error ─" : "─ Result ─"));
+
+    const textLines = text.split("\n");
+    for (const line of textLines) {
+      const wrapped = wrapTextWithAnsi(line, width - 2);
+      for (const w of wrapped) {
+        out.push(`  ${w}`);
+      }
+    }
+
+    this.lines = out;
+    return out;
+  }
+
+  handleInput(key: KeyId): boolean {
+    if (matchesKey(key, "down") || matchesKey(key, "j")) {
+      this.scrollOffset = Math.min(this.scrollOffset + 1, Math.max(0, this.lines.length - 10));
+      return true;
+    }
+    if (matchesKey(key, "up") || matchesKey(key, "k")) {
+      this.scrollOffset = Math.max(0, this.scrollOffset - 1);
+      return true;
+    }
+    return false;
+  }
+
+  invalidate(): void {}
 }
 
-export default function (pi: ExtensionAPI) {
-  // ---------------------------------------------------------------------------
-  // Pulsing Tool Line Component (Icon/Name fade-in/out)
-  // ---------------------------------------------------------------------------
+// =============================================================================
+// MU TOOLS OVERLAY (Unified List + Preview)
+// =============================================================================
+class MuToolsOverlay implements Component {
+  private options: ToolResultOption[];
+  private selectedIndex = 0;
+  private theme: ThemeWithAnsi;
+  private onSelect: (opt: ToolResultOption) => void;
+  private onClose: () => void;
+  private scrollOffset = 0;
 
-  // Track active tool calls by "signature" (name + args) to guess which component is active.
-  // Store { count, startTime } for elapsed time display.
-  type ActiveToolInfo = { count: number; startTime: number };
-  const activeToolSignatures = new Map<string, ActiveToolInfo>();
+  constructor(
+    options: ToolResultOption[],
+    theme: ThemeWithAnsi,
+    onSelect: (opt: ToolResultOption) => void,
+    onClose: () => void
+  ) {
+    this.options = options;
+    this.theme = theme;
+    this.onSelect = onSelect;
+    this.onClose = onClose;
+  }
 
-  const getSignature = (name: string, args: unknown): string => {
-    try {
-      const argsStr = JSON.stringify(args ?? {});
-      const hash = createHash("sha256")
-        .update(argsStr)
-        .digest("hex")
-        .slice(0, MU_CONFIG.SIGNATURE_HASH_LENGTH);
-      return `${name}:${hash}`;
-    } catch (error) {
-      console.error("[mu] Failed to create tool signature:", error);
-      return `${name}:[unstringifiable]`;
-    }
-  };
+  render(width: number): string[] {
+    const lines: string[] = [];
+    const innerW = width - 2;
 
-  const formatElapsed = (ms: number): string => {
-    const totalSec = Math.floor(ms / 1000);
-    if (totalSec < 60) return `${totalSec}s`;
-    const min = Math.floor(totalSec / 60);
-    const sec = totalSec % 60;
-    return `${min}m${sec.toString().padStart(2, "0")}s`;
-  };
+    const titleText = "μ Tools";
+    const titleLine = `${rgb("amber", titleText)} ${rgb("teal", "─".repeat(Math.max(0, innerW - titleText.length - 1)))}`;
+    lines.push(titleLine);
 
-  // Store completed tool durations by signature for historical display
-  const completedToolDurations = new Map<string, number>();
-
-  pi.on("tool_call", (e) => {
-    const sig = getSignature(e.toolName, e.input);
-    const existing = activeToolSignatures.get(sig);
-    if (existing) {
-      activeToolSignatures.set(sig, {
-        count: existing.count + 1,
-        startTime: existing.startTime,
-      });
+    if (this.options.length === 0) {
+      lines.push(rgb("dim", "No tool results yet"));
     } else {
-      activeToolSignatures.set(sig, { count: 1, startTime: Date.now() });
-    }
-    // Track start time by toolCallId for duration computation
-    toolCallStartTimes.set(e.toolCallId, Date.now());
-  });
+      const visibleCount = Math.min(10, this.options.length);
+      const maxScroll = Math.max(0, this.options.length - visibleCount);
+      this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
+      if (this.selectedIndex < this.scrollOffset) {
+        this.scrollOffset = this.selectedIndex;
+      } else if (this.selectedIndex >= this.scrollOffset + visibleCount) {
+        this.scrollOffset = this.selectedIndex - visibleCount + 1;
+      }
 
-  pi.on("tool_result", (e) => {
-    const sig = getSignature(e.toolName, e.input);
-    const info = activeToolSignatures.get(sig);
-    if (!info) return;
-    // Store the elapsed time before removing from active
-    const elapsedMs = Date.now() - info.startTime;
-    completedToolDurations.set(sig, elapsedMs);
-    if (completedToolDurations.size > MU_CONFIG.MAX_COMPLETED_DURATIONS) {
-      const firstKey = completedToolDurations.keys().next().value;
-      if (firstKey) {
-        completedToolDurations.delete(firstKey);
+      for (let i = 0; i < visibleCount; i++) {
+        const idx = this.scrollOffset + i;
+        const opt = this.options[idx];
+        if (!opt) continue;
+
+        const isSelected = idx === this.selectedIndex;
+        const pointer = isSelected ? rgb("orange", "▸") : " ";
+        const status = opt.isError ? STATUS.failed : STATUS.success;
+        const statusSym = rgb(status.color, status.sym);
+        const icon = TOOL_ICONS[opt.toolName] ?? "⚙";
+
+        const dur = opt.duration !== undefined ? `${(opt.duration / 1000).toFixed(1)}s` : "";
+        const durStr = rgb("dim", dur.padStart(6));
+
+        const label = truncateToWidth(opt.label, innerW - 14);
+        const line = `${pointer}${statusSym} ${rgb("teal", icon)} ${label}${" ".repeat(Math.max(0, innerW - visibleWidth(label) - 12))}${durStr}`;
+        lines.push(line);
       }
     }
-    if (info.count > 1) {
-      activeToolSignatures.set(sig, {
-        count: info.count - 1,
-        startTime: info.startTime,
-      });
+
+    const divider = rgb("teal", "─".repeat(innerW));
+    lines.push(divider);
+
+    const selected = this.options[this.selectedIndex];
+    if (selected) {
+      const args = Object.entries(selected.args).slice(0, 3);
+      for (const [k, v] of args) {
+        const val = typeof v === "string" ? preview(v, innerW - k.length - 4) : JSON.stringify(v);
+        const argLine = `${rgb("dim", k)}: ${rgb("white", val)}`;
+        lines.push(truncateToWidth(argLine, innerW));
+      }
+      if (args.length === 0) {
+        lines.push(rgb("dim", "(no args)"));
+      }
     } else {
-      activeToolSignatures.delete(sig);
-    }
-  });
-
-  pi.on("session_start", () => {
-    activeToolSignatures.clear();
-    completedToolDurations.clear();
-  });
-
-  // Registry of alive components to determine the "latest" one for a given signature.
-  // We use a Set because it preserves insertion order. The last item is the most recently rendered (likely active).
-  const componentRegistry = new Map<string, Set<PulsingToolLine>>();
-
-  class PulsingToolLine implements Component {
-    private textGenerator: () => string;
-    private sig: string;
-    private theme: MuTheme;
-    private onInvalidate: (() => void) | null = null;
-
-    private static frame = 0;
-    private static timer: ReturnType<typeof setInterval> | null = null;
-    private static instances = new Set<PulsingToolLine>();
-
-    private static stopTimer(): void {
-      if (PulsingToolLine.timer) {
-        clearInterval(PulsingToolLine.timer);
-        PulsingToolLine.timer = null;
-      }
+      lines.push("");
     }
 
-    private static ensureTimer(): void {
-      if (!PulsingToolLine.timer) {
-        PulsingToolLine.timer = setInterval(() => {
-          PulsingToolLine.frame++;
-          // Invalidate all active instances to trigger re-render
-          for (const instance of PulsingToolLine.instances) {
-            if (instance.isActive() && instance.onInvalidate) {
-              instance.onInvalidate();
-            }
-          }
-        }, MU_CONFIG.PULSE_INTERVAL_MS);
-      }
+    lines.push(rgb("teal", "─".repeat(innerW)));
+
+    const help = rgb("dim", "↑↓ navigate   enter expand   esc close");
+    lines.push(help);
+
+    return lines;
+  }
+
+  handleInput(key: KeyId): boolean {
+    if (matchesKey(key, "escape") || matchesKey(key, "q")) {
+      this.onClose();
+      return true;
     }
-
-    static cleanupAll(): void {
-      PulsingToolLine.stopTimer();
-      PulsingToolLine.instances.clear();
-      componentRegistry.clear();
+    if (matchesKey(key, "down") || matchesKey(key, "j")) {
+      this.selectedIndex = Math.min(this.selectedIndex + 1, this.options.length - 1);
+      return true;
     }
-
-    constructor(textGenerator: () => string, toolName: string, args: unknown, theme: MuTheme) {
-      this.textGenerator = textGenerator;
-      this.sig = getSignature(toolName, args);
-      this.theme = theme;
-
-      // Register component
-      if (!componentRegistry.has(this.sig)) {
-        componentRegistry.set(this.sig, new Set());
-      }
-      componentRegistry.get(this.sig)?.add(this);
-      PulsingToolLine.instances.add(this);
-
-      // Start global timer if needed
-      PulsingToolLine.ensureTimer();
+    if (matchesKey(key, "up") || matchesKey(key, "k")) {
+      this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+      return true;
     }
-
-    dispose(): void {
-      PulsingToolLine.instances.delete(this);
-      const set = componentRegistry.get(this.sig);
-      if (set) {
-        set.delete(this);
-        if (set.size === 0) {
-          componentRegistry.delete(this.sig);
-        }
-      }
-
-      if (PulsingToolLine.instances.size === 0) {
-        PulsingToolLine.stopTimer();
-      }
+    if (matchesKey(key, "g")) {
+      this.selectedIndex = 0;
+      this.scrollOffset = 0;
+      return true;
     }
-
-    isActive(): boolean {
-      // Must be in active signatures
-      if (!activeToolSignatures.has(this.sig)) return false;
-
-      // Must be the LAST one in the registry for this signature
-      const set = componentRegistry.get(this.sig);
-      if (!set) return false;
-
-      // Get the last item in the Set
-      let last: PulsingToolLine | undefined;
-      for (const item of set) last = item;
-
-      return last === this;
+    if (matchesKey(key, "shift+g")) {
+      this.selectedIndex = this.options.length - 1;
+      return true;
     }
-
-    getElapsedMs(): number {
-      const info = activeToolSignatures.get(this.sig);
-      if (!info) return 0;
-      return Date.now() - info.startTime;
+    if (matchesKey(key, "enter")) {
+      const opt = this.options[this.selectedIndex];
+      if (opt) this.onSelect(opt);
+      return true;
     }
+    return false;
+  }
 
-    render(width: number): string[] {
-      // Get fresh text from generator (supports live updates for write/edit)
-      const text = this.textGenerator();
+  invalidate(): void {}
+}
 
-      // Wrap text to multiple lines respecting terminal width (ANSI-aware, no ellipsis)
-      const wrapLines = (text: string): string[] => {
-        const result: string[] = [];
-        for (const line of text.split("\n")) {
-          if (visibleWidth(line) <= width) {
-            result.push(line);
-            continue;
-          }
+// =============================================================================
+// OPEN MU TOOLS OVERLAY
+// =============================================================================
+async function openMuToolsOverlay(ctx: ExtensionCommandContext): Promise<void> {
+  if (!ctx.hasUI) return;
 
-          let currentLine = "";
-          let currentWidth = 0;
-          let i = 0;
+  const theme: ThemeWithAnsi = {
+    fg: (color, text) => {
+      const c = C[color as ColorKey];
+      return c ? rgbRaw(c.r, c.g, c.b, text) : text;
+    },
+    bg: (_color, text) => text,
+  };
 
-          while (i < line.length) {
-            const nextAnsiIndex = line.indexOf("\x1b", i);
-            const textEnd = nextAnsiIndex === -1 ? line.length : nextAnsiIndex;
+  const options = [...toolResultOptions].reverse();
 
-            if (textEnd > i) {
-              const chunk = line.slice(i, textEnd);
-              for (const segment of splitGraphemes(chunk)) {
-                const segmentWidth = visibleWidth(segment);
-                if (currentWidth + segmentWidth > width) {
-                  result.push(currentLine);
-                  currentLine = "";
-                  currentWidth = 0;
-                }
-                currentLine += segment;
-                currentWidth += segmentWidth;
-              }
-              i = textEnd;
-            }
+  await new Promise<void>((resolve) => {
+    ctx.ui.custom((_tui, _theme, _kb, done) => {
+      let currentOverlay: Component | null = null;
+      let detailViewer: ToolResultDetailViewer | null = null;
 
-            if (i >= line.length) break;
-
-            if (line[i] === "\x1b") {
-              // biome-ignore lint/suspicious/noControlCharactersInRegex: Intentional ANSI escape sequence matching
-              const match = line.slice(i).match(/^\x1b\[[0-9;]*m/);
-              if (match) {
-                currentLine += match[0];
-                i += match[0].length;
-                continue;
-              }
-            }
-
-            const fallback = line[i] || "";
-            const fallbackWidth = visibleWidth(fallback);
-            if (currentWidth + fallbackWidth > width) {
-              result.push(currentLine);
-              currentLine = "";
-              currentWidth = 0;
-            }
-            currentLine += fallback;
-            currentWidth += fallbackWidth;
-            i++;
-          }
-
-          if (currentLine) result.push(currentLine);
-        }
-        return result;
+      const closeOverlay = () => {
+        done(true);
+        resolve();
       };
 
-      if (!this.isActive()) {
-        // Show completed duration if available
-        const completedMs = completedToolDurations.get(this.sig);
-        if (completedMs !== undefined) {
-          let dimAnsi = "\x1b[2m";
-          const themeExt = this.theme as ThemeWithAnsi;
-          try {
-            if (typeof themeExt.getFgAnsi === "function") {
-              dimAnsi = themeExt.getFgAnsi("dim");
-            }
-          } catch (error) {
-            console.error("[mu] Failed to get dim color:", error);
-          }
-          // Only show timer if >= 1 second
-          if (completedMs >= 1000) {
-            const timerStr = `${dimAnsi}⏱ ${formatElapsed(completedMs)}`;
-            return wrapLines(`${text} ${timerStr}`);
-          }
-          return wrapLines(text);
-        }
-        return wrapLines(text);
-      }
-
-      // Calculate pulsed color
-      let accentAnsi = "";
-      let dimAnsi = "";
-      const themeExt = this.theme as ThemeWithAnsi;
-      try {
-        if (typeof themeExt.getFgAnsi !== "function") {
-          return wrapLines(text);
-        }
-        accentAnsi = themeExt.getFgAnsi("accent");
-        dimAnsi = themeExt.getFgAnsi("dim");
-      } catch (error) {
-        console.error("[mu] Failed to get accent color:", error);
-        return wrapLines(text);
-      }
-
-      // Sine wave pulse
-      const pulse = (Math.sin(PulsingToolLine.frame * MU_CONFIG.PULSE_SPEED) + 1) / 2; // 0..1
-      const factor = MU_CONFIG.PULSE_MIN_BRIGHTNESS + (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * pulse;
-
-      let pulsedColor = "";
-      const m = accentAnsi.match(/38;2;(\d+);(\d+);(\d+)/);
-      if (m?.[1] && m[2] && m[3]) {
-        const r = Math.floor(Number.parseInt(m[1], 10) * factor);
-        const g = Math.floor(Number.parseInt(m[2], 10) * factor);
-        const b = Math.floor(Number.parseInt(m[3], 10) * factor);
-        pulsedColor = `\x1b[38;2;${r};${g};${b}m`;
-      } else {
-        // Fallback for non-truecolor: blink or dim?
-        // Just return text if we can't do smooth pulse
-        return wrapLines(text);
-      }
-
-      // Replace the accent color in the text with the pulsed color
-      // We assume the text starts with the icon/name which uses 'accent'
-      // We'll replace the first occurrence of the accent ANSI sequence.
-      const replaced = text.replace(accentAnsi, pulsedColor);
-
-      // Build elapsed timer suffix (only if >= 1 second)
-      const elapsed = this.getElapsedMs();
-      if (elapsed >= 1000) {
-        const timerStr = `${dimAnsi}⏱ ${formatElapsed(elapsed)}`;
-        return wrapLines(`${replaced} ${timerStr}`);
-      }
-
-      return wrapLines(replaced);
-    }
-
-    invalidate(): void {
-      // No-op to satisfy Component interface
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Per-tool result viewer (works across restarts)
-  // ---------------------------------------------------------------------------
-  // NOTE: Ctrl+O is a built-in, reserved keybinding in pi ("expandTools").
-  // Extensions can't override it. Instead, mu provides a per-tool viewer.
-
-  const MU_TOOL_VIEWER_SHORTCUT: KeyId = "ctrl+alt+o";
-
-  type StoredToolResultContent =
-    | { type: "text"; text?: string }
-    | { type: "image"; mimeType?: string; dataLength?: number }
-    | { type: string; [k: string]: unknown };
-
-  type StoredToolResult = {
-    toolCallId: string;
-    toolName: string;
-    input: Record<string, unknown>;
-    content: StoredToolResultContent[];
-    isError: boolean;
-    timestamp: number;
-    exitCode?: number;
-    duration?: number;
-  };
-
-  const TOOL_ICON: Record<string, string> = {
-    bash: "",
-    read: "",
-    grep: "",
-    find: "",
-    ls: "",
-  };
-
-  const recentToolResults: StoredToolResult[] = [];
-
-  // Track tool_call start times by toolCallId for computing duration
-  const toolCallStartTimes = new Map<string, number>();
-
-  const BUILTIN_TOOL_NAMES = new Set(["read", "bash", "grep", "find", "ls"]);
-
-  // Persist full tool outputs for tools we redact from the normal transcript.
-  // This keeps mu-tools usable across restarts and lets us restore full results for the LLM.
-  const MU_TOOL_RESULT_ENTRY_TYPE = "mu_tool_result_full_v1";
-
-  // toolCallId -> full tool result content (text-only). Used to restore full tool output in the LLM context.
-  const fullToolResultContentById = new Map<string, StoredToolResultContent[]>();
-
-  // Evict oldest entries from fullToolResultContentById when it exceeds MU_CONFIG.MAX_TOOL_RESULTS
-  const evictOldestFromFullResults = (): void => {
-    while (fullToolResultContentById.size > MU_CONFIG.MAX_TOOL_RESULTS) {
-      const firstKey = fullToolResultContentById.keys().next().value;
-      if (firstKey) {
-        fullToolResultContentById.delete(firstKey);
-      } else {
-        break;
-      }
-    }
-  };
-
-  const sanitizeToolContent = (content: unknown): StoredToolResultContent[] => {
-    if (!Array.isArray(content)) return [];
-
-    return content.map((c) => {
-      if (!isRecord(c)) return { type: String(c) };
-
-      const type = typeof c.type === "string" ? c.type : "";
-
-      if (type === "text") {
-        return { type: "text", text: typeof c.text === "string" ? c.text : "" };
-      }
-
-      // Avoid storing base64 image payloads in memory.
-      if (type === "image") {
-        const data = c.data;
-        const dataLength = typeof data === "string" ? data.length : undefined;
-        return {
-          type: "image",
-          mimeType: typeof c.mimeType === "string" ? c.mimeType : undefined,
-          dataLength,
-        };
-      }
-
-      // Unknown content type
-      return { type: type || String(c.type ?? "unknown") };
-    });
-  };
-
-  // Attach lightweight metadata to tool result details so custom renderers can
-  // recover toolCallId even if the toolResult content is redacted.
-  const MU_DETAILS_KEY = "_mu" as const;
-
-  const withMuDetails = (
-    details: unknown,
-    meta: Record<string, unknown>
-  ): Record<string, unknown> => {
-    if (!details || typeof details !== "object") {
-      return { [MU_DETAILS_KEY]: meta };
-    }
-
-    const d = details as Record<string, unknown>;
-    const existing =
-      d[MU_DETAILS_KEY] && typeof d[MU_DETAILS_KEY] === "object"
-        ? (d[MU_DETAILS_KEY] as Record<string, unknown>)
-        : {};
-
-    return {
-      ...d,
-      [MU_DETAILS_KEY]: {
-        ...existing,
-        ...meta,
-      },
-    };
-  };
-
-  const summarizeToolInput = (toolName: string, input: Record<string, unknown>): string => {
-    switch (toolName) {
-      case "bash": {
-        const command = typeof input.command === "string" ? input.command : "";
-        return preview(command);
-      }
-      case "read": {
-        const path = typeof input.path === "string" ? input.path : "";
-        const offset = typeof input.offset === "number" ? input.offset : undefined;
-        const limit = typeof input.limit === "number" ? input.limit : undefined;
-        const loc = formatReadLoc(offset, limit);
-        return [path, loc].filter(Boolean).join(" ");
-      }
-      case "ls":
-        return typeof input.path === "string" ? input.path : "";
-      case "grep": {
-        const p = input.pattern !== undefined ? JSON.stringify(input.pattern) : "";
-        const where = typeof input.path === "string" ? `in ${input.path}` : "";
-        return preview(`${p} ${where}`.trim());
-      }
-      case "find": {
-        const p = input.pattern !== undefined ? JSON.stringify(input.pattern) : "";
-        const where = typeof input.path === "string" ? `in ${input.path}` : "";
-        return preview(`${p} ${where}`.trim());
-      }
-      default:
-        return preview(JSON.stringify(input ?? {}));
-    }
-  };
-
-  const toolContentToText = (content: StoredToolResult["content"]): string => {
-    return content
-      .map((c) => {
-        if (c.type === "text") return typeof c.text === "string" ? c.text : "";
-        if (c.type === "image") {
-          const mt = typeof c.mimeType === "string" ? c.mimeType : "";
-          const len = typeof c.dataLength === "number" ? c.dataLength : undefined;
-          return `[image ${mt}${len ? ` ${len} chars` : ""}]`;
-        }
-        return `[${c.type}]`;
-      })
-      .join("\n");
-  };
-
-  const rebuildRecentToolResultsFromSession = (ctx: ExtensionContext) => {
-    // Reset in-memory list
-    recentToolResults.length = 0;
-
-    const leafId = ctx.sessionManager.getLeafId();
-    const entries: unknown[] = leafId
-      ? (ctx.sessionManager.getBranch(leafId) as unknown[])
-      : (ctx.sessionManager.getEntries() as unknown[]);
-
-    // Prefer mu's persisted full tool results over transcript toolResult messages.
-    const fullToolResultIds = new Set<string>();
-    for (const entry of entries) {
-      if (!isRecord(entry)) continue;
-      if (entry.type !== "custom") continue;
-      if (entry.customType !== MU_TOOL_RESULT_ENTRY_TYPE) continue;
-      const data = entry.data;
-      if (!isRecord(data)) continue;
-      const toolCallId = data.toolCallId;
-      if (typeof toolCallId === "string") {
-        fullToolResultIds.add(toolCallId);
-      }
-    }
-
-    // Collect toolCallId -> args from assistant messages on the current branch.
-    const toolCallsById = new Map<string, { toolName: string; input: Record<string, unknown> }>();
-
-    for (const entry of entries) {
-      if (!isRecord(entry) || entry.type !== "message") continue;
-      const msg = entry.message;
-      if (!isRecord(msg)) continue;
-      if (msg.role !== "assistant") continue;
-      const content = msg.content;
-      if (!Array.isArray(content)) continue;
-
-      for (const block of content) {
-        if (!isRecord(block)) continue;
-        if (block.type !== "toolCall") continue;
-        if (typeof block.id !== "string" || typeof block.name !== "string") continue;
-
-        const args = block.arguments;
-        toolCallsById.set(block.id, {
-          toolName: block.name,
-          input: isRecord(args) ? args : {},
-        });
-      }
-    }
-
-    // Collect tool results (root-first order -> keep last N)
-    for (const entry of entries) {
-      if (!isRecord(entry)) continue;
-
-      // 1) mu persisted full tool results
-      if (entry.type === "custom" && entry.customType === MU_TOOL_RESULT_ENTRY_TYPE) {
-        const data = entry.data;
-        if (!isRecord(data)) continue;
-
-        const toolCallId = data.toolCallId;
-        const toolName = data.toolName;
-        const input = data.input;
-        const content = data.content;
-        const isError = data.isError;
-        const exitCode = data.exitCode;
-        const duration = data.duration;
-
-        if (typeof toolCallId !== "string" || typeof toolName !== "string") continue;
-
-        const ts = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Date.now();
-
-        const storedContent = Array.isArray(content) ? (content as StoredToolResultContent[]) : [];
-
-        recentToolResults.push({
-          toolCallId,
-          toolName,
-          input: isRecord(input) ? input : {},
-          content: storedContent,
-          isError: Boolean(isError),
-          timestamp: Number.isFinite(ts) ? ts : Date.now(),
-          exitCode: typeof exitCode === "number" ? exitCode : undefined,
-          duration: typeof duration === "number" ? duration : undefined,
-        });
-
-        // If the persisted content is text-only, also keep it around for restoring LLM context.
-        if (storedContent.length > 0 && storedContent.every((c) => c.type === "text")) {
-          fullToolResultContentById.set(toolCallId, storedContent);
-        }
-
-        if (recentToolResults.length > MU_CONFIG.MAX_TOOL_RESULTS) {
-          recentToolResults.shift();
-        }
-
-        continue;
-      }
-
-      // 2) transcript toolResult messages (skip if we have a persisted full result)
-      if (entry.type !== "message") continue;
-      const msg = entry.message;
-      if (!isRecord(msg) || msg.role !== "toolResult") continue;
-
-      const toolCallId = typeof msg.toolCallId === "string" ? msg.toolCallId : undefined;
-      if (!toolCallId) continue;
-      if (fullToolResultIds.has(toolCallId)) continue;
-
-      const toolName =
-        typeof msg.toolName === "string"
-          ? msg.toolName
-          : (toolCallsById.get(toolCallId)?.toolName ?? "");
-      const input = toolCallsById.get(toolCallId)?.input ?? {};
-
-      const ts = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Date.now();
-
-      recentToolResults.push({
-        toolCallId,
-        toolName,
-        input,
-        content: sanitizeToolContent(msg.content),
-        isError: Boolean(msg.isError),
-        timestamp: Number.isFinite(ts) ? ts : Date.now(),
-      });
-
-      if (recentToolResults.length > MU_CONFIG.MAX_TOOL_RESULTS) {
-        recentToolResults.shift();
-      }
-    }
-  };
-
-  // -------------------------------------------------------------------------
-  // Tool Result Detail Viewer (scrollable overlay)
-  // -------------------------------------------------------------------------
-
-  const formatDuration = (ms: number): string => {
-    if (ms < 1000) return `${ms}ms`;
-    const sec = ms / 1000;
-    if (sec < 60) return `${sec.toFixed(1)}s`;
-    const min = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${min}m${s.toString().padStart(2, "0")}s`;
-  };
-
-  const formatTimestamp = (ts: number): string => {
-    const d = new Date(ts);
-    const pad2 = (n: number) => n.toString().padStart(2, "0");
-    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
-  };
-
-  const formatArgsFull = (input: Record<string, unknown>, innerWidth: number): string[] => {
-    const entries = Object.entries(input ?? {});
-    if (entries.length === 0) return ["  (none)"];
-    const lines: string[] = [];
-    for (const [k, v] of entries) {
-      let valStr: string;
-      if (typeof v === "string") {
-        valStr = v;
-      } else if (v === null || v === undefined) {
-        valStr = String(v);
-      } else {
-        try {
-          valStr = JSON.stringify(v, null, 2);
-        } catch {
-          valStr = "[unserializable]";
-        }
-      }
-      // For short values, show inline
-      if (valStr.length <= innerWidth - k.length - 6 && !valStr.includes("\n")) {
-        lines.push(`  ${k}: ${valStr}`);
-      } else {
-        // Multi-line: show key on its own line, then indented value
-        lines.push(`  ${k}:`);
-        for (const vl of valStr.split("\n")) {
-          lines.push(`    ${vl}`);
-        }
-      }
-    }
-    return lines;
-  };
-
-  class ToolResultDetailViewer implements Component {
-    private items: StoredToolResult[];
-    private currentIndex: number;
-    private scrollOffset = 0;
-    private contentLines: string[] = [];
-    private cachedWidth = 0;
-    private theme: MuTheme;
-    private done: (result: undefined) => void;
-
-    constructor(
-      items: StoredToolResult[],
-      startIndex: number,
-      theme: MuTheme,
-      done: (result: undefined) => void
-    ) {
-      this.items = items;
-      this.currentIndex = startIndex;
-      this.theme = theme;
-      this.done = done;
-    }
-
-    private buildContent(width: number): void {
-      const th = this.theme;
-      const r = this.items[this.currentIndex];
-      if (!r) {
-        this.contentLines = [];
-        return;
-      }
-
-      const innerW = Math.max(20, width - 4); // 2 border + 2 padding
-      const lines: string[] = [];
-
-      // ── Header ──
-      const icon = TOOL_ICON[r.toolName] ?? "⚙";
-      const idShort = r.toolCallId.slice(0, 12);
-      const statusIcon = r.isError ? th.fg("error", "✗ error") : th.fg("success", "✓ ok");
-      const exitStr = r.exitCode !== undefined ? th.fg("dim", ` exit=${r.exitCode}`) : "";
-      const headerLeft = `${th.fg("accent", `${icon} ${r.toolName}`)} ${th.fg("dim", `#${idShort}`)}`;
-      const headerRight = `${statusIcon}${exitStr}`;
-      const headerGap = Math.max(1, innerW - visibleWidth(headerLeft) - visibleWidth(headerRight));
-      lines.push(`${headerLeft}${" ".repeat(headerGap)}${headerRight}`);
-
-      // ── Separator ──
-      lines.push(th.fg("dim", "─".repeat(innerW)));
-
-      // ── Arguments ──
-      lines.push(th.fg("muted", "Arguments:"));
-      const argLines = formatArgsFull(r.input, innerW);
-      for (const al of argLines) {
-        // Wrap long arg lines
-        const wrapped = wrapTextWithAnsi(al, innerW);
-        lines.push(...wrapped);
-      }
-
-      // ── Separator ──
-      lines.push(th.fg("dim", "─".repeat(innerW)));
-
-      // ── Output ──
-      const outputText = toolContentToText(r.content);
-      const outputRawLines = outputText.split("\n");
-      const lineCountStr = th.fg("dim", `[${outputRawLines.length} lines]`);
-      lines.push(`${th.fg("muted", "Output:")}  ${lineCountStr}`);
-
-      // Wrap each output line to fit
-      for (const ol of outputRawLines) {
-        if (ol === "") {
-          lines.push("");
-        } else {
-          const wrapped = wrapTextWithAnsi(`  ${ol}`, innerW);
-          lines.push(...wrapped);
-        }
-      }
-
-      // ── Separator ──
-      lines.push(th.fg("dim", "─".repeat(innerW)));
-
-      // ── Footer metadata ──
-      const durationStr =
-        r.duration !== undefined ? `${th.fg("dim", "⏱")} ${formatDuration(r.duration)}` : "";
-      const timeStr = `${th.fg("dim", "⏲")} ${formatTimestamp(r.timestamp)}`;
-      const navStr = th.fg("dim", `[${this.currentIndex + 1}/${this.items.length}]`);
-      const metaParts = [durationStr, timeStr, navStr].filter(Boolean);
-      lines.push(metaParts.join(th.fg("dim", "  │  ")));
-
-      this.contentLines = lines;
-    }
-
-    render(width: number): string[] {
-      if (width !== this.cachedWidth) {
-        this.cachedWidth = width;
-        this.buildContent(width);
-        // Clamp scroll after rebuild
-        this.scrollOffset = Math.min(
-          this.scrollOffset,
-          Math.max(0, this.contentLines.length - this.viewportHeight(width))
-        );
-      }
-
-      const th = this.theme;
-      const innerW = Math.max(20, width - 4);
-      const vpHeight = this.viewportHeight(width);
-      const result: string[] = [];
-
-      // Top border
-      result.push(th.fg("border", `╭─${"─".repeat(innerW)}─╮`));
-
-      // Visible content window
-      const visibleLines = this.contentLines.slice(this.scrollOffset, this.scrollOffset + vpHeight);
-      for (const line of visibleLines) {
-        const padded = this.padLine(line, innerW);
-        result.push(`${th.fg("border", "│")} ${padded} ${th.fg("border", "│")}`);
-      }
-
-      // Fill remaining viewport if content is short
-      const remaining = vpHeight - visibleLines.length;
-      for (let i = 0; i < remaining; i++) {
-        result.push(`${th.fg("border", "│")} ${" ".repeat(innerW)} ${th.fg("border", "│")}`);
-      }
-
-      // Bottom border
-      result.push(th.fg("border", `╰─${"─".repeat(innerW)}─╯`));
-
-      // Scroll indicator + help
-      const scrollPct =
-        this.contentLines.length <= vpHeight
-          ? ""
-          : th.fg(
-              "dim",
-              ` ${Math.round((this.scrollOffset / Math.max(1, this.contentLines.length - vpHeight)) * 100)}%`
-            );
-      const helpLine = th.fg(
-        "dim",
-        `↑↓/jk scroll  [/] prev/next  g/G top/bot  esc close${scrollPct}`
-      );
-      result.push(truncateToWidth(helpLine, width));
-
-      return result;
-    }
-
-    private viewportHeight(_width: number): number {
-      // Reserve: 1 top border + 1 bottom border + 1 help line = 3 chrome lines
-      // Use process.stdout for terminal height, fallback 24
-      const termHeight = (typeof process !== "undefined" && process.stdout?.rows) || 24;
-      // 90% of terminal height minus chrome
-      return Math.max(5, Math.floor(termHeight * 0.85) - 3);
-    }
-
-    private padLine(line: string, innerW: number): string {
-      const w = visibleWidth(line);
-      if (w >= innerW) return truncateToWidth(line, innerW);
-      return line + " ".repeat(innerW - w);
-    }
-
-    handleInput(data: string): void {
-      if (matchesKey(data, "escape") || matchesKey(data, "q")) {
-        this.done(undefined);
-        return;
-      }
-
-      const vpHeight = this.viewportHeight(this.cachedWidth);
-      const maxScroll = Math.max(0, this.contentLines.length - vpHeight);
-
-      // Scroll
-      if (matchesKey(data, "down") || matchesKey(data, "j")) {
-        this.scrollOffset = Math.min(this.scrollOffset + 1, maxScroll);
-      } else if (matchesKey(data, "up") || matchesKey(data, "k")) {
-        this.scrollOffset = Math.max(this.scrollOffset - 1, 0);
-      } else if (matchesKey(data, "pageDown") || matchesKey(data, "ctrl+d")) {
-        this.scrollOffset = Math.min(this.scrollOffset + Math.floor(vpHeight / 2), maxScroll);
-      } else if (matchesKey(data, "pageUp") || matchesKey(data, "ctrl+u")) {
-        this.scrollOffset = Math.max(this.scrollOffset - Math.floor(vpHeight / 2), 0);
-      } else if (matchesKey(data, "g")) {
-        this.scrollOffset = 0;
-      } else if (matchesKey(data, "shift+g")) {
-        this.scrollOffset = maxScroll;
-      }
-      // Navigate between results
-      else if (matchesKey(data, "]") || matchesKey(data, "n")) {
-        if (this.currentIndex < this.items.length - 1) {
-          this.currentIndex++;
-          this.scrollOffset = 0;
-          this.cachedWidth = 0; // Force content rebuild on next render
-        }
-      } else if (matchesKey(data, "[") || matchesKey(data, "p")) {
-        if (this.currentIndex > 0) {
-          this.currentIndex--;
-          this.scrollOffset = 0;
-          this.cachedWidth = 0; // Force content rebuild on next render
-        }
-      }
-    }
-
-    invalidate(): void {
-      this.cachedWidth = 0; // Force rebuild on next render
-    }
-
-    dispose(): void {}
-  }
-
-  const openToolResultViewer = async (ctx: ExtensionContext | ExtensionCommandContext) => {
-    if (!ctx.hasUI) return;
-
-    if (recentToolResults.length === 0) {
-      ctx.ui.notify("mu: no tool results yet", "info");
-      return;
-    }
-
-    const items = [...recentToolResults].reverse();
-
-    const options = items.map((r, i) => {
-      const icon = TOOL_ICON[r.toolName] ?? "⚙";
-      const idShort = r.toolCallId.slice(0, 8);
-      const summary = summarizeToolInput(r.toolName, r.input);
-      const exitCodeStr = r.exitCode !== undefined ? ` exit=${r.exitCode}` : "";
-      const errorFlag = r.isError ? ` [error${exitCodeStr}]` : "";
-      const durationStr = r.duration !== undefined ? ` ${formatDuration(r.duration)}` : "";
-      const line = preview(
-        `${i + 1}. ${icon} ${r.toolName} #${idShort} ${summary}`.trim(),
-        MU_CONFIG.VIEWER_OPTION_MAX_LENGTH
-      );
-      return `${line}${errorFlag}${durationStr}`;
-    });
-
-    const selected = await ctx.ui.select("Tool results (mu)", options);
-    if (!selected) return;
-
-    const index = options.indexOf(selected);
-    if (index < 0 || index >= items.length) return;
-
-    await ctx.ui.custom<void>(
-      (tui, theme, _keybindings, done) => {
-        const viewer = new ToolResultDetailViewer(items, index, theme, done);
-        return {
-          render: (w: number) => viewer.render(w),
-          invalidate: () => viewer.invalidate(),
-          handleInput: (data: string) => {
-            viewer.handleInput(data);
-            tui.requestRender();
-          },
-          dispose: () => viewer.dispose(),
-        };
-      },
-      {
-        overlay: true,
-        overlayOptions: {
-          width: "92%",
-          maxHeight: "92%",
+      const openDetail = (opt: ToolResultOption) => {
+        detailViewer = new ToolResultDetailViewer(opt, theme);
+      };
+
+      currentOverlay = new MuToolsOverlay(options, theme, openDetail, closeOverlay);
+
+      return {
+        render(width: number): string[] {
+          if (detailViewer) return detailViewer.render(width);
+          return currentOverlay?.render(width) ?? [];
         },
+        handleInput(key: KeyId): boolean {
+          if (detailViewer) {
+            if (matchesKey(key, "escape") || matchesKey(key, "q")) {
+              detailViewer = null;
+              return true;
+            }
+            return detailViewer.handleInput(key);
+          }
+          // biome-ignore lint/suspicious/noExplicitAny: Component interface
+          return (currentOverlay as any)?.handleInput?.(key) ?? false;
+        },
+        invalidate(): void {},
+        dispose(): void {},
+      };
+    });
+  });
+}
+
+// =============================================================================
+// UI MONKEY-PATCHING
+// =============================================================================
+const setupUIPatching = (ctx: ExtensionContext) => {
+  if (!ctx.hasUI) return;
+
+  ctx.ui.custom((tui, _theme, _kb, done) => {
+    const isAssistant = (c: unknown): boolean => {
+      const x = c as {
+        constructor?: { name?: string };
+        updateContent?: unknown;
+        setHideThinkingBlock?: unknown;
+      };
+      return (
+        x.constructor?.name === "AssistantMessageComponent" ||
+        (typeof x.updateContent === "function" && typeof x.setHideThinkingBlock === "function")
+      );
+    };
+
+    const isTool = (c: unknown): boolean => {
+      const x = c as {
+        constructor?: { name?: string };
+        updateResult?: unknown;
+        updateArgs?: unknown;
+      };
+      return (
+        x.constructor?.name === "ToolExecutionComponent" ||
+        (typeof x.updateResult === "function" && typeof x.updateArgs === "function")
+      );
+    };
+
+    const isUser = (c: unknown): boolean => {
+      const x = c as { constructor?: { name?: string } };
+      return x.constructor?.name === "UserMessageComponent";
+    };
+
+    // Remove all backgrounds from a component and its children recursively
+    // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
+    const stripBackgrounds = (comp: any) => {
+      if (!comp) return;
+
+      // Remove background functions
+      if (typeof comp.setBgFn === "function") comp.setBgFn((s: string) => s);
+      if (typeof comp.setCustomBgFn === "function") comp.setCustomBgFn((s: string) => s);
+      if (comp.bgColor) comp.bgColor = (s: string) => s;
+      if (comp.options?.bgColor) comp.options.bgColor = (s: string) => s;
+
+      // Remove padding
+      if (typeof comp.paddingX === "number") comp.paddingX = 0;
+      if (typeof comp.paddingY === "number") comp.paddingY = 0;
+
+      // Recursively process children
+      if (Array.isArray(comp.children)) {
+        for (const child of comp.children) {
+          stripBackgrounds(child);
+        }
       }
-    );
-  };
+    };
 
-  // Rebuild viewer state from current branch history on session load.
-  pi.on("session_start", async (_e, ctx) => {
-    activeToolSignatures.clear();
-    PulsingToolLine.cleanupAll();
-    fullToolResultContentById.clear();
-    toolCallStartTimes.clear();
+    // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
+    const patchUser = (comp: any) => {
+      if (comp._mu_patched) return;
+      comp._mu_patched = true;
 
-    try {
-      rebuildRecentToolResultsFromSession(ctx);
-    } catch (error) {
-      console.error("[mu] Failed to rebuild tool results from session:", error);
+      // Strip all backgrounds recursively
+      stripBackgrounds(comp);
+
+      // Patch the Markdown children to remove styling
+      for (const child of comp.children ?? []) {
+        if (child.constructor?.name === "Markdown") {
+          if (child.options) {
+            child.options.bgColor = (s: string) => s;
+            child.options.color = (s: string) => s;
+          }
+          child.paddingX = 0;
+          child.paddingY = 0;
+        }
+      }
+
+      // Find the Markdown child and extract its text for proper rendering
+      let markdownText = "";
+      for (const child of comp.children ?? []) {
+        if (child.constructor?.name === "Markdown" && child.text) {
+          markdownText = child.text;
+          break;
+        }
+      }
+
+      // Override render to use Markdown component with teal default text color
+      comp.render = (w: number): string[] => {
+        if (!markdownText) return [];
+
+        const mdTheme = getMarkdownTheme();
+        const defaultTextStyle = { color: (s: string) => rgb("teal", s) };
+        const md = new Markdown(markdownText, 0, 0, mdTheme, defaultTextStyle);
+        const lines = md.render(w);
+
+        // Add blank line before user message for separation
+        return ["", ...lines];
+      };
+    };
+
+    // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
+    const patchAssistant = (comp: any) => {
+      if (comp._mu_patched) return;
+      comp._mu_patched = true;
+
+      stripBackgrounds(comp);
+
+      const container = comp.children?.[0];
+      if (!container) return;
+
+      // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
+      const isThinkingBlock = (block: any): boolean => {
+        return (
+          block.defaultTextStyle?.italic === true ||
+          block.options?.italic === true ||
+          block.italic === true
+        );
+      };
+
+      // Block styles
+      const THINKING_STYLE = {
+        icon: "󰛨",
+        color: "violet" as ColorKey,
+      };
+
+      // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
+      const wrapBlock = (block: any) => {
+        if (block._mu_wrapped) return;
+        block._mu_wrapped = true;
+
+        stripBackgrounds(block);
+
+        const orig = block.render?.bind(block);
+        if (!orig) return;
+
+        const isThinking = isThinkingBlock(block);
+
+        if (isThinking) {
+          // Thinking blocks: icon prefix on first line
+          block.render = (w: number): string[] => {
+            const lines: string[] = orig(w - 2);
+            const iconStyled = rgb(THINKING_STYLE.color, THINKING_STYLE.icon);
+
+            return lines.map((line: string, i: number) => {
+              if (i === 0) {
+                return `${iconStyled} ${line}`;
+              }
+              return `  ${line}`;
+            });
+          };
+        } else {
+          // Final answer blocks: no border, just content
+          block.render = (w: number): string[] => {
+            const lines: string[] = orig(w);
+            return lines;
+          };
+        }
+      };
+
+      for (const child of container.children ?? []) {
+        const name = child.constructor?.name;
+        if (name === "Markdown" || name === "Text") {
+          wrapBlock(child);
+        }
+      }
+
+      const origAdd = container.addChild?.bind(container);
+      if (origAdd) {
+        // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
+        container.addChild = (child: any) => {
+          const name = child.constructor?.name;
+          if (name === "Markdown" || name === "Text") {
+            wrapBlock(child);
+          }
+          stripBackgrounds(child);
+          return origAdd(child);
+        };
+      }
+    };
+
+    // Render bash command as multiline (for patchTool path)
+    const renderBashMultilineForPatch = (
+      rawCmd: string,
+      icon: string,
+      color: ColorKey,
+      rightPart: string,
+      rightLen: number,
+      innerW: number,
+      status: ToolStatus,
+      pulsePhase: number
+    ): string[] => {
+      let iconColored: string;
+      let bashColored: string;
+      if (status === "running") {
+        const brightness =
+          MU_CONFIG.PULSE_MIN_BRIGHTNESS +
+          (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * (0.5 + 0.5 * Math.sin(pulsePhase));
+        iconColored = rgbPulse(color, icon, brightness);
+        bashColored = rgbPulse(color, "bash", brightness);
+      } else {
+        iconColored = rgb(color, icon);
+        bashColored = rgb(color, "bash");
+      }
+
+      const prefix = `${iconColored} ${bashColored} ${rgb("dim", "$")} `;
+      const prefixLen = visibleWidth(prefix);
+      const indent = " ".repeat(prefixLen);
+
+      const firstLineWidth = innerW - prefixLen - rightLen - 1;
+      const contLineWidth = innerW - prefixLen;
+
+      if (firstLineWidth <= 0 || contLineWidth <= 0) {
+        const fallback = `${prefix}${rgb("white", truncateToWidth(rawCmd, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
+        const fallbackLen = visibleWidth(fallback);
+        const padding = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
+        return [`${fallback}${padding}${rightPart}`];
+      }
+
+      const cmdLines = rawCmd.split("\n");
+      const allWrapped: string[] = [];
+
+      for (const cmdLine of cmdLines) {
+        if (allWrapped.length === 0) {
+          const wrapped = wrapTextWithAnsi(cmdLine, firstLineWidth);
+          if (wrapped.length === 0) {
+            allWrapped.push("");
+          } else {
+            allWrapped.push(wrapped[0]);
+            if (wrapped.length > 1) {
+              const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contLineWidth);
+              allWrapped.push(...rewrapped);
+            }
+          }
+        } else {
+          const wrapped = wrapTextWithAnsi(cmdLine, contLineWidth);
+          allWrapped.push(...(wrapped.length > 0 ? wrapped : [""]));
+        }
+      }
+
+      const resultLines: string[] = [];
+      for (let i = 0; i < allWrapped.length; i++) {
+        const line = allWrapped[i];
+        if (i === 0) {
+          const lineContent = `${prefix}${rgb("white", line)}`;
+          const lineLen = visibleWidth(lineContent);
+          const padding = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+          resultLines.push(`${lineContent}${padding}${rightPart}`);
+        } else {
+          const lineContent = `${indent}${rgb("white", line)}`;
+          resultLines.push(lineContent);
+        }
+      }
+
+      return resultLines.length > 0
+        ? resultLines
+        : [`${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart}`];
+    };
+
+    // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
+    const patchTool = (tool: any, addLeadingSpace = false) => {
+      if (tool._mu_patched) return;
+      tool._mu_patched = true;
+      tool._mu_leading_space = addLeadingSpace;
+
+      stripBackgrounds(tool);
+
+      // Pulse state for this tool
+      let pulsePhase = 0;
+      let pulseTimer: ReturnType<typeof setInterval> | null = null;
+
+      const startPulse = () => {
+        if (pulseTimer) return;
+        pulseTimer = setInterval(() => {
+          pulsePhase += MU_CONFIG.PULSE_SPEED;
+          tool.invalidate?.();
+        }, MU_CONFIG.PULSE_INTERVAL_MS);
+      };
+
+      const stopPulse = () => {
+        if (pulseTimer) {
+          clearInterval(pulseTimer);
+          pulseTimer = null;
+        }
+      };
+
+      const origUpdate = tool.updateDisplay?.bind(tool);
+      if (origUpdate) {
+        tool.updateDisplay = () => {
+          origUpdate();
+          stripBackgrounds(tool);
+          if (tool.contentBox) {
+            tool.contentBox.paddingX = 0;
+            tool.contentBox.paddingY = 0;
+          }
+        };
+        tool.updateDisplay();
+      }
+
+      const origRender = tool.render?.bind(tool);
+      if (!origRender) return;
+
+      tool.render = (width: number): string[] => {
+        const toolName = tool.toolName as string;
+        const args = (tool.args ?? {}) as Record<string, unknown>;
+        const isPartial = tool.isPartial as boolean;
+        const result = tool.result as { isError?: boolean } | undefined;
+
+        const icon = TOOL_ICONS[toolName] ?? "⚙";
+        const sig = computeSignature(toolName, args);
+        const state = getToolState(sig);
+
+        let status: ToolStatus;
+        if (isPartial) {
+          status = "running";
+        } else if (result === undefined) {
+          status = state?.status ?? "pending";
+        } else if (result.isError) {
+          status = "failed";
+        } else {
+          status = "success";
+        }
+
+        // Start/stop pulse based on status
+        if (status === "running") {
+          startPulse();
+        } else {
+          stopPulse();
+        }
+
+        const { sym, color } = STATUS[status];
+
+        const elapsed = state ? Date.now() - state.startTime : 0;
+        const dur = state?.duration ?? (status !== "running" ? 0 : elapsed);
+        const timerStr = dur >= 1000 ? ` ${(dur / 1000).toFixed(1)}s` : "";
+
+        const innerW = width - 2;
+
+        const statusStr = rgb(color, sym);
+        const timerColored = rgb("dim", timerStr);
+        const rightPart = `${statusStr}${timerColored}`;
+        const rightLen = visibleWidth(rightPart);
+
+        // For bash: render multiline with full command, no truncation
+        if (toolName === "bash") {
+          const rawCmd = typeof args.command === "string" ? args.command : "";
+          const lines = renderBashMultilineForPatch(
+            rawCmd,
+            icon,
+            color,
+            rightPart,
+            rightLen,
+            innerW,
+            status,
+            pulsePhase
+          );
+          if (tool._mu_leading_space) {
+            return ["", ...lines];
+          }
+          return lines;
+        }
+
+        // Default: single-line truncated rendering for other tools
+        const leftMax = innerW - rightLen - 1;
+
+        // Apply pulsing effect to icon and name when running
+        let iconColored: string;
+        let nameColored: string;
+        if (status === "running") {
+          const brightness =
+            MU_CONFIG.PULSE_MIN_BRIGHTNESS +
+            (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * (0.5 + 0.5 * Math.sin(pulsePhase));
+          iconColored = rgbPulse(color, icon, brightness);
+          nameColored = rgbPulse(color, toolName, brightness);
+        } else {
+          iconColored = rgb(color, icon);
+          nameColored = rgb(color, toolName);
+        }
+
+        const argsPreview = formatToolArgsPreview(toolName, args);
+        const argsColored = rgb("dim", ` ${argsPreview}`);
+        const leftContent = `${iconColored} ${nameColored}${argsColored}`;
+        const leftTrunc = truncateToWidth(leftContent, leftMax);
+        const leftLen = visibleWidth(leftTrunc);
+
+        const padding = " ".repeat(Math.max(0, innerW - leftLen - rightLen));
+        const line = `${leftTrunc}${padding}${rightPart}`;
+
+        // Add leading blank line if this tool follows a user message
+        if (tool._mu_leading_space) {
+          return ["", line];
+        }
+        return [line];
+      };
+
+      // Cleanup on dispose
+      const origDispose = tool.dispose?.bind(tool);
+      tool.dispose = () => {
+        stopPulse();
+        origDispose?.();
+      };
+    };
+
+    // biome-ignore lint/suspicious/noExplicitAny: Accessing TUI internals
+    const tuiAny = tui as any;
+    for (const child of tuiAny.children ?? []) {
+      if (child.constructor?.name === "Container") {
+        // Track last component type
+        let lastWasUser = false;
+        for (const gc of child.children ?? []) {
+          if (isUser(gc)) {
+            patchUser(gc);
+            lastWasUser = true;
+          } else if (isAssistant(gc)) {
+            patchAssistant(gc);
+            lastWasUser = false;
+          } else if (isTool(gc)) {
+            patchTool(gc, lastWasUser);
+            lastWasUser = false;
+          }
+        }
+
+        if (!child._mu_patched_container) {
+          child._mu_patched_container = true;
+          child._mu_lastWasUser = lastWasUser;
+          const origAdd = child.addChild?.bind(child);
+          if (origAdd) {
+            // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
+            child.addChild = (newChild: any) => {
+              const addSpace = child._mu_lastWasUser;
+              if (isUser(newChild)) {
+                patchUser(newChild);
+                child._mu_lastWasUser = true;
+              } else if (isAssistant(newChild)) {
+                patchAssistant(newChild);
+                child._mu_lastWasUser = false;
+              } else if (isTool(newChild)) {
+                patchTool(newChild, addSpace);
+                child._mu_lastWasUser = false;
+              }
+              return origAdd(newChild);
+            };
+          }
+        }
+      }
     }
+
+    done(true);
+    return { render: () => [], invalidate: () => {}, handleInput: () => {} };
+  });
+};
+
+// =============================================================================
+// BOTTOM-PINNED LAYOUT: SETUP
+// =============================================================================
+// Uses post-render hook to inject spacer lines into the render output.
+// This is more reliable than injecting a component because we know exact line counts.
+
+let bottomPinnedEnabled = true;
+let tuiReference: TUI | null = null;
+
+const setupBottomPinnedLayout = (ctx: ExtensionContext) => {
+  if (!ctx.hasUI || !bottomPinnedEnabled) return;
+
+  // Use setWidget to get TUI access and install the hook
+  ctx.ui.setWidget(
+    "mu-flex-spacer",
+    (tui: TUI, _theme) => {
+      tuiReference = tui;
+      installBottomPinnedHook(tui);
+
+      // Return widget component that emits the marker
+      const widgetComponent: Component & { dispose(): void } = {
+        render: (): string[] => [SPACER_MARKER],
+        invalidate: () => {},
+        dispose: () => {
+          uninstallBottomPinnedHook(tui);
+          tuiReference = null;
+        },
+      };
+
+      return widgetComponent;
+    },
+    { placement: "aboveEditor" }
+  );
+};
+
+const disableBottomPinnedLayout = (ctx: ExtensionContext) => {
+  if (!ctx.hasUI) return;
+  ctx.ui.setWidget("mu-flex-spacer", undefined);
+  if (tuiReference) {
+    uninstallBottomPinnedHook(tuiReference);
+    tuiReference = null;
+  }
+};
+
+function formatToolArgsPreview(name: string, args: Record<string, unknown>): string {
+  if (!args) return "";
+  const p = (args.path ?? args.file_path ?? "") as string;
+  const relPath = p.startsWith("/") ? p.split("/").slice(-2).join("/") : p;
+
+  switch (name) {
+    case "bash":
+      return preview((args.command as string) ?? "", 60);
+    case "read":
+    case "write":
+    case "ls":
+    case "edit":
+      return relPath;
+    case "grep":
+    case "find":
+      return `${args.pattern ?? ""} ${relPath}`;
+    default:
+      return Object.entries(args)
+        .slice(0, 2)
+        .map(([k, v]) => `${k}=${preview(String(v), 20)}`)
+        .join(" ");
+  }
+}
+
+// =============================================================================
+// MAIN EXTENSION
+// =============================================================================
+export default function (pi: ExtensionAPI) {
+  // Setup UI patching on session start
+  pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext) => {
+    setupUIPatching(ctx);
+    setupBottomPinnedLayout(ctx);
 
     // Enable enhanced model display footer
     if (modelDisplayEnabled) {
@@ -1086,197 +1374,97 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // Track tool results as they come in.
-  //
-  // Transcript behavior ("CLI-condensed"):
-  // - agentsbox_* tools: replace successful output with args-inline summary (shown as second row)
-  // - other non-builtin tools: replace successful text output with a short args tuple
-  //
-  // Full outputs are persisted for /mu-tools and restored for the LLM via pi.on("context").
-  pi.on("tool_result", (e: ToolResultEvent) => {
-    const storedContent = sanitizeToolContent(e.content);
-    const isTextOnly = storedContent.length > 0 && storedContent.every((c) => c.type === "text");
+  // When a turn starts (user message sent), set flag for next tool to add leading space
+  pi.on("turn_start", () => {
+    nextToolNeedsLeadingSpace = true;
+  });
 
-    const isAgentsbox = typeof e.toolName === "string" && e.toolName.startsWith("agentsbox_");
-    const detailsRecord = isRecord(e.details) ? e.details : undefined;
+  // Track tool execution state
+  pi.on("tool_call", (event: ToolCallEvent, _ctx: ExtensionContext) => {
+    const { toolCallId, toolName, input } = event;
+    const args = input as Record<string, unknown>;
+    const sig = computeSignature(toolName, args);
 
-    // agentsbox returns failures as successful tool results with details.error + isError: true.
-    // The extension wrapper reports e.isError=false in that case, so we treat details.error as error-like.
-    const agentsboxErrorLike = isAgentsbox
-      ? Boolean(
-          e.isError || detailsRecord?.isError === true || typeof detailsRecord?.error === "string"
-        )
-      : false;
-
-    const storedIsError = isAgentsbox ? agentsboxErrorLike : e.isError;
-
-    // Extract exitCode from bash tool details
-    const exitCode =
-      e.toolName === "bash" && detailsRecord && typeof detailsRecord.exitCode === "number"
-        ? detailsRecord.exitCode
-        : undefined;
-
-    // Compute duration from tracked start time
-    const callStart = toolCallStartTimes.get(e.toolCallId);
-    const duration = callStart !== undefined ? Date.now() - callStart : undefined;
-    toolCallStartTimes.delete(e.toolCallId);
-
-    const stored: StoredToolResult = {
-      toolCallId: e.toolCallId,
-      toolName: e.toolName,
-      input: isRecord(e.input) ? e.input : {},
-      content: storedContent,
-      isError: storedIsError,
-      timestamp: Date.now(),
-      exitCode: typeof exitCode === "number" ? exitCode : undefined,
-      duration,
+    const state: ToolState = {
+      toolCallId,
+      sig,
+      toolName,
+      args,
+      startTime: Date.now(),
+      status: "running",
     };
 
-    recentToolResults.push(stored);
-
-    if (recentToolResults.length > MU_CONFIG.MAX_TOOL_RESULTS) {
-      recentToolResults.splice(0, recentToolResults.length - MU_CONFIG.MAX_TOOL_RESULTS);
-    }
-
-    const isBuiltin = BUILTIN_TOOL_NAMES.has(e.toolName);
-
-    // -----------------------------------------------------------------------
-    // agentsbox_* tools
-    // -----------------------------------------------------------------------
-
-    if (isAgentsbox && isTextOnly) {
-      const detailsWithMu = withMuDetails(e.details, {
-        toolCallId: stored.toolCallId,
-        toolName: stored.toolName,
-        isError: storedIsError,
-      });
-
-      // Replace successful output with args-inline summary.
-      // Pi's ToolExecutionComponent shows this below the tool name in toolOutput color:
-      //   agentsbox_search_bm25       ← toolTitle, bold
-      //   (text: "query", limit: 5)   ← toolOutput color
-      // Full output is persisted for /mu-tools viewer and restored for the LLM via context event.
-      if (!storedIsError) {
-        fullToolResultContentById.set(stored.toolCallId, storedContent);
-        evictOldestFromFullResults();
-
-        try {
-          pi.appendEntry(MU_TOOL_RESULT_ENTRY_TYPE, {
-            toolCallId: stored.toolCallId,
-            toolName: stored.toolName,
-            input: stored.input,
-            content: stored.content,
-            isError: stored.isError,
-            timestamp: stored.timestamp,
-            exitCode: stored.exitCode,
-            duration: stored.duration,
-          });
-        } catch (error) {
-          console.error("[mu] Failed to persist tool result entry:", error);
-        }
-
-        const argsInline = formatArgsInline(stored.input);
-
-        return {
-          content: [{ type: "text" as const, text: argsInline }],
-          details: detailsWithMu,
-          isError: false,
-        };
-      }
-
-      // Error-like agentsbox results stay visible by default, but we still attach mu metadata.
-      return {
-        details: detailsWithMu,
-      };
-    }
-
-    // -----------------------------------------------------------------------
-    // Other tools (non-builtin)
-    // -----------------------------------------------------------------------
-
-    // Only redact successful, text-only results from non-builtin tools.
-    // - Errors should remain visible by default
-    // - Image payloads are never redacted
-    if (!isBuiltin && !e.isError && isTextOnly) {
-      fullToolResultContentById.set(stored.toolCallId, storedContent);
-      evictOldestFromFullResults();
-
-      try {
-        pi.appendEntry(MU_TOOL_RESULT_ENTRY_TYPE, {
-          toolCallId: stored.toolCallId,
-          toolName: stored.toolName,
-          input: stored.input,
-          content: stored.content,
-          isError: stored.isError,
-          timestamp: stored.timestamp,
-          exitCode: stored.exitCode,
-          duration: stored.duration,
-        });
-      } catch (error) {
-        console.error("[mu] Failed to persist tool result entry:", error);
-      }
-
-      // Redacted display: show args only (tool name already shown by the tool call line).
-      const argsInline = formatArgsInline(stored.input);
-
-      return {
-        content: [{ type: "text" as const, text: argsInline }],
-        details: e.details,
-        isError: e.isError,
-      };
-    }
-
-    return undefined;
+    activeToolsById.set(toolCallId, state);
+    const states = toolStatesBySig.get(sig) ?? [];
+    states.push(state);
+    toolStatesBySig.set(sig, states);
   });
 
-  // Restore full tool outputs for the LLM context (while keeping transcript redacted).
-  // biome-ignore lint/suspicious/noExplicitAny: Event type not exported from pi-coding-agent
-  pi.on("context" as any, (e: any) => {
-    let changed = false;
-    const msgs = (e.messages as unknown[]).map((m) => {
-      if (!isRecord(m)) return m;
-      if (m.role !== "toolResult") return m;
-      const toolCallId = typeof m.toolCallId === "string" ? m.toolCallId : undefined;
-      if (!toolCallId) return m;
+  pi.on("tool_result", (event: ToolResultEvent, _ctx: ExtensionContext) => {
+    const { toolCallId, isError, content } = event;
+    const state = activeToolsById.get(toolCallId);
+    if (!state) return;
 
-      const full = fullToolResultContentById.get(toolCallId);
-      if (!full) return m;
+    const duration = Date.now() - state.startTime;
+    state.duration = duration;
+    state.status = isError ? "failed" : "success";
+    fullToolResultContentById.set(toolCallId, content);
 
-      changed = true;
-      return {
-        ...m,
-        content: full,
-      };
+    const label = `${state.toolName} ${formatToolArgsPreview(state.toolName, state.args)}`;
+    toolResultOptions.push({
+      key: toolCallId,
+      toolName: state.toolName,
+      sig: state.sig,
+      label: preview(label, MU_CONFIG.VIEWER_OPTION_MAX_LENGTH),
+      args: state.args,
+      result: { content, isError },
+      startTime: state.startTime,
+      duration,
+      isError: isError ?? false,
     });
 
-    // biome-ignore lint/suspicious/noExplicitAny: Return type matches pi event handler
-    return changed ? ({ messages: msgs } as any) : undefined;
+    if (toolResultOptions.length > MU_CONFIG.MAX_TOOL_RESULTS) {
+      const removed = toolResultOptions.shift();
+      if (removed) fullToolResultContentById.delete(removed.key);
+    }
+
+    if (toolStatesBySig.size > MU_CONFIG.MAX_COMPLETED_DURATIONS) {
+      const first = toolStatesBySig.keys().next().value;
+      if (first) {
+        toolStatesBySig.delete(first);
+        cardInstanceCountBySig.delete(first);
+      }
+    }
   });
 
+  // Register shortcut and command
   pi.registerShortcut(MU_TOOL_VIEWER_SHORTCUT, {
-    description: "mu: pick and view a single tool result (per-item)",
-    handler: async (ctx) => {
-      await openToolResultViewer(ctx);
+    description: "mu: open tool results overlay",
+    handler: async (ctx: ExtensionCommandContext) => {
+      await openMuToolsOverlay(ctx);
     },
   });
 
   pi.registerCommand("mu-tools", {
-    description: "mu: pick and view a single tool result in an overlay",
+    description: "mu: open tool results overlay",
     handler: async (_args, ctx) => {
-      await openToolResultViewer(ctx);
+      await openMuToolsOverlay(ctx);
     },
   });
 
-  // ---------------------------------------------------------------------------
-  // Tool wrappers (condensed call lines, full output on error / partial / expanded)
-  // ---------------------------------------------------------------------------
+  // Tool overrides
+  const throwIfAborted = (signal?: AbortSignal) => {
+    if (!signal?.aborted) return;
+    const error = new Error("Tool execution aborted");
+    (error as { name?: string }).name = "AbortError";
+    throw error;
+  };
 
   function override(
     name: string,
     factory: ToolFactory,
-    renderCondensed: (args: ToolParams, details: ToolParams, theme: MuTheme) => string
+    renderCondensed: (args: ToolParams, t: MuTheme) => string
   ) {
-    // Create a dummy instance to get metadata and original renderer
     const dummy = factory(process.cwd());
 
     type ExecutableTool = Tool<ToolParams> & {
@@ -1284,15 +1472,8 @@ export default function (pi: ExtensionAPI) {
         id: string,
         params: ToolParams,
         signal?: AbortSignal,
-        onUpdate?: (event: ToolResultEvent) => void
+        onUpdate?: (e: ToolResultEvent) => void
       ) => Promise<ToolResultEvent>;
-    };
-
-    const throwIfAborted = (signal?: AbortSignal) => {
-      if (!signal?.aborted) return;
-      const error = new Error("Tool execution aborted");
-      (error as { name?: string }).name = "AbortError";
-      throw error;
     };
 
     pi.registerTool({
@@ -1304,17 +1485,10 @@ export default function (pi: ExtensionAPI) {
 
       async execute(id, params, _onUpdate, ctx, signal) {
         throwIfAborted(signal);
-
-        // Instantiate real tool with current CWD to ensure correct execution context
         const realTool = factory(ctx.cwd) as ExecutableTool;
-
-        // Never pass onUpdate – suppress all streaming output from reaching UI
         const result = await realTool.execute(id, params, signal);
-
         throwIfAborted(signal);
 
-        // Pi's wrapper sets isError based on whether tool throws, not result.isError
-        // So we must throw for non-zero exit codes to get red box styling
         if (result.isError) {
           const content = Array.isArray(result.content) ? result.content : [];
           const errorText =
@@ -1327,181 +1501,96 @@ export default function (pi: ExtensionAPI) {
               )
               .join("\n") || "Command failed";
 
-          // Include exit code in error message so renderResult can parse it back
           const details = isRecord(result.details) ? result.details : undefined;
           const exitCode = details?.exitCode;
-          const exitPrefix = typeof exitCode === "number" ? `[mu_exit_code:${exitCode}] ` : "";
+          const exitPrefix = typeof exitCode === "number" ? `[exit:${exitCode}] ` : "";
 
-          const err = new Error(`${exitPrefix}${errorText}`);
-          if (details && typeof details.stack === "string") {
-            err.stack = details.stack;
-          }
-          throw err;
+          throw new Error(`${exitPrefix}${errorText}`);
         }
 
         return result;
       },
 
       renderCall(args: ToolParams, theme: MuTheme) {
-        // Create a generator that re-computes text on each render
-        // For write/edit, this captures live-updated args (content grows during write)
-        const textGenerator = () => renderCondensed(args, {}, theme).trimEnd();
-        return new PulsingToolLine(textGenerator, name, args, theme);
+        const textGen = () => renderCondensed(args, theme).trimEnd();
+        return new BoxedToolCard(textGen, name, args, theme);
       },
 
       renderResult(result, options, theme: MuTheme) {
         const { expanded } = options;
-
         const content = Array.isArray(result.content) ? result.content : [];
-        const details = isRecord(result.details) ? result.details : undefined;
         const extractText = (item: unknown): string =>
           isRecord(item) && item.type === "text" && typeof item.text === "string" ? item.text : "";
 
-        // For bash: extract exit code from details or content
-        // Note: Pi's renderResult doesn't pass isError, so we detect errors via:
-        //   1. details.exitCode !== 0 (normal path)
-        //   2. mu marker [mu_exit_code:N] in content (thrown error path)
-        //   3. Pi's error format "Command exited with code N" (fallback)
-        let exitCode: number | undefined;
-        let isErrorDetected = false;
-        if (name === "bash") {
-          exitCode = typeof details?.exitCode === "number" ? details.exitCode : undefined;
-
-          if (exitCode === undefined) {
-            const text = content.map(extractText).join("\n");
-
-            // Try mu marker first (most specific - inserted by our execute())
-            let match = text.match(/\[mu_exit_code:(\d+)\]/);
-            if (match?.[1]) {
-              const parsed = Number.parseInt(match[1], 10);
-              if (!Number.isNaN(parsed)) {
-                exitCode = parsed;
-                isErrorDetected = true;
-              }
-            }
-
-            // Fallback: Pi's native error format "Command exited with code N"
-            // This is specific enough to not match source code
-            if (exitCode === undefined) {
-              match = text.match(/Command exited with code (\d+)/i);
-              if (match?.[1]) {
-                const parsed = Number.parseInt(match[1], 10);
-                if (!Number.isNaN(parsed)) {
-                  exitCode = parsed;
-                  isErrorDetected = true;
-                }
-              }
-            }
-          }
-        }
-        const hasNonZeroExit = typeof exitCode === "number" && exitCode !== 0;
-        const isError = isErrorDetected || hasNonZeroExit;
-
-        // Errors or non-zero bash exit: show formatted error box
-        if (isError) {
-          const rawText = content.map(extractText).join("\n");
-
-          // Clean up bash error output for display
-          const errorMsg = rawText
-            .replace(/\[mu_exit_code:\d+\]\s*/g, "") // Remove mu marker
-            .replace(/^\/bin\/(?:ba)?sh:\s*/gm, "") // Remove shell prefix
-            .replace(/Command exited with code \d+\s*/gi, "") // Remove duplicate exit line
-            .replace(/exit(?:ed with)? code[:\s]+\d+\s*/gi, "") // Remove exit code mentions
-            .trim();
-
-          if (name === "bash") {
-            const lines = [
-              "Bash command failed",
-              exitCode !== undefined ? `Exit code : ${exitCode}` : "",
-              errorMsg ? `Error     : ${errorMsg}` : "",
-            ].filter(Boolean);
-            return new Text(lines.join("\n"), 0, 0);
-          }
-
-          return new Markdown(
-            rawText.replace(/\[mu_exit_code:\d+\]\s*/g, ""),
-            0,
-            0,
-            getMarkdownTheme()
-          );
-        }
-
-        // Expanded: use default renderer (partial is suppressed to avoid flash)
         if (expanded) {
-          if (dummy.renderResult) {
-            return dummy.renderResult(result, options, theme);
-          }
+          if (dummy.renderResult) return dummy.renderResult(result, options, theme);
           const text = content.map(extractText).join("\n");
           return new Markdown(text, 0, 0, getMarkdownTheme());
         }
 
-        // Condensed View - hide all results
-        // For write/edit, live progress is shown in the call line via textGenerator
         return new Text("", 0, 0);
       },
     });
   }
 
-  // Define tools configuration
-  const tools: [string, ToolFactory, (a: ToolParams, d: ToolParams, t: MuTheme) => string][] = [
+  const _muTheme: MuTheme = {
+    fg: (color, text) => {
+      const colorMap: Record<string, ColorKey> = {
+        accent: "orange",
+        text: "white",
+        dim: "dim",
+        success: "green",
+        error: "red",
+        warning: "yellow",
+      };
+      const c = C[colorMap[color] ?? (color as ColorKey)];
+      return c ? rgbRaw(c.r, c.g, c.b, text) : text;
+    },
+    bg: (_color, text) => text,
+  };
+
+  const tools: [string, ToolFactory, (a: ToolParams, t: MuTheme) => string][] = [
     [
       "bash",
       createBashTool,
-      (args, _details, t) => {
-        const command = typeof args.command === "string" ? args.command : "";
-        return `${t.fg("accent", "bash")} ${t.fg("dim", "$")} ${t.fg("text", command)}`;
+      (args, t) => {
+        const cmd = typeof args.command === "string" ? args.command : "";
+        return `${t.fg("accent", "bash")} ${t.fg("dim", "$")} ${t.fg("text", cmd)}`;
       },
     ],
     [
       "read",
       createReadTool,
-      (args, _details, t) => {
+      (args, t) => {
         const offset = typeof args.offset === "number" ? args.offset : undefined;
         const limit = typeof args.limit === "number" ? args.limit : undefined;
         const info = formatReadLoc(offset, limit);
-        const infoColored = info ? t.fg("dim", info) : "";
         const path = typeof args.path === "string" ? args.path : "";
-        return `${t.fg("accent", "read")} ${t.fg("text", path)} ${infoColored}`.trimEnd();
+        return `${t.fg("accent", "read")} ${t.fg("text", path)} ${info ? t.fg("dim", info) : ""}`.trimEnd();
       },
     ],
     [
       "grep",
       createGrepTool,
-      (args, details, t) => {
+      (args, t) => {
         const pattern = args.pattern !== undefined ? String(args.pattern) : "";
         const where = typeof args.path === "string" ? args.path : ".";
-        const glob = args.glob !== undefined ? `glob: ${JSON.stringify(args.glob)}` : "";
-        const ignoreCase = args.ignoreCase === true ? "ignoreCase: true" : "";
-        const literal = args.literal === true ? "literal: true" : "";
-        const context = typeof args.context === "number" ? `context: ${args.context}` : "";
-        const limit = typeof args.limit === "number" ? `limit: ${args.limit}` : "";
-        const detailsRecord = isRecord(details) ? details : {};
-        const matches =
-          typeof detailsRecord.matches === "number" ? `matches: ${detailsRecord.matches}` : "";
-        const parts = [glob, ignoreCase, literal, context, limit, matches].filter(Boolean);
-        const info = parts.length ? t.fg("dim", `(${parts.join(", ")})`) : "";
-        return `${t.fg("accent", "grep")} ${t.fg("text", JSON.stringify(pattern))} ${t.fg("text", where)} ${info}`.trimEnd();
+        return `${t.fg("accent", "grep")} ${t.fg("text", JSON.stringify(pattern))} ${t.fg("text", where)}`;
       },
     ],
     [
       "find",
       createFindTool,
-      (args, details, t) => {
+      (args, t) => {
         const pattern = args.pattern !== undefined ? String(args.pattern) : "";
         const where = typeof args.path === "string" ? args.path : ".";
-        const limit = typeof args.limit === "number" ? `limit: ${args.limit}` : "";
-        const detailsRecord = isRecord(details) ? details : {};
-        const count =
-          typeof detailsRecord.count === "number" ? `count: ${detailsRecord.count}` : "";
-        const parts = [limit, count].filter(Boolean);
-        const info = parts.length ? t.fg("dim", `(${parts.join(", ")})`) : "";
-        return `${t.fg("accent", "find")} ${t.fg("text", JSON.stringify(pattern))} ${t.fg("text", where)} ${info}`.trimEnd();
+        return `${t.fg("accent", "find")} ${t.fg("text", JSON.stringify(pattern))} ${t.fg("text", where)}`;
       },
     ],
     [
       "ls",
       createLsTool,
-      (args, _details, t) => {
+      (args, t) => {
         const path = typeof args.path === "string" ? args.path : ".";
         return `${t.fg("accent", "ls")} ${t.fg("text", path)}`;
       },
@@ -1509,18 +1598,17 @@ export default function (pi: ExtensionAPI) {
     [
       "write",
       createWriteTool,
-      (args, _details, t) => {
+      (args, t) => {
         const path = typeof args.path === "string" ? args.path : "";
         const content = typeof args.content === "string" ? args.content : "";
         const lines = content ? content.split("\n").length : 0;
-        const info = lines > 0 ? t.fg("dim", `(${lines} lines)`) : "";
-        return `${t.fg("accent", "write")} ${t.fg("text", path)} ${info}`.trimEnd();
+        return `${t.fg("accent", "write")} ${t.fg("text", path)} ${lines > 0 ? t.fg("dim", `(${lines} lines)`) : ""}`.trimEnd();
       },
     ],
     [
       "edit",
       createEditTool,
-      (args, _details, t) => {
+      (args, t) => {
         const path = typeof args.path === "string" ? args.path : "";
         const oldText = typeof args.oldText === "string" ? args.oldText : "";
         const newText = typeof args.newText === "string" ? args.newText : "";
@@ -1528,16 +1616,11 @@ export default function (pi: ExtensionAPI) {
         const newLines = newText ? newText.split("\n").length : 0;
         const delta = newLines - oldLines;
         const deltaStr = delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : "±0";
-        const info =
-          oldLines > 0 || newLines > 0
-            ? t.fg("dim", `(${oldLines}→${newLines} lines, ${deltaStr})`)
-            : "";
-        return `${t.fg("accent", "edit")} ${t.fg("text", path)} ${info}`.trimEnd();
+        return `${t.fg("accent", "edit")} ${t.fg("text", path)} ${t.fg("dim", `(${oldLines}→${newLines}, ${deltaStr})`)}`;
       },
     ],
   ];
 
-  // Register all tools
   for (const [name, factory, render] of tools) {
     override(name, factory, render);
   }
@@ -1583,8 +1666,10 @@ export default function (pi: ExtensionAPI) {
           }
 
           const contextTokens = lastAssistant
-            ? lastAssistant.usage.input + lastAssistant.usage.output +
-              lastAssistant.usage.cacheRead + lastAssistant.usage.cacheWrite
+            ? lastAssistant.usage.input +
+              lastAssistant.usage.output +
+              lastAssistant.usage.cacheRead +
+              lastAssistant.usage.cacheWrite
             : 0;
           const contextWindow = ctx.model?.contextWindow || 0;
           const contextPercentValue = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;
@@ -1630,31 +1715,38 @@ export default function (pi: ExtensionAPI) {
             return `${Math.round(n / 1000000)}M`;
           };
 
-          // Build stats line
+          // Build stats line with bracketed groups and semantic colors
           const statsParts: string[] = [];
-          if (totalInput) statsParts.push(`↑${fmt(totalInput)}`);
-          if (totalOutput) statsParts.push(`↓${fmt(totalOutput)}`);
-          if (totalCacheRead) statsParts.push(`R${fmt(totalCacheRead)}`);
-          if (totalCacheWrite) statsParts.push(`W${fmt(totalCacheWrite)}`);
 
-          // Cost with subscription indicator
+          // Tokens group (cyan): [↑in ↓out]
+          if (totalInput || totalOutput) {
+            const tokenParts: string[] = [];
+            if (totalInput) tokenParts.push(`↑${fmt(totalInput)}`);
+            if (totalOutput) tokenParts.push(`↓${fmt(totalOutput)}`);
+            statsParts.push(rgb("dim", "[") + rgb("cyan", tokenParts.join(" ")) + rgb("dim", "]"));
+          }
+
+          // Cache group (green): [Rread Wwrite]
+          if (totalCacheRead || totalCacheWrite) {
+            const cacheParts: string[] = [];
+            if (totalCacheRead) cacheParts.push(`R${fmt(totalCacheRead)}`);
+            if (totalCacheWrite) cacheParts.push(`W${fmt(totalCacheWrite)}`);
+            statsParts.push(rgb("dim", "[") + rgb("green", cacheParts.join(" ")) + rgb("dim", "]"));
+          }
+
+          // Cost group (amber): [$cost sub]
           const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
           if (totalCost || usingSubscription) {
-            const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
-            statsParts.push(costStr);
+            const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " sub" : ""}`;
+            statsParts.push(rgb("dim", "[") + rgb("amber", costStr) + rgb("dim", "]"));
           }
 
-          // Context percentage with color coding
-          let contextPercentStr: string;
-          const contextPercentDisplay = `${contextPercent}%/${fmt(contextWindow)}`;
-          if (contextPercentValue > 90) {
-            contextPercentStr = theme.fg("error", contextPercentDisplay);
-          } else if (contextPercentValue > 70) {
-            contextPercentStr = theme.fg("warning", contextPercentDisplay);
-          } else {
-            contextPercentStr = contextPercentDisplay;
-          }
-          statsParts.push(contextPercentStr);
+          // Context group with gradient progress bar: [█▓░░░ 17%/200k]
+          const bar = progressBar(contextPercentValue, 5);
+          const contextInfo = `${contextPercent}%/${fmt(contextWindow)}`;
+          statsParts.push(
+            `${rgb("dim", "[")}${bar} ${rgb("white", contextInfo)}${rgb("dim", "]")}`
+          );
 
           const statsLeft = statsParts.join(" ");
 
@@ -1701,7 +1793,12 @@ export default function (pi: ExtensionAPI) {
           if (extensionStatuses.size > 0) {
             const sortedStatuses = Array.from(extensionStatuses.entries())
               .sort(([a], [b]) => a.localeCompare(b))
-              .map(([, text]) => text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim());
+              .map(([, text]) =>
+                text
+                  .replace(/[\r\n\t]/g, " ")
+                  .replace(/ +/g, " ")
+                  .trim()
+              );
             const statusLine = sortedStatuses.join(" ");
             lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
           }
@@ -1724,6 +1821,22 @@ export default function (pi: ExtensionAPI) {
       } else {
         ctx.ui.setFooter(undefined);
         ctx.ui.notify("Default footer restored", "info");
+      }
+    },
+  });
+
+  // Command to toggle bottom-pinned layout
+  pi.registerCommand("mu-pin", {
+    description: "mu: toggle bottom-pinned layout (keeps prompt/footer at screen bottom)",
+    handler: async (_args, ctx) => {
+      bottomPinnedEnabled = !bottomPinnedEnabled;
+
+      if (bottomPinnedEnabled) {
+        setupBottomPinnedLayout(ctx);
+        ctx.ui.notify("Bottom-pinned layout enabled", "info");
+      } else {
+        disableBottomPinnedLayout(ctx);
+        ctx.ui.notify("Bottom-pinned layout disabled", "info");
       }
     },
   });
