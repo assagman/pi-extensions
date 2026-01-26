@@ -41,6 +41,7 @@ const C = {
   amber: { r: 254, g: 202, b: 87 },
   white: { r: 220, g: 220, b: 220 },
   violet: { r: 167, g: 139, b: 250 },
+  cyan: { r: 34, g: 211, b: 238 },
 } as const;
 
 type ColorKey = keyof typeof C;
@@ -197,6 +198,38 @@ type ThinkingLevel = keyof typeof MODEL_COLORS.thinking;
 
 const rgbRaw = (r: number, g: number, b: number, text: string): string =>
   `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
+
+// Progress bar with green→yellow→red gradient based on percentage
+const progressBar = (percent: number, width = 5): string => {
+  const filled = Math.round((percent / 100) * width);
+  const empty = width - filled;
+
+  // Gradient color: green (0%) → yellow (50%) → red (100%)
+  const getColor = (p: number): { r: number; g: number; b: number } => {
+    if (p <= 50) {
+      // Green to Yellow (0-50%)
+      const t = p / 50;
+      return {
+        r: Math.round(38 + (254 - 38) * t), // green.r → yellow.r
+        g: Math.round(222 + (211 - 222) * t), // green.g → yellow.g
+        b: Math.round(129 + (48 - 129) * t), // green.b → yellow.b
+      };
+    }
+    // Yellow to Red (50-100%)
+    const t = (p - 50) / 50;
+    return {
+      r: Math.round(254 + (238 - 254) * t), // yellow.r → red.r
+      g: Math.round(211 + (90 - 211) * t), // yellow.g → red.g
+      b: Math.round(48 + (82 - 48) * t), // yellow.b → red.b
+    };
+  };
+
+  const color = getColor(percent);
+  const filledStr = "█".repeat(filled);
+  const emptyStr = "░".repeat(empty);
+
+  return rgbRaw(color.r, color.g, color.b, filledStr) + rgb("dim", emptyStr);
+};
 
 const formatModelDisplay = (
   provider: string | undefined,
@@ -1537,31 +1570,38 @@ export default function (pi: ExtensionAPI) {
             return `${Math.round(n / 1000000)}M`;
           };
 
-          // Build stats line
+          // Build stats line with bracketed groups and semantic colors
           const statsParts: string[] = [];
-          if (totalInput) statsParts.push(`↑${fmt(totalInput)}`);
-          if (totalOutput) statsParts.push(`↓${fmt(totalOutput)}`);
-          if (totalCacheRead) statsParts.push(`R${fmt(totalCacheRead)}`);
-          if (totalCacheWrite) statsParts.push(`W${fmt(totalCacheWrite)}`);
 
-          // Cost with subscription indicator
+          // Tokens group (cyan): [↑in ↓out]
+          if (totalInput || totalOutput) {
+            const tokenParts: string[] = [];
+            if (totalInput) tokenParts.push(`↑${fmt(totalInput)}`);
+            if (totalOutput) tokenParts.push(`↓${fmt(totalOutput)}`);
+            statsParts.push(rgb("dim", "[") + rgb("cyan", tokenParts.join(" ")) + rgb("dim", "]"));
+          }
+
+          // Cache group (green): [Rread Wwrite]
+          if (totalCacheRead || totalCacheWrite) {
+            const cacheParts: string[] = [];
+            if (totalCacheRead) cacheParts.push(`R${fmt(totalCacheRead)}`);
+            if (totalCacheWrite) cacheParts.push(`W${fmt(totalCacheWrite)}`);
+            statsParts.push(rgb("dim", "[") + rgb("green", cacheParts.join(" ")) + rgb("dim", "]"));
+          }
+
+          // Cost group (amber): [$cost sub]
           const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
           if (totalCost || usingSubscription) {
-            const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
-            statsParts.push(costStr);
+            const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " sub" : ""}`;
+            statsParts.push(rgb("dim", "[") + rgb("amber", costStr) + rgb("dim", "]"));
           }
 
-          // Context percentage with color coding
-          let contextPercentStr: string;
-          const contextPercentDisplay = `${contextPercent}%/${fmt(contextWindow)}`;
-          if (contextPercentValue > 90) {
-            contextPercentStr = theme.fg("error", contextPercentDisplay);
-          } else if (contextPercentValue > 70) {
-            contextPercentStr = theme.fg("warning", contextPercentDisplay);
-          } else {
-            contextPercentStr = contextPercentDisplay;
-          }
-          statsParts.push(contextPercentStr);
+          // Context group with gradient progress bar: [█▓░░░ 17%/200k]
+          const bar = progressBar(contextPercentValue, 5);
+          const contextInfo = `${contextPercent}%/${fmt(contextWindow)}`;
+          statsParts.push(
+            `${rgb("dim", "[")}${bar} ${rgb("white", contextInfo)}${rgb("dim", "]")}`
+          );
 
           const statsLeft = statsParts.join(" ");
 
