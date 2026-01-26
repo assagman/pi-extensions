@@ -63,9 +63,9 @@ type ToolStatus = "pending" | "running" | "success" | "failed" | "canceled";
 const STATUS: Record<ToolStatus, { sym: string; color: ColorKey }> = {
   pending: { sym: "◌", color: "dim" },
   running: { sym: "●", color: "orange" },
-  success: { sym: "✓", color: "green" },
-  failed: { sym: "✗", color: "red" },
-  canceled: { sym: "○", color: "gray" },
+  success: { sym: "", color: "green" },
+  failed: { sym: "", color: "red" },
+  canceled: { sym: "", color: "gray" },
 };
 
 const TOOL_ICONS: Record<string, string> = {
@@ -349,7 +349,7 @@ class BoxedToolCard implements Component {
     innerW: number
   ): string[] {
     const iconColored = rgb(color, icon);
-    const prefix = `${iconColored} ${rgb("orange", "bash")} ${rgb("dim", "$")} `;
+    const prefix = `${iconColored} ${rgb(color, "bash")} ${rgb("dim", "$")} `;
     const prefixLen = visibleWidth(prefix);
     const indent = " ".repeat(prefixLen);
 
@@ -907,10 +907,10 @@ const setupUIPatching = (ctx: ExtensionContext) => {
           MU_CONFIG.PULSE_MIN_BRIGHTNESS +
           (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * (0.5 + 0.5 * Math.sin(pulsePhase));
         iconColored = rgbPulse(color, icon, brightness);
-        bashColored = rgbPulse("orange", "bash", brightness);
+        bashColored = rgbPulse(color, "bash", brightness);
       } else {
         iconColored = rgb(color, icon);
-        bashColored = rgb("orange", "bash");
+        bashColored = rgb(color, "bash");
       }
 
       const prefix = `${iconColored} ${bashColored} ${rgb("dim", "$")} `;
