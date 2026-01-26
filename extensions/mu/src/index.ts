@@ -843,7 +843,27 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       if (!container) return;
 
       // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
-      const wrapBlock = (block: any, eventType: EventType) => {
+      const isThinkingBlock = (block: any): boolean => {
+        return (
+          block.defaultTextStyle?.italic === true ||
+          block.options?.italic === true ||
+          block.italic === true
+        );
+      };
+
+      // Block styles
+      const THINKING_STYLE = {
+        icon: "󰛨",
+        color: "violet" as ColorKey,
+        border: "┊",
+      };
+      const ANSWER_STYLE = {
+        color: "orange" as ColorKey,
+        border: "║",
+      };
+
+      // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
+      const wrapBlock = (block: any) => {
         if (block._mu_wrapped) return;
         block._mu_wrapped = true;
 
@@ -852,62 +872,37 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         const orig = block.render?.bind(block);
         if (!orig) return;
 
-        block.render = (w: number): string[] => {
-          const lines: string[] = orig(w - 4);
-          const { icon, color, border: borderChar } = EVENT_STYLES[eventType];
-          const borderStyled = rgb(color, borderChar);
-          const iconStyled = rgb(color, icon);
+        const isThinking = isThinkingBlock(block);
 
-          return lines.map((line: string, i: number) => {
-            if (i === 0) {
-              return `${borderStyled} ${iconStyled} ${line}`;
-            }
-            return `${borderStyled}   ${line}`;
-          });
-        };
-      };
+        if (isThinking) {
+          // Thinking blocks: dotted left border with icon
+          block.render = (w: number): string[] => {
+            const lines: string[] = orig(w - 4);
+            const borderStyled = rgb(THINKING_STYLE.color, THINKING_STYLE.border);
+            const iconStyled = rgb(THINKING_STYLE.color, THINKING_STYLE.icon);
 
-      // Event type detection for distinct styling
-      type EventType = "executing" | "preparing" | "result" | "thinking" | "response";
+            return lines.map((line: string, i: number) => {
+              if (i === 0) {
+                return `${borderStyled} ${iconStyled} ${line}`;
+              }
+              return `${borderStyled}   ${line}`;
+            });
+          };
+        } else {
+          // Final answer blocks: double-line left border only
+          block.render = (w: number): string[] => {
+            const lines: string[] = orig(w - 2);
+            const borderStyled = rgb(ANSWER_STYLE.color, ANSWER_STYLE.border);
 
-      const EVENT_STYLES: Record<EventType, { icon: string; color: ColorKey; border: string }> = {
-        executing: { icon: "󰐊", color: "orange", border: "│" }, // play icon
-        preparing: { icon: "󰦖", color: "yellow", border: "│" }, // clock icon
-        result: { icon: "󰄬", color: "green", border: "│" }, // check icon
-        thinking: { icon: "󰛨", color: "violet", border: "┊" }, // brain icon, violet, dotted border
-        response: { icon: "󰍩", color: "green", border: "│" }, // chat bubble, green, solid
-      };
-
-      // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
-      const detectEventType = (block: any): EventType => {
-        // Pi creates thinking blocks with italic: true in defaultTextStyle
-        // Check all possible locations where italic flag might be set
-        const isItalic =
-          block.defaultTextStyle?.italic === true ||
-          block.options?.italic === true ||
-          block.italic === true;
-
-        // If explicitly marked as italic, it's a thinking block
-        if (isItalic) return "thinking";
-
-        const rawText = String(block.text ?? block.content ?? block.markdown ?? "");
-        const text = rawText.toLowerCase().trim();
-        if (!text) return "response";
-
-        // Short status-like messages
-        if (/^(executing|running|calling|starting)/.test(text)) return "executing";
-        if (/^(preparing|planning|checking|looking|reading|searching|analyzing)/.test(text))
-          return "preparing";
-        if (/^(result|output|complete|done|finished|command executed|ran:)/.test(text))
-          return "result";
-
-        return "response";
+            return lines.map((line: string) => `${borderStyled} ${line}`);
+          };
+        }
       };
 
       for (const child of container.children ?? []) {
         const name = child.constructor?.name;
         if (name === "Markdown" || name === "Text") {
-          wrapBlock(child, detectEventType(child));
+          wrapBlock(child);
         }
       }
 
@@ -917,7 +912,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         container.addChild = (child: any) => {
           const name = child.constructor?.name;
           if (name === "Markdown" || name === "Text") {
-            wrapBlock(child, detectEventType(child));
+            wrapBlock(child);
           }
           stripBackgrounds(child);
           return origAdd(child);
