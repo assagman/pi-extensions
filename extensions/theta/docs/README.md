@@ -1,23 +1,13 @@
 # Theta
 
-Theta is a Pi extension for first-class code review workflows. It integrates with `git` for diffing and `critique` for sharing visual reviews.
+Theta is a Pi extension for interactive code review workflows. It provides a TUI dashboard for reviewing git diffs.
 
 ## Features
 
-- **TUI Dashboard:** Interactive terminal UI for reviewing changes (`/review`).
-- **Agent Tools:**
-  - `theta_diff`: Allows the agent to inspect code changes.
-  - `theta_review`: Allows the agent to generate review analysis (and optional `critique.work` links).
-- **Critique Integration:** Uses `critique` CLI to generate sharable review links when available.
+- **TUI Dashboard:** Interactive terminal UI for reviewing changes with file navigation and diff scrolling.
 
 ## Installation
 
-Ensure `critique` is installed:
-```bash
-bun add -g critique
-```
-
-Install Theta:
 ```bash
 # In your pi extensions directory
 bun install
@@ -27,14 +17,20 @@ bun install
 ## Usage
 
 ### Commands
-- `/theta`: Open the interactive dashboard. Use `j`/`k` to navigate files and `q` to exit.
+- `/theta`: Open the interactive dashboard.
 
-### Agent
-The agent can use `theta_diff` to see what changed and `theta_review` to perform a full review analysis.
+### Keybindings
+
+| Key | Action |
+|-----|--------|
+| `C-n` / `C-p` | Navigate files |
+| `j` / `k` / `↑` / `↓` | Scroll diff |
+| `PgUp` / `PgDn` / `C-u` / `C-d` | Fast scroll |
+| `q` / `Esc` | Exit |
 
 ## Development
 
 ```bash
 bun install
-bun test
+bun run build
 ```
