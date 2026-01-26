@@ -1,7 +1,5 @@
-// @ts-nocheck
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { StringEnum } from "@mariozechner/pi-ai";
 /**
  * Delta Extension - Structured gated workflow for pi coding agent
  *
@@ -10,24 +8,18 @@ import { StringEnum } from "@mariozechner/pi-ai";
  *   implement ↔ test → review(impl) → deliver → done
  *
  * No subagents. The main agent does all the work.
- * Delta only steers it phase-by-phase via system prompt injection.
+ * Delta only steers it phase-by-page via system prompt injection.
  *
  * Toggle: Ctrl+Alt+L | Command: /delta [status|cancel]
  */
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ExtensionAPI,
+  ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
+import type { Theme, ThemeColor } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-
-// Local type definitions to avoid any
-interface ThemeLike {
-  fg(color: string, text: string): string;
-  bold(text: string): string;
-}
-
-interface ToolResult {
-  content?: Array<{ type: string; text?: string }>;
-  isError?: boolean;
-}
 
 import {
   DEFAULT_ARTIFACT_DIR,
@@ -37,14 +29,130 @@ import {
   getPhaseInstructions,
   getPhaseLabel,
 } from "./phases.js";
-import { type GateVerdict, type IssueClass, type Phase, ProgressManager } from "./progress.js";
+import {
+  type GateVerdict,
+  type IssueClass,
+  type Phase,
+  ProgressManager,
+  isGatePhase,
+} from "./progress.js";
 
-export default function delta(pi: ExtensionAPI) {
+// --- Constants ---
+const MIN_ARTIFACT_SIZE_BYTES = 10;
+const SUMMARY_DISPLAY_MAX_LENGTH = 60;
+
+// Theme color constants to avoid repeated casts
+const THEME: Record<string, ThemeColor> = {
+  success: "success",
+  error: "error",
+  warning: "warning",
+  muted: "muted",
+  accent: "accent",
+  dim: "dim",
+  toolTitle: "toolTitle",
+} as const;
+const ALL_PHASES: Phase[] = [
+  "requirements",
+  "review_requirements",
+  "design",
+  "review_design",
+  "plan",
+  "review_plan",
+  "implement",
+  "test",
+  "review_impl",
+  "deliver",
+];
+
+// --- Types ---
+interface DeltaToolDetails {
+  phase?: Phase;
+  verdict?: GateVerdict;
+  nextPhase?: Phase;
+  isError?: boolean;
+}
+
+type ToolResult = AgentToolResult<DeltaToolDetails>;
+
+interface DeltaAdvanceParams {
+  summary: string;
+  verdict?: GateVerdict;
+  issueClass?: IssueClass;
+  reasons?: string[];
+  checks?: Record<string, boolean>;
+  evidence?: { commands?: string[]; outputs?: string[] };
+  artifacts?: Record<string, string>;
+}
+
+// --- Helpers ---
+
+/**
+ * Create a standardized tool error response
+ */
+function toolError(message: string, details: DeltaToolDetails = {}): ToolResult {
+  return {
+    content: [{ type: "text", text: message }],
+    details: { ...details, isError: true },
+  };
+}
+
+/**
+ * Create a standardized tool success response
+ */
+function toolSuccess(message: string, details: DeltaToolDetails = {}): ToolResult {
+  return {
+    content: [{ type: "text", text: message }],
+    details: { ...details, isError: false },
+  };
+}
+
+/**
+ * Ensure the artifact directory exists with proper validation.
+ * Validates that the artifact directory doesn't contain path traversal patterns.
+ */
+function ensureArtifactDir(ctx: ExtensionContext): void {
+  try {
+    // Validate artifact dir constant doesn't contain traversal
+    if (DEFAULT_ARTIFACT_DIR.includes("..") || path.isAbsolute(DEFAULT_ARTIFACT_DIR)) {
+      console.warn("[delta] Invalid artifact directory configuration");
+      return;
+    }
+
+    const dir = path.join(ctx.cwd, DEFAULT_ARTIFACT_DIR);
+    const normalizedDir = path.normalize(dir);
+    const normalizedCwd = path.normalize(ctx.cwd);
+
+    // Path traversal protection
+    if (!normalizedDir.startsWith(normalizedCwd)) {
+      console.warn("[delta] Invalid artifact directory path detected");
+      return;
+    }
+
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+    }
+  } catch (err) {
+    console.warn(`[delta] Failed to create artifact directory: ${err}`);
+  }
+}
+
+/**
+ * Get file stats safely, returning null if file doesn't exist or error occurs
+ */
+function getFileStats(filePath: string): fs.Stats | null {
+  try {
+    return fs.statSync(filePath);
+  } catch {
+    return null;
+  }
+}
+
+export default function delta(pi: ExtensionAPI): void {
   let progress: ProgressManager;
   let enabled = false;
   let active = false;
   let pendingPhaseResetCompaction: { customInstructions: string } | null = null;
-  let suppressNextUserTurn = false;
+  let compactionInProgress = false;
 
   // --- Lifecycle ---
 
@@ -66,13 +174,16 @@ export default function delta(pi: ExtensionAPI) {
     }
 
     // Restore from session entries
-    const entries = ctx.sessionManager.getEntries();
-    const deltaEntry = entries
-      .filter(
-        (e: { type: string; customType?: string }) =>
-          e.type === "custom" && e.customType === "delta-state"
-      )
-      .pop() as { data?: { enabled: boolean } } | undefined;
+    interface DeltaStateEntry {
+      type: string;
+      customType?: string;
+      data?: { enabled: boolean };
+    }
+
+    const entries = ctx.sessionManager.getEntries() as DeltaStateEntry[];
+    const deltaEntry = entries.findLast(
+      (e) => e.type === "custom" && e.customType === "delta-state"
+    );
 
     if (deltaEntry?.data?.enabled && !active) {
       enabled = true;
@@ -145,9 +256,8 @@ export default function delta(pi: ExtensionAPI) {
 
         ctx.ui.notify("Triggering manual Δ compaction...", "info");
 
-        // Append a minimal in-context marker message so we can keep ONLY this message after compaction.
         const phase = progress.getPhase();
-        const resetMessage = `## Δ Phase Boundary Reset\n\n**Current phase:** ${phase}\n**Phase goal:** ${getPhaseGoal(phase)}\n\n${progress.getContextForPhase(phase)}\n\n---\n\nInstruction: Treat this as the ONLY authoritative context. If more detail is needed, read the artifact files listed above.`;
+        const resetMessage = buildPhaseResetMessage(phase);
 
         pi.sendMessage({
           customType: "delta-phase-reset",
@@ -156,7 +266,6 @@ export default function delta(pi: ExtensionAPI) {
           details: { phase },
         });
 
-        // Use the same instruction marker so session_before_compact picks it up
         const compactInstructions =
           "[DELTA_PHASE_RESET]\nManual compaction triggered by user. Replace prior conversational context with ONLY phase goal, summaries, and artifact paths.";
 
@@ -220,13 +329,13 @@ ${phaseInstructions}
 
   pi.on("input", async (event, ctx) => {
     if (event.source === "extension") return { action: "continue" as const };
-    if (suppressNextUserTurn) {
-      // Drop the first input after compaction was requested; user can retry.
-      // Prevents agent from running with stale pre-compaction context.
+
+    if (compactionInProgress) {
       if (ctx.hasUI) ctx.ui.notify("Δ compacting context, please retry your message", "info");
       return { action: "handled" as const };
     }
-    if (!enabled || active) return;
+
+    if (!enabled || active) return { action: "continue" as const };
 
     // Start workflow with this message as the goal
     progress.create(event.text);
@@ -244,17 +353,12 @@ ${phaseInstructions}
   pi.on("turn_end", async (_event, ctx) => {
     if (!enabled || !active) return;
     if (!pendingPhaseResetCompaction) return;
-    // We removed the ctx.isIdle() check here because turn_end implies the turn is finishing,
-    // and we want to force compaction even if there's a race condition on the idle flag.
-    // ctx.compact() handles aborting any lingering operations anyway.
 
     const req = pendingPhaseResetCompaction;
     pendingPhaseResetCompaction = null;
 
-    // Append a minimal in-context marker message so we can keep ONLY this message after compaction.
-    // This is what the next phase should see (fresh-start effect).
     const phase = progress.getPhase();
-    const resetMessage = `## Δ Phase Boundary Reset\n\n**Current phase:** ${phase}\n**Phase goal:** ${getPhaseGoal(phase)}\n\n${progress.getContextForPhase(phase)}\n\n---\n\nInstruction: Treat this as the ONLY authoritative context. If more detail is needed, read the artifact files listed above.`;
+    const resetMessage = buildPhaseResetMessage(phase);
 
     pi.sendMessage({
       customType: "delta-phase-reset",
@@ -263,23 +367,20 @@ ${phaseInstructions}
       details: { phase },
     });
 
-    // Compacting aborts current operation and will usually trigger a reload.
-    // The immediate next user input can be suppressed to avoid running with stale context.
-    suppressNextUserTurn = true;
+    compactionInProgress = true;
 
-    // Defer compaction to ensure the marker message is appended to the session branch first.
+    // Defer compaction to ensure the marker message is appended first
     setTimeout(() => {
       ctx.compact({
         customInstructions: req.customInstructions,
         onComplete: () => {
           if (ctx.hasUI) ctx.ui.notify("Δ compacted context for next phase", "info");
-          suppressNextUserTurn = false;
-          // Auto-advance to keep momentum and prevent agent from stopping
+          compactionInProgress = false;
           pi.sendUserMessage("Context compacted. Proceeding to next phase...");
         },
         onError: (error) => {
           if (ctx.hasUI) ctx.ui.notify(`Δ compaction failed: ${error.message}`, "warning");
-          suppressNextUserTurn = false;
+          compactionInProgress = false;
         },
       });
     }, 0);
@@ -295,17 +396,18 @@ ${phaseInstructions}
 
     const phase = progress.getPhase();
 
-    // Keep only our last delta-phase-reset marker message (if present) to remove the entire prior phase conversation.
-    const marker = [...event.branchEntries]
+    interface BranchEntry {
+      id?: string;
+      type?: string;
+      customType?: string;
+    }
+
+    const marker = [...(event.branchEntries as BranchEntry[])]
       .reverse()
-      .find(
-        (e: { type?: string; customType?: string }) =>
-          e?.type === "custom_message" && e?.customType === "delta-phase-reset"
-      ) as { id?: string } | undefined;
+      .find((e) => e?.type === "custom_message" && e?.customType === "delta-phase-reset");
 
     const firstKeptEntryId = marker?.id || event.preparation.firstKeptEntryId;
 
-    // Build a minimal phase-oriented summary (NOT a conversation summary).
     const summary = `## Δ Delta Phase Reset\n\n**Current phase:** ${phase}\n**Phase goal:** ${getPhaseGoal(phase)}\n\n${progress.getContextForPhase(phase)}\n\n---\n\nNotes:\n- This summary is intentionally minimal to reduce review bias/context inertia.\n- Read the referenced artifact files for details.`;
 
     if (ctx.hasUI) {
@@ -321,6 +423,146 @@ ${phaseInstructions}
       },
     };
   });
+
+  // --- Validation helpers for delta_advance ---
+
+  function validateGateFields(params: DeltaAdvanceParams, currentPhase: Phase): ToolResult | null {
+    const isGate = isGatePhase(currentPhase);
+
+    if (isGate && !params.verdict) {
+      return toolError(
+        `Error: verdict ("approved" | "needs_changes" | "blocked" | "abandoned") is required for gate phases.`
+      );
+    }
+
+    if (
+      currentPhase === "review_impl" &&
+      params.verdict === "needs_changes" &&
+      !params.issueClass
+    ) {
+      return toolError(
+        `Error: issueClass is required for review_impl when verdict="needs_changes" (fix_only|test_gap|plan_gap|design_gap|req_gap).`
+      );
+    }
+
+    if (
+      isGate &&
+      params.verdict &&
+      params.verdict !== "approved" &&
+      (!params.reasons || params.reasons.length === 0)
+    ) {
+      return toolError("Error: reasons[] is required for non-approved verdicts on gate phases.");
+    }
+
+    return null;
+  }
+
+  function validateArtifact(
+    params: DeltaAdvanceParams,
+    currentPhase: Phase,
+    ctx: ExtensionContext
+  ): ToolResult | null {
+    const expected = getDefaultArtifactPath(currentPhase);
+    const phaseFile = params.artifacts?.phaseFile;
+    const needsPhaseFile =
+      currentPhase !== "idle" && currentPhase !== "done" && currentPhase !== "failed";
+
+    if (!needsPhaseFile) return null;
+
+    if (!phaseFile || !phaseFile.trim()) {
+      return toolError(
+        `Error: artifacts.phaseFile is required for this phase. Write your phase output to ${
+          expected ? `\`${expected}\`` : "a phase artifact file"
+        } and call delta_advance with artifacts: { phaseFile: "..." }`
+      );
+    }
+
+    // Enforce canonical artifact path
+    if (expected && !phaseFile.endsWith(path.basename(expected))) {
+      return toolError(
+        `Error: Incorrect artifact file. For phase '${currentPhase}', you MUST write to \`${expected}\` and reference it.\nYou provided: \`${phaseFile}\`.`
+      );
+    }
+
+    // Validate file exists and has content
+    if (!path.isAbsolute(phaseFile)) {
+      const resolved = path.resolve(ctx.cwd, phaseFile);
+
+      // Path traversal protection: ensure resolved path is within cwd
+      const normalizedResolved = path.normalize(resolved);
+      const normalizedCwd = path.normalize(ctx.cwd);
+      if (!normalizedResolved.startsWith(normalizedCwd + path.sep)) {
+        return toolError("Error: Artifact path must be within project directory.");
+      }
+
+      const stats = getFileStats(resolved);
+
+      if (!stats) {
+        return toolError(
+          `Error: Artifact file not found: \`${phaseFile}\`. You must WRITE the file using the \`write\` tool before advancing.`
+        );
+      }
+
+      if (stats.size < MIN_ARTIFACT_SIZE_BYTES) {
+        return toolError(
+          `Error: Artifact file \`${phaseFile}\` is empty or too small. Write meaningful content to it.`
+        );
+      }
+    }
+
+    return null;
+  }
+
+  function handleCompletion(
+    currentPhase: Phase,
+    verdict: GateVerdict | undefined,
+    data: ReturnType<typeof progress.getData>
+  ): ToolResult {
+    const isGate = isGatePhase(currentPhase);
+    const completedViaDeliver = currentPhase === "deliver";
+    const abandoned = isGate && verdict === "abandoned";
+    const blocked = isGate && verdict === "blocked";
+    const capped =
+      isGate &&
+      verdict === "needs_changes" &&
+      (data?.gateRejectionCount ?? 0) >= (data?.maxGateRejections ?? 0);
+
+    let text = `✅ Δ workflow completed. ${data?.loopCount ?? 0} loop(s) used.`;
+
+    if (!completedViaDeliver) {
+      if (abandoned) {
+        text = `⚠️ Δ workflow ended (abandoned). ${data?.loopCount ?? 0} loop(s) used.`;
+      } else if (blocked) {
+        text = `✗ Δ workflow ended (blocked). ${data?.loopCount ?? 0} loop(s) used.`;
+      } else if (capped) {
+        text = `⚠️ Δ workflow ended (gate rejection cap reached). ${data?.loopCount ?? 0} loop(s) used.`;
+      }
+    }
+
+    return toolSuccess(text, { phase: currentPhase, verdict, nextPhase: "done" });
+  }
+
+  function handleAdvance(
+    currentPhase: Phase,
+    nextPhase: Phase,
+    verdict: GateVerdict | undefined,
+    ctx: ExtensionContext
+  ): ToolResult {
+    const compactInstructions = `[DELTA_PHASE_RESET]\nDelta phase boundary reached. Replace prior conversational context with ONLY:\n- Current phase goal: ${getPhaseGoal(nextPhase)}\n- Per-phase summaries (3–4 sentences max each)\n- Artifact file paths (read files as needed)\n\nSTRICT: Do not include raw conversation, tool outputs, or long transcripts. Keep it minimal and phase-oriented.`;
+
+    pendingPhaseResetCompaction = { customInstructions: compactInstructions };
+
+    if (ctx.hasUI) ctx.ui.notify("Δ will compact context after this phase", "info");
+
+    const forcedToDeliver =
+      currentPhase === "review_impl" && verdict === "needs_changes" && nextPhase === "deliver";
+
+    const msg = forcedToDeliver
+      ? `⚠️ Max rework loops reached. Advancing to: ${getPhaseEmoji(nextPhase)} ${getPhaseLabel(nextPhase).toUpperCase()}\n\nDelta will compact/reset context now. STOP after this. Continue with the new phase only after the next user prompt.`
+      : `→ Phase advanced to: ${getPhaseEmoji(nextPhase)} ${getPhaseLabel(nextPhase).toUpperCase()}\n\nDelta will compact/reset context now. STOP after this. Continue with the new phase only after the next user prompt.`;
+
+    return toolSuccess(msg, { phase: currentPhase, verdict, nextPhase });
+  }
 
   // --- delta_advance tool ---
 
@@ -341,15 +583,31 @@ Call this when you have finished your work for the current phase.
       summary: Type.String({ description: "Summary of work done in this phase" }),
 
       verdict: Type.Optional(
-        StringEnum(["approved", "needs_changes", "blocked", "abandoned"] as const, {
-          description: "Gate decision (review_* phases only)",
-        })
+        Type.Union(
+          [
+            Type.Literal("approved"),
+            Type.Literal("needs_changes"),
+            Type.Literal("blocked"),
+            Type.Literal("abandoned"),
+          ],
+          { description: "Gate decision (review_* phases only)" }
+        )
       ),
 
       issueClass: Type.Optional(
-        StringEnum(["fix_only", "test_gap", "plan_gap", "design_gap", "req_gap"] as const, {
-          description: "For review_impl when verdict=needs_changes: classify the issue for routing",
-        })
+        Type.Union(
+          [
+            Type.Literal("fix_only"),
+            Type.Literal("test_gap"),
+            Type.Literal("plan_gap"),
+            Type.Literal("design_gap"),
+            Type.Literal("req_gap"),
+          ],
+          {
+            description:
+              "For review_impl when verdict=needs_changes: classify the issue for routing",
+          }
+        )
       ),
 
       reasons: Type.Optional(
@@ -381,151 +639,40 @@ Call this when you have finished your work for the current phase.
     }),
 
     async execute(_toolCallId, params, _onUpdate, ctx) {
+      const typedParams = params as DeltaAdvanceParams;
+
       if (!active) {
-        return {
-          content: [{ type: "text" as const, text: "Error: No active Delta workflow" }],
-          isError: true,
-        };
+        return toolError("Error: No active Delta workflow");
       }
 
       const currentPhase = progress.getPhase();
-      const isReviewPhase =
-        currentPhase === "review_requirements" ||
-        currentPhase === "review_design" ||
-        currentPhase === "review_plan" ||
-        currentPhase === "review_impl";
 
       // Validate gate fields
-      if (isReviewPhase && !params.verdict) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: verdict ("approved" | "needs_changes" | "blocked" | "abandoned") is required for gate phases.`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      const gateError = validateGateFields(typedParams, currentPhase);
+      if (gateError) return gateError;
 
-      const verdict = params.verdict as GateVerdict | undefined;
-      const issueClass = params.issueClass as IssueClass | undefined;
-
-      if (currentPhase === "review_impl" && verdict === "needs_changes" && !issueClass) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: issueClass is required for review_impl when verdict="needs_changes" (fix_only|test_gap|plan_gap|design_gap|req_gap).`,
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      if (
-        isReviewPhase &&
-        verdict &&
-        verdict !== "approved" &&
-        (!params.reasons || params.reasons.length === 0)
-      ) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "Error: reasons[] is required for non-approved verdicts on gate phases.",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      // Validate artifact pointer (required for all actionable phases)
+      // Validate artifact
       ensureArtifactDir(ctx);
-      const expected = getDefaultArtifactPath(currentPhase);
-      const artifacts = params.artifacts as Record<string, string> | undefined;
-      const phaseFile = artifacts?.phaseFile;
-      const needsPhaseFile =
-        currentPhase !== "idle" && currentPhase !== "done" && currentPhase !== "failed";
-
-      if (needsPhaseFile) {
-        if (!phaseFile || !phaseFile.trim()) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Error: artifacts.phaseFile is required for this phase. Write your phase output to ${
-                  expected ? `\`${expected}\`` : "a phase artifact file"
-                } and call delta_advance with artifacts: { phaseFile: "..." }`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        // Enforce that the agent is using the canonical artifact path for this phase.
-        // This prevents reusing a previous phase's artifact (e.g. passing requirements.md for design phase).
-        // We allow some flexibility (absolute/relative), but the filename should match.
-        if (expected && !phaseFile.endsWith(path.basename(expected))) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Error: Incorrect artifact file. For phase '${currentPhase}', you MUST write to \`${expected}\` and reference it.\nYou provided: \`${phaseFile}\`.`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        // Best-effort check: ensure the artifact file exists at the provided path.
-        if (!path.isAbsolute(phaseFile)) {
-          try {
-            const resolved = path.resolve(ctx.cwd, phaseFile);
-            if (!fs.existsSync(resolved)) {
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: `Error: Artifact file not found: \`${phaseFile}\`. You must WRITE the file using the \`write\` tool before advancing.`,
-                  },
-                ],
-                isError: true,
-              };
-            }
-            // Check for empty files
-            const stats = fs.statSync(resolved);
-            if (stats.size < 10) {
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: `Error: Artifact file \`${phaseFile}\` is empty or too small. Write meaningful content to it.`,
-                  },
-                ],
-                isError: true,
-              };
-            }
-          } catch {
-            // ignore fs errors, allow agent to proceed if we can't verify (e.g. permission issues)
-          }
-        }
-      }
+      const artifactError = validateArtifact(typedParams, currentPhase, ctx);
+      if (artifactError) return artifactError;
 
       // Record this phase's output
       progress.recordPhase({
         phase: currentPhase,
-        summary: params.summary,
-        verdict,
-        issueClass,
-        reasons: params.reasons as string[] | undefined,
-        checks: params.checks as Record<string, boolean> | undefined,
-        evidence: params.evidence as { commands?: string[]; outputs?: string[] } | undefined,
-        artifacts: params.artifacts as Record<string, string> | undefined,
+        summary: typedParams.summary,
+        verdict: typedParams.verdict,
+        issueClass: typedParams.issueClass,
+        reasons: typedParams.reasons,
+        checks: typedParams.checks,
+        evidence: typedParams.evidence,
+        artifacts: typedParams.artifacts,
       });
 
       // Determine next phase
-      const nextPhase = progress.getNextPhase(currentPhase, { verdict, issueClass });
+      const nextPhase = progress.getNextPhase(currentPhase, {
+        verdict: typedParams.verdict,
+        issueClass: typedParams.issueClass,
+      });
 
       // Handle completion
       if (nextPhase === "done" || nextPhase === "failed") {
@@ -533,103 +680,44 @@ Call this when you have finished your work for the current phase.
         active = false;
         persistState();
         updateUI(ctx);
-
-        const data = progress.getData();
-
-        // Most runs complete via deliver→done. Other paths: abandoned/blocked or gate rejection cap.
-        const completedViaDeliver = currentPhase === "deliver";
-        const abandoned = isReviewPhase && verdict === "abandoned";
-        const blocked = isReviewPhase && verdict === "blocked";
-        const capped =
-          isReviewPhase &&
-          verdict === "needs_changes" &&
-          (data?.gateRejectionCount ?? 0) >= (data?.maxGateRejections ?? 0);
-
-        let text = `✅ Δ workflow completed. ${data?.loopCount ?? 0} loop(s) used.`;
-        if (!completedViaDeliver) {
-          if (abandoned)
-            text = `⚠️ Δ workflow ended (abandoned). ${data?.loopCount ?? 0} loop(s) used.`;
-          else if (blocked)
-            text = `✗ Δ workflow ended (blocked). ${data?.loopCount ?? 0} loop(s) used.`;
-          else if (capped)
-            text = `⚠️ Δ workflow ended (gate rejection cap reached). ${data?.loopCount ?? 0} loop(s) used.`;
-        }
-
-        return {
-          content: [{ type: "text" as const, text }],
-        };
+        return handleCompletion(currentPhase, typedParams.verdict, progress.getData());
       }
 
-      // Advance
+      // Advance to next phase
       progress.setPhase(nextPhase);
       updateUI(ctx);
 
-      // Trigger compaction to reduce context inertia between phases.
-      // This keeps review phases "fresh" and forces reliance on persisted artifacts.
-      const compactInstructions = `[DELTA_PHASE_RESET]\nDelta phase boundary reached. Replace prior conversational context with ONLY:\n- Current phase goal: ${getPhaseGoal(nextPhase)}\n- Per-phase summaries (3–4 sentences max each)\n- Artifact file paths (read files as needed)\n\nSTRICT: Do not include raw conversation, tool outputs, or long transcripts. Keep it minimal and phase-oriented.`;
-
-      // Schedule compaction right after this prompt ends.
-      // (Calling ctx.compact() inside a tool would abort the active agent operation.)
-      pendingPhaseResetCompaction = { customInstructions: compactInstructions };
-
-      if (ctx.hasUI) ctx.ui.notify("Δ will compact context after this phase", "info");
-
-      const forcedToDeliver =
-        currentPhase === "review_impl" && verdict === "needs_changes" && nextPhase === "deliver";
-      const msg = forcedToDeliver
-        ? `⚠️ Max rework loops reached. Advancing to: ${getPhaseEmoji(nextPhase)} ${getPhaseLabel(nextPhase).toUpperCase()}\n\nDelta will compact/reset context now. STOP after this. Continue with the new phase only after the next user prompt.`
-        : `→ Phase advanced to: ${getPhaseEmoji(nextPhase)} ${getPhaseLabel(nextPhase).toUpperCase()}\n\nDelta will compact/reset context now. STOP after this. Continue with the new phase only after the next user prompt.`;
-
-      return { content: [{ type: "text" as const, text: msg }] };
+      return handleAdvance(currentPhase, nextPhase, typedParams.verdict, ctx);
     },
 
-    renderCall(args: Record<string, unknown>, theme: ThemeLike) {
-      const summary = ((args.summary as string) || "").slice(0, 60);
+    renderCall(args: Record<string, unknown>, theme: Theme) {
+      const summary = ((args.summary as string) || "").slice(0, SUMMARY_DISPLAY_MAX_LENGTH);
       const verdict = args.verdict ? ` [${args.verdict}]` : "";
-      let text = theme.fg("toolTitle", theme.bold("delta_advance"));
+      let text = theme.fg(THEME.toolTitle, theme.bold("delta_advance"));
       if (verdict) {
         const v = String(args.verdict);
-        const color = v === "approved" ? "success" : v === "needs_changes" ? "warning" : "error";
+        const color =
+          v === "approved" ? THEME.success : v === "needs_changes" ? THEME.warning : THEME.error;
         text += ` ${theme.fg(color, verdict)}`;
       }
-      text += `\n ${theme.fg("dim", summary + (summary.length >= 60 ? "..." : ""))}`;
+      text += `\n ${theme.fg(THEME.dim, summary + (summary.length >= SUMMARY_DISPLAY_MAX_LENGTH ? "..." : ""))}`;
       return new Text(text, 0, 0);
     },
 
-    renderResult(result: ToolResult, _options: { expanded: boolean }, theme: ThemeLike) {
+    renderResult(result: ToolResult, _options: { expanded: boolean }, theme: Theme) {
       const textContent = result.content?.[0];
       const text = textContent?.type === "text" ? textContent.text : "(no output)";
-      const isError = result.isError;
-      const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "→");
+      const isError = result.details?.isError === true;
+      const icon = isError ? theme.fg(THEME.error, "✗") : theme.fg(THEME.success, "→");
       return new Text(`${icon} ${text}`, 0, 0);
     },
   });
 
-  // --- Helpers ---
+  // --- Helper functions ---
 
-  function ensureArtifactDir(ctx: ExtensionContext): void {
-    try {
-      const dir = path.join(ctx.cwd, DEFAULT_ARTIFACT_DIR);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
-      }
-    } catch {
-      // best-effort; artifacts are still agent-written via tools
-    }
+  function buildPhaseResetMessage(phase: Phase): string {
+    return `## Δ Phase Boundary Reset\n\n**Current phase:** ${phase}\n**Phase goal:** ${getPhaseGoal(phase)}\n\n${progress.getContextForPhase(phase)}\n\n---\n\nInstruction: Treat this as the ONLY authoritative context. If more detail is needed, read the artifact files listed above.`;
   }
-
-  const ALL_PHASES: Phase[] = [
-    "requirements",
-    "review_requirements",
-    "design",
-    "review_design",
-    "plan",
-    "review_plan",
-    "implement",
-    "test",
-    "review_impl",
-    "deliver",
-  ];
 
   function updateUI(ctx: ExtensionContext): void {
     if (!enabled) {
@@ -639,7 +727,7 @@ Call this when you have finished your work for the current phase.
     }
 
     if (!active) {
-      ctx.ui.setStatus("delta", ctx.ui.theme.fg("muted", "[Δ]"));
+      ctx.ui.setStatus("delta", ctx.ui.theme.fg(THEME.muted, "[Δ]"));
       ctx.ui.setWidget("delta", undefined);
       return;
     }
@@ -656,24 +744,24 @@ Call this when you have finished your work for the current phase.
     ctx.ui.setStatus(
       "delta",
       ctx.ui.theme.fg(
-        "accent",
+        THEME.accent,
         `[Δ ${step}/${total} ${getPhaseEmoji(phase)} ${getPhaseLabel(phase)}${loop} | rej ${data.gateRejectionCount}/${data.maxGateRejections}]`
       )
     );
 
     const pipeline = ALL_PHASES.map((p, i) => {
       const label = getPhaseLabel(p);
-      if (i < currentIdx) return ctx.ui.theme.fg("success", `✓ ${label}`);
-      if (i === currentIdx) return ctx.ui.theme.fg("accent", `▶ ${label}`);
-      return ctx.ui.theme.fg("muted", `○ ${label}`);
+      if (i < currentIdx) return ctx.ui.theme.fg(THEME.success, `✓ ${label}`);
+      if (i === currentIdx) return ctx.ui.theme.fg(THEME.accent, `▶ ${label}`);
+      return ctx.ui.theme.fg(THEME.muted, `○ ${label}`);
     });
 
     const lines = [pipeline.join("  ")];
     if (data.loopCount > 0)
-      lines.push(ctx.ui.theme.fg("warning", `⟳ Loop ${data.loopCount}/${data.maxLoops}`));
+      lines.push(ctx.ui.theme.fg(THEME.warning, `⟳ Loop ${data.loopCount}/${data.maxLoops}`));
     if (data.gateRejectionCount > 0)
       lines.push(
-        ctx.ui.theme.fg("warning", `rej ${data.gateRejectionCount}/${data.maxGateRejections}`)
+        ctx.ui.theme.fg(THEME.warning, `rej ${data.gateRejectionCount}/${data.maxGateRejections}`)
       );
 
     ctx.ui.setWidget("delta", lines);
