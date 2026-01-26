@@ -9,6 +9,7 @@ export class Dashboard implements Component {
   private diffService: DiffService;
   private diffScrollOffset = 0;
   private maxDiffLines = 0;
+  private contentHeight = 10;
 
   constructor(
     private tui: TUI,
@@ -48,11 +49,18 @@ export class Dashboard implements Component {
 
     try {
       const { raw } = await this.diffService.getDiff(undefined, undefined, file.path);
-      this.diffContent = raw || "No changes in file.";
+      // Guard: only update if this file is still selected
+      if (this.selectedIndex === index) {
+        this.diffContent = raw || "No changes in file.";
+        this.refresh();
+      }
     } catch (_e) {
-      this.diffContent = "Error loading diff.";
+      // Guard: only show error if this file is still selected
+      if (this.selectedIndex === index) {
+        this.diffContent = "Error loading diff.";
+        this.refresh();
+      }
     }
-    this.refresh();
   }
 
   invalidate() {
@@ -112,8 +120,10 @@ export class Dashboard implements Component {
     }
     
     // Diff scrolling (j/k, arrows)
+    const maxScroll = Math.max(0, this.maxDiffLines - this.contentHeight);
+
     if (matchesKey(data, "j") || matchesKey(data, "down")) {
-      if (this.diffScrollOffset < this.maxDiffLines - 10) {
+      if (this.diffScrollOffset < maxScroll) {
         this.diffScrollOffset++;
         this.refresh();
       }
@@ -127,7 +137,7 @@ export class Dashboard implements Component {
       return;
     }
     if (matchesKey(data, "pageDown") || matchesKey(data, "ctrl+d")) {
-      this.diffScrollOffset = Math.min(this.diffScrollOffset + 20, Math.max(0, this.maxDiffLines - 10));
+      this.diffScrollOffset = Math.min(this.diffScrollOffset + 20, maxScroll);
       this.refresh();
       return;
     }
@@ -150,7 +160,7 @@ export class Dashboard implements Component {
 
     // Calculate available content height (reserve 2 for header + footer)
     const termRows = this.tui.terminal.rows || 24;
-    const contentHeight = Math.max(10, termRows - 3);
+    this.contentHeight = Math.max(10, termRows - 3);
 
     // Prepare file list with stats (ANSI-aware padding/truncation)
     const fileLines = this.files.map((f, i) => {
@@ -176,7 +186,7 @@ export class Dashboard implements Component {
     
     const visibleDiffLines = diffLinesRaw.slice(
       this.diffScrollOffset, 
-      this.diffScrollOffset + contentHeight
+      this.diffScrollOffset + this.contentHeight
     );
     
     const diffViewLines = visibleDiffLines.map((l) => {
@@ -190,7 +200,7 @@ export class Dashboard implements Component {
     });
 
     // Render content rows
-    for (let i = 0; i < contentHeight; i++) {
+    for (let i = 0; i < this.contentHeight; i++) {
       const left = this.padToWidth(fileLines[i] || "", sidebarWidth);
       const right = diffViewLines[i] || "";
       const separator = this.theme.fg("dim", " │ ");
@@ -198,8 +208,8 @@ export class Dashboard implements Component {
     }
 
     // Footer with scroll indicator
-    const scrollInfo = this.maxDiffLines > contentHeight 
-      ? ` (${this.diffScrollOffset + 1}-${Math.min(this.diffScrollOffset + contentHeight, this.maxDiffLines)}/${this.maxDiffLines})` 
+    const scrollInfo = this.maxDiffLines > this.contentHeight 
+      ? ` (${this.diffScrollOffset + 1}-${Math.min(this.diffScrollOffset + this.contentHeight, this.maxDiffLines)}/${this.maxDiffLines})` 
       : "";
     lines.push(this.theme.fg("dim", ` [C-n/C-p] Files  [j/k] Scroll  [q] Quit${scrollInfo}`));
 
