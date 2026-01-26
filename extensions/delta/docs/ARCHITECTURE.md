@@ -1,201 +1,230 @@
-# Delta Extension — Architecture
-
-> **v3.1.0** — Phase-gate workflow schema for Pi coding agent + phase-boundary compaction reset.
-> Single-agent orchestration via deterministic lifecycle with explicit gates, evidence, and feedback loops.
-
----
+# Delta Architecture
 
 ## Overview
 
-Delta steers the main Pi agent through a structured workflow without spawning subagents.
-It works by injecting phase-specific instructions into the agent's system prompt before each turn,
-and providing a `delta_advance` tool the agent calls to signal phase completion.
-
-Key improvements vs v2:
-- Explicit **Requirements** + **Design** phases with gates (handshakes)
-- Gate decisions include structured **verdict + reasons + checklist + evidence**
-- `review_impl` rejection routes to the *correct* phase (implement/test/plan/design/requirements)
-- Gate rejection cap to prevent endless self-arguing
-- Persisted per-phase timing and gate stats for metrics
-
----
-
-## Phase Lifecycle
+Delta is a persistent memory extension for Pi coding agent that provides SQLite-backed storage for tasks, notes, key-value pairs, and episodic events.
 
 ```
-                    ┌──────────────────────────────┐
-                    │         USER INPUT           │
-                    └──────────────┬───────────────┘
-                                   │
-                                   ▼
-                    ┌──────────────────────────────┐
-                    │       🧾 REQUIREMENTS         │
-                    │  Define acceptance criteria   │
-                    └──────────────┬───────────────┘
-                                   │
-                    ┌──────────────▼───────────────┐
-              ┌────▶│   🔎 REVIEW (Requirements)    │◀──────┐
-              │     └───────┬──────────┬───────────┘       │
-              │             │          │                   │
-              │    approved │          │ needs_changes     │
-              │             │          └───────────────────┘
-              │             ▼
-              │     ┌──────────────────────────────┐
-              │     │         🧩 DESIGN             │
-              │     │  Architecture/API decisions   │
-              │     └──────────────┬───────────────┘
-              │                    │
-              │     ┌──────────────▼───────────────┐
-              ├────▶│      🧠 REVIEW (Design)       │◀──────┐
-              │     └───────┬──────────┬───────────┘       │
-              │             │          │                   │
-              │    approved │          │ needs_changes     │
-              │             │          └───────────────────┘
-              │             ▼
-              │     ┌──────────────────────────────┐
-              │     │         📋 PLAN               │
-              │     │  Steps + AC→verification map  │
-              │     └──────────────┬───────────────┘
-              │                    │
-              │     ┌──────────────▼───────────────┐
-              ├────▶│      🧾 REVIEW (Plan)         │◀──────┐
-              │     └───────┬──────────┬───────────┘       │
-              │             │          │                   │
-              │    approved │          │ needs_changes     │
-              │             │          └───────────────────┘
-              │             ▼
-              │     ┌──────────────────────────────┐
-              │     │        🔨 IMPLEMENT           │
-              │     └──────────────┬───────────────┘
-              │                    │
-              │     ┌──────────────▼───────────────┐
-              │     │          🧪 TEST              │
-              │     └──────────────┬───────────────┘
-              │                    │
-              │     ┌──────────────▼───────────────┐
-              │     │      ✅ REVIEW (Impl)         │
-              │     └───────┬──────────┬───────────┘
-              │             │          │
-              │    approved │          │ needs_changes (classified)
-              │             │          └─────────────┬───────────────┐
-              │             ▼                        │               │
-              │     ┌──────────────────────────────┐ │               │
-              │     │         📦 DELIVER            │◀┘               │
-              │     └──────────────┬───────────────┘                 │
-              │                    │                                 │
-              │                    ▼                                 │
-              │     ┌──────────────────────────────┐                 │
-              └────▶│           ✓ DONE             │                 │
-                    └──────────────────────────────┘                 │
-                                                                     │
-               needs_changes routes by issueClass:                   │
-                 fix_only  → implement                               │
-                 test_gap  → test                                    │
-                 plan_gap  → plan                                    │
-                 design_gap→ design                                  │
-                 req_gap   → requirements                            │
+┌─────────────────────────────────────────────────────────────────────┐
+│                           Pi Agent                                  │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                    System Prompt                               │  │
+│  │  ┌─────────────────────────────────────────────────────────┐  │  │
+│  │  │  <delta_memory>                                          │  │  │
+│  │  │  • Active project notes                                  │  │  │
+│  │  │  • Task overview (status counts + active tasks)          │  │  │
+│  │  │  • Memory stats (kv keys, episode count)                 │  │  │
+│  │  │  • Workflow guidelines                                   │  │  │
+│  │  │  </delta_memory>                                         │  │  │
+│  │  └─────────────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                      │
+│                              ▼                                      │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                    Delta Tools (16)                           │  │
+│  │                                                               │  │
+│  │  KV Store        Tasks           Notes           Episodic     │  │
+│  │  ─────────       ─────           ─────           ────────     │  │
+│  │  delta_get       delta_task_*    delta_note_*    delta_log    │  │
+│  │  delta_set       (5 tools)       (5 tools)       delta_recall │  │
+│  │  delta_delete                                                 │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                      │
+│                              ▼                                      │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                    SQLite Database                            │  │
+│  │  ~/.local/share/pi-ext-delta/<project>-<branch>/delta.db     │  │
+│  │                                                               │  │
+│  │  ┌─────────┐ ┌──────────┐ ┌─────────┐ ┌───────────────┐      │  │
+│  │  │   kv    │ │ episodes │ │  tasks  │ │ project_notes │      │  │
+│  │  └─────────┘ └──────────┘ └─────────┘ └───────────────┘      │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
----
+## Module Structure
 
-## Gates and “Solo Handshakes”
+| File | LOC | Purpose |
+|------|-----|---------|
+| `index.ts` | ~53 | Extension entry, event handlers |
+| `db.ts` | ~800 | SQLite operations, schema, queries |
+| `tools.ts` | ~504 | Tool definitions, TypeBox schemas |
 
-Since this is a solo agent workflow, handshakes are encoded as **gate phases** requiring:
-- `verdict`: approved / needs_changes / blocked / abandoned
-- `reasons[]`: actionable reasons when verdict != approved
-- `checks`: checklist booleans (explicit pass/fail)
-- `evidence`: commands run + key output excerpts (esp. test/typecheck/lint)
+## Data Flow
 
-This makes approvals *auditable* and reduces self-review bias by forcing explicit criteria and evidence.
-
----
-
-## Phase Artifacts & Context Compaction
-
-Delta v3 intentionally compacts conversational context between phases to reduce review bias and “context inertia”.
-
-### Artifact convention
-
-Each phase must write its output to a file under the project working directory:
+### Session Start
 
 ```
-.delta/requirements.md
-.delta/review_requirements.md
-.delta/design.md
-.delta/review_design.md
-.delta/plan.md
-.delta/review_plan.md
-.delta/implement.md
-.delta/test.md
-.delta/review_impl.md
-.delta/deliver.md
+┌────────────────────┐
+│  Pi Session Start  │
+└─────────┬──────────┘
+          │
+          ▼
+┌─────────────────────────────┐
+│  before_agent_start event   │
+└─────────┬───────────────────┘
+          │
+          ▼
+┌─────────────────────────────┐
+│  getMemoryContext()         │
+│  • Load active notes        │
+│  • Get task summary         │
+│  • Count KV keys            │
+│  • Count episodes           │
+└─────────┬───────────────────┘
+          │
+          ▼
+┌─────────────────────────────┐
+│  buildMemoryPrompt()        │
+│  • Format as XML block      │
+│  • Inject into systemPrompt │
+└─────────────────────────────┘
 ```
 
-Rules:
-- The agent **must** write/overwrite the phase file before calling `delta_advance`.
-- The `delta_advance` tool call must include: `artifacts: { phaseFile: ".delta/<phase>.md" }`.
-- Delta validates that the artifact exists (best-effort) before advancing.
+### Tool Execution
 
-### Compaction behavior (phase boundary reset)
-
-After every successful `delta_advance` phase transition, Delta triggers a **hard reset compaction**:
-
-- It appends a hidden `custom_message` marker (`customType: delta-phase-reset`) with:
-  - current phase
-  - phase goal
-  - compact per-phase summaries (3–4 sentences each)
-  - artifact paths
-- It then runs `ctx.compact()` with a `[DELTA_PHASE_RESET]` instruction.
-- A custom compaction hook (`session_before_compact`) ensures the compaction:
-  - keeps only the phase-reset marker message as the earliest kept entry
-  - replaces prior conversation with a minimal, phase-oriented summary
-
-As a result, the next phase starts with **fresh context** and must rely on artifacts via file reads.
-
----
-
-## Tool: `delta_advance`
-
-Parameters:
-
-| Param | Type | Required | Notes |
-|---|---|---:|---|
-| `summary` | `string` | Yes | Short phase summary (3–4 sentences or 3–8 bullets) |
-| `verdict` | `approved \| needs_changes \| blocked \| abandoned` | Gate phases only | Enforced for `review_*` phases |
-| `issueClass` | `fix_only \| test_gap \| plan_gap \| design_gap \| req_gap` | Only for `review_impl` + needs_changes | Drives routing |
-| `reasons` | `string[]` | For non-approved gate verdicts | Enforced |
-| `checks` | `{[k: string]: boolean}` | Optional | Gate checklist |
-| `evidence` | `{commands?: string[], outputs?: string[]}` | Optional | Verification evidence |
-| `artifacts` | `{[k: string]: string}` | Yes (must include `phaseFile`) | Inline or pointers |
-
----
-
-## Data Model (`ProgressData`)
-
-Stored at:
 ```
-~/.local/share/pi/delta/<session-id>.json
+┌──────────────────────┐
+│  Agent calls tool    │
+│  e.g. delta_task_*   │
+└─────────┬────────────┘
+          │
+          ▼
+┌──────────────────────┐
+│  tools.ts handler    │
+│  • Validate params   │
+│  • Call db function  │
+└─────────┬────────────┘
+          │
+          ▼
+┌──────────────────────┐
+│  db.ts operation     │
+│  • Execute SQL       │
+│  • Return result     │
+└─────────┬────────────┘
+          │
+          ▼
+┌──────────────────────┐
+│  Format response     │
+│  • Return to agent   │
+└──────────────────────┘
 ```
 
-Notable fields:
-- `currentPhaseStartedAt` (phase timing)
-- `gateRejectionCount` + `maxGateRejections` (anti-infinite-loop)
-- `gateStats` (counts of needs_changes/blocked/abandoned per gate)
-- `phaseSummaries` (compact per-phase summaries; injected into the next phase)
-- `phaseArtifacts` (phase → artifact file pointer)
-- Legacy fields: `requirements`, `design`, `plan`, etc. (kept for backward compatibility)
-- `history[]` contains full audit entries with evidence/checklists
+## Database Schema
 
-Schema versioning:
-- v2 files (no `schemaVersion`) are migrated best-effort to v3 on load.
-- v3 adds `phaseSummaries` + `phaseArtifacts` to support phase-compacted context.
+### Tables
 
----
+```sql
+-- Key-Value Store (simple persistent storage)
+kv (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)
 
-## Module Breakdown
+-- Episodic Memory (timestamped events)
+episodes (
+  id INTEGER PRIMARY KEY,
+  content TEXT NOT NULL,
+  context TEXT,           -- optional: file, task, etc.
+  tags TEXT,              -- JSON array
+  timestamp INTEGER NOT NULL,
+  session_id TEXT         -- links to specific session
+)
 
-- `index.ts` — hooks, UI, `delta_advance` tool, phase-boundary compaction
-- `phases.ts` — phase/gate instruction prompts + artifact conventions
-- `progress.ts` — state machine, persistence, migration, metrics, compact context builder
-- `VERIFY_COMPACTION.md` — manual verification checklist
+-- Task Management
+tasks (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  description TEXT,
+  status TEXT DEFAULT 'todo',    -- todo|in_progress|blocked|done|cancelled
+  priority TEXT DEFAULT 'medium', -- low|medium|high|critical
+  scope TEXT DEFAULT 'project',   -- session|project
+  tags TEXT,                      -- JSON array
+  parent_id INTEGER,              -- self-reference for subtasks
+  created_at INTEGER,
+  updated_at INTEGER,
+  completed_at INTEGER,
+  session_id TEXT
+)
 
+-- Project Notes (persistent context)
+project_notes (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  category TEXT DEFAULT 'general', -- issue|convention|workflow|reminder|general
+  importance TEXT DEFAULT 'normal', -- low|normal|high|critical
+  active INTEGER DEFAULT 1,         -- 1=loaded at session start
+  created_at INTEGER,
+  updated_at INTEGER
+)
+```
+
+### Indexes
+
+```sql
+idx_episodes_timestamp ON episodes(timestamp)
+idx_episodes_session ON episodes(session_id)
+idx_tasks_status ON tasks(status)
+idx_tasks_scope ON tasks(scope)
+idx_tasks_session ON tasks(session_id)
+idx_tasks_parent ON tasks(parent_id)
+idx_notes_category ON project_notes(category)
+idx_notes_active ON project_notes(active)
+idx_notes_importance ON project_notes(importance)
+```
+
+## Storage Location
+
+Database path formula:
+```
+~/.local/share/pi-ext-delta/<sanitized-cwd>-<git-branch>/delta.db
+```
+
+Example:
+```
+Project: /Users/dev/my-app on branch: feat/auth
+Database: ~/.local/share/pi-ext-delta/Users_dev_my-app-feat_auth/delta.db
+```
+
+Benefits:
+- Per-project isolation
+- Per-branch isolation (separate data per feature branch)
+- Not in git (user-specific data)
+- XDG-compliant location
+
+## Thread Safety
+
+- SQLite WAL mode enabled (`journal_mode = WAL`)
+- Single database connection per process
+- Synchronous operations (no concurrent access issues)
+
+## Security Considerations
+
+1. **Path Traversal**: `sanitizePath()` + `resolve()` boundary check
+2. **SQL Injection**: Parameterized queries throughout
+3. **Parent Cycle Detection**: Validates task parent references
+
+## Performance Notes
+
+- Git branch cached per cwd (avoids repeated `execSync`)
+- Query limits default to 50 items
+- Indexes on frequently filtered columns
+- WAL mode for better read concurrency
+
+## Extension Events
+
+| Event | Handler |
+|-------|---------|
+| `before_agent_start` | Inject memory context into system prompt |
+| `session_shutdown` | Close database connection |
+
+## Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `better-sqlite3` | ^11.7.0 | Synchronous SQLite driver |
+| `@sinclair/typebox` | ^0.32.15 | Runtime type validation |
+| `@mariozechner/pi-coding-agent` | * | Pi extension API |

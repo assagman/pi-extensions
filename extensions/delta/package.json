@@ -1,12 +1,14 @@
 {
   "name": "delta",
   "version": "1.0.0",
-  "description": "Phase-gate workflow + phase-boundary compaction: requirements → design → plan → implement ↔ test → review → deliver",
+  "description": "Persistent memory for AI agents using SQLite (KV + Episodic)",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "install": "./install.sh",
     "uninstall": "./uninstall.sh"
   },
@@ -15,12 +17,13 @@
   },
   "dependencies": {
     "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-ai": "*",
-    "@mariozechner/pi-tui": "*",
-    "@sinclair/typebox": "^0.32.15"
+    "@sinclair/typebox": "^0.32.15",
+    "better-sqlite3": "^11.7.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.0.18"
   }
 }
