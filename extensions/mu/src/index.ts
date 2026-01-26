@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { AssistantMessage } from "@mariozechner/pi-ai";
 import {
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -197,7 +198,7 @@ type ThinkingLevel = keyof typeof MODEL_COLORS.thinking;
 const rgbRaw = (r: number, g: number, b: number, text: string): string =>
   `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
 
-const _formatModelDisplay = (
+const formatModelDisplay = (
   provider: string | undefined,
   modelId: string | undefined,
   thinkingLevel: ThinkingLevel | undefined,
@@ -1191,6 +1192,11 @@ export default function (pi: ExtensionAPI) {
   // Setup UI patching on session start
   pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext) => {
     setupUIPatching(ctx);
+
+    // Enable enhanced model display footer
+    if (modelDisplayEnabled) {
+      enableModelDisplayFooter(ctx);
+    }
   });
 
   // When a turn starts (user message sent), set flag for next tool to add leading space
@@ -1440,4 +1446,197 @@ export default function (pi: ExtensionAPI) {
   for (const [name, factory, render] of tools) {
     override(name, factory, render);
   }
+
+  // ---------------------------------------------------------------------------
+  // Enhanced Model Display Footer
+  // ---------------------------------------------------------------------------
+  // Format: provider:model:thinkingLevel with custom colors
+  // - Provider: #17917F (teal)
+  // - Model: #85B06A (green)
+  // - Thinking: gradient #A17E57 (tan) → #F24C38 (bright red)
+
+  let modelDisplayEnabled = true;
+
+  const enableModelDisplayFooter = (ctx: ExtensionContext | ExtensionCommandContext) => {
+    if (!ctx.hasUI) return;
+
+    ctx.ui.setFooter((tui, theme, footerData) => {
+      const unsub = footerData.onBranchChange(() => tui.requestRender());
+
+      return {
+        dispose: unsub,
+        invalidate() {},
+        render(width: number): string[] {
+          // Compute tokens from session (single pass)
+          let totalInput = 0;
+          let totalOutput = 0;
+          let totalCacheRead = 0;
+          let totalCacheWrite = 0;
+          let totalCost = 0;
+          let lastAssistant: AssistantMessage | null = null;
+
+          for (const e of ctx.sessionManager.getBranch()) {
+            if (e.type === "message" && e.message.role === "assistant") {
+              const m = e.message as AssistantMessage;
+              totalInput += m.usage.input;
+              totalOutput += m.usage.output;
+              totalCacheRead += m.usage.cacheRead;
+              totalCacheWrite += m.usage.cacheWrite;
+              totalCost += m.usage.cost.total;
+              lastAssistant = m;
+            }
+          }
+
+          const contextTokens = lastAssistant
+            ? lastAssistant.usage.input +
+              lastAssistant.usage.output +
+              lastAssistant.usage.cacheRead +
+              lastAssistant.usage.cacheWrite
+            : 0;
+          const contextWindow = ctx.model?.contextWindow || 0;
+          const contextPercentValue = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;
+          const contextPercent = contextPercentValue.toFixed(1);
+
+          // Format working directory with git branch
+          let pwd = process.cwd();
+          const home = process.env.HOME || process.env.USERPROFILE;
+          if (home && pwd.startsWith(home)) {
+            pwd = `~${pwd.slice(home.length)}`;
+          }
+
+          const branch = footerData.getGitBranch();
+          if (branch) {
+            pwd = `${pwd} (${branch})`;
+          }
+
+          // Add session name if set
+          const sessionName = ctx.sessionManager.getSessionName();
+          if (sessionName) {
+            pwd = `${pwd} • ${sessionName}`;
+          }
+
+          // Truncate path if too long
+          if (pwd.length > width) {
+            const half = Math.floor(width / 2) - 2;
+            if (half > 1) {
+              const start = pwd.slice(0, half);
+              const endLen = half - 1;
+              const end = pwd.slice(pwd.length - endLen);
+              pwd = `${start}...${end}`;
+            } else {
+              pwd = pwd.slice(0, Math.max(1, width));
+            }
+          }
+
+          // Format token counts
+          const fmt = (n: number) => {
+            if (n < 1000) return n.toString();
+            if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+            if (n < 1000000) return `${Math.round(n / 1000)}k`;
+            if (n < 10000000) return `${(n / 1000000).toFixed(1)}M`;
+            return `${Math.round(n / 1000000)}M`;
+          };
+
+          // Build stats line
+          const statsParts: string[] = [];
+          if (totalInput) statsParts.push(`↑${fmt(totalInput)}`);
+          if (totalOutput) statsParts.push(`↓${fmt(totalOutput)}`);
+          if (totalCacheRead) statsParts.push(`R${fmt(totalCacheRead)}`);
+          if (totalCacheWrite) statsParts.push(`W${fmt(totalCacheWrite)}`);
+
+          // Cost with subscription indicator
+          const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
+          if (totalCost || usingSubscription) {
+            const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
+            statsParts.push(costStr);
+          }
+
+          // Context percentage with color coding
+          let contextPercentStr: string;
+          const contextPercentDisplay = `${contextPercent}%/${fmt(contextWindow)}`;
+          if (contextPercentValue > 90) {
+            contextPercentStr = theme.fg("error", contextPercentDisplay);
+          } else if (contextPercentValue > 70) {
+            contextPercentStr = theme.fg("warning", contextPercentDisplay);
+          } else {
+            contextPercentStr = contextPercentDisplay;
+          }
+          statsParts.push(contextPercentStr);
+
+          const statsLeft = statsParts.join(" ");
+
+          // Build model display: provider:model:thinkingLevel
+          const model = ctx.model;
+          const provider = model?.provider;
+          const modelId = model?.id;
+          const thinkingLevel = pi.getThinkingLevel() as ThinkingLevel;
+          const hasReasoning = model?.reasoning ?? false;
+
+          const rightSide = formatModelDisplay(provider, modelId, thinkingLevel, hasReasoning);
+
+          // Calculate padding
+          const statsLeftWidth = visibleWidth(statsLeft);
+          const rightSideWidth = visibleWidth(rightSide);
+          const minPadding = 2;
+          const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
+
+          let statsLine: string;
+          if (totalNeeded <= width) {
+            const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
+            statsLine = statsLeft + padding + rightSide;
+          } else {
+            const availableForRight = width - statsLeftWidth - minPadding;
+            if (availableForRight > 3) {
+              const truncatedRight = truncateToWidth(rightSide, availableForRight);
+              const truncatedWidth = visibleWidth(truncatedRight);
+              const padding = " ".repeat(width - statsLeftWidth - truncatedWidth);
+              statsLine = statsLeft + padding + truncatedRight;
+            } else {
+              statsLine = statsLeft;
+            }
+          }
+
+          // Apply dim styling
+          const dimStatsLeft = theme.fg("dim", statsLeft);
+          const remainder = statsLine.slice(statsLeft.length);
+          const dimRemainder = theme.fg("dim", remainder.replace(rightSide, "")) + rightSide;
+
+          const lines = [theme.fg("dim", pwd), dimStatsLeft + dimRemainder];
+
+          // Add extension statuses
+          const extensionStatuses = footerData.getExtensionStatuses();
+          if (extensionStatuses.size > 0) {
+            const sortedStatuses = Array.from(extensionStatuses.entries())
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([, text]) =>
+                text
+                  .replace(/[\r\n\t]/g, " ")
+                  .replace(/ +/g, " ")
+                  .trim()
+              );
+            const statusLine = sortedStatuses.join(" ");
+            lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+          }
+
+          return lines;
+        },
+      };
+    });
+  };
+
+  // Command to toggle model display
+  pi.registerCommand("mu-model", {
+    description: "mu: toggle enhanced model display in footer",
+    handler: async (_args, ctx) => {
+      modelDisplayEnabled = !modelDisplayEnabled;
+
+      if (modelDisplayEnabled) {
+        enableModelDisplayFooter(ctx);
+        ctx.ui.notify("Enhanced model display enabled", "info");
+      } else {
+        ctx.ui.setFooter(undefined);
+        ctx.ui.notify("Default footer restored", "info");
+      }
+    },
+  });
 }
