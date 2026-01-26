@@ -248,7 +248,6 @@ class BoxedToolCard implements Component {
     this.args = args;
     this.theme = theme;
     this.sig = computeSignature(toolName, args);
-    // Capture and consume the leading space flag
     this.needsLeadingSpace = nextToolNeedsLeadingSpace;
     nextToolNeedsLeadingSpace = false;
   }
@@ -302,6 +301,7 @@ class BoxedToolCard implements Component {
     const icon = TOOL_ICONS[this.toolName] ?? "⚙";
     const content = this.textGenerator();
     const innerW = width - 4;
+    const border = rgb(color, "│");
 
     let statusStr: string;
     if (status === "running") {
@@ -316,21 +316,115 @@ class BoxedToolCard implements Component {
     const timerStr = elapsed ? rgb("dim", ` ${elapsed}`) : "";
     const rightPart = `${statusStr}${timerStr}`;
     const rightLen = visibleWidth(rightPart);
-    const leftMax = innerW - rightLen - 1;
 
+    // For bash: render multiline with full command, no truncation
+    if (this.toolName === "bash") {
+      const rawCmd = typeof this.args.command === "string" ? this.args.command : "";
+      const lines = this.renderBashMultiline(
+        rawCmd,
+        icon,
+        color,
+        border,
+        rightPart,
+        rightLen,
+        innerW
+      );
+      this.lastWidth = width;
+      this.cachedLines = this.needsLeadingSpace ? ["", ...lines] : lines;
+      return this.cachedLines;
+    }
+
+    // Default: single-line truncated rendering for other tools
+    const leftMax = innerW - rightLen - 1;
     const iconColored = rgb(color, icon);
     const leftContent = `${iconColored} ${content}`;
     const leftTrunc = truncateToWidth(leftContent, leftMax);
     const leftLen = visibleWidth(leftTrunc);
     const padding = " ".repeat(Math.max(0, innerW - leftLen - rightLen));
 
-    const border = rgb(color, "│");
     const line = `${border} ${leftTrunc}${padding}${rightPart} ${border}`;
 
     this.lastWidth = width;
-    // Add leading blank line if this tool follows a user message
     this.cachedLines = this.needsLeadingSpace ? ["", line] : [line];
     return this.cachedLines;
+  }
+
+  private renderBashMultiline(
+    rawCmd: string,
+    icon: string,
+    color: ColorKey,
+    border: string,
+    rightPart: string,
+    rightLen: number,
+    innerW: number
+  ): string[] {
+    const iconColored = rgb(color, icon);
+    const prefix = `${iconColored} ${rgb("orange", "bash")} ${rgb("dim", "$")} `;
+    const prefixLen = visibleWidth(prefix);
+    const indent = " ".repeat(prefixLen);
+
+    // Available width for command text on first line (needs room for status)
+    const firstLineWidth = innerW - prefixLen - rightLen - 1;
+    // Continuation lines have full width minus indent
+    const contLineWidth = innerW - prefixLen;
+
+    if (firstLineWidth <= 0 || contLineWidth <= 0) {
+      // Terminal too narrow, show truncated
+      const fallback = `${prefix}${rgb("white", truncateToWidth(rawCmd, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
+      const fallbackLen = visibleWidth(fallback);
+      const padding = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
+      return [`${border} ${fallback}${padding}${rightPart} ${border}`];
+    }
+
+    // Split command preserving original line breaks, then wrap each segment
+    const cmdLines = rawCmd.split("\n");
+    const allWrapped: string[] = [];
+
+    for (const cmdLine of cmdLines) {
+      if (allWrapped.length === 0) {
+        // First segment uses first-line width
+        const wrapped = wrapTextWithAnsi(cmdLine, firstLineWidth);
+        if (wrapped.length === 0) {
+          allWrapped.push("");
+        } else {
+          allWrapped.push(wrapped[0]);
+          // Remaining from first segment use continuation width
+          if (wrapped.length > 1) {
+            const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contLineWidth);
+            allWrapped.push(...rewrapped);
+          }
+        }
+      } else {
+        // Subsequent segments use continuation width
+        const wrapped = wrapTextWithAnsi(cmdLine, contLineWidth);
+        allWrapped.push(...(wrapped.length > 0 ? wrapped : [""]));
+      }
+    }
+
+    const resultLines: string[] = [];
+
+    for (let i = 0; i < allWrapped.length; i++) {
+      const line = allWrapped[i];
+      if (i === 0) {
+        // First line: prefix + command + padding + status
+        const lineContent = `${prefix}${rgb("white", line)}`;
+        const lineLen = visibleWidth(lineContent);
+        const padding = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+        resultLines.push(`${border} ${lineContent}${padding}${rightPart} ${border}`);
+      } else {
+        // Continuation: indent + command + padding
+        const lineContent = `${indent}${rgb("white", line)}`;
+        const lineLen = visibleWidth(lineContent);
+        const padding = " ".repeat(Math.max(0, innerW - lineLen));
+        resultLines.push(`${border} ${lineContent}${padding} ${border}`);
+      }
+    }
+
+    return resultLines.length > 0
+      ? resultLines
+      : [
+          `${border} ${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart} ${border}`,
+        ];
   }
 
   invalidate(): void {
@@ -836,6 +930,89 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       }
     };
 
+    // Render bash command as multiline (for patchTool path)
+    const renderBashMultilineForPatch = (
+      rawCmd: string,
+      icon: string,
+      color: ColorKey,
+      border: string,
+      rightPart: string,
+      rightLen: number,
+      innerW: number,
+      status: ToolStatus,
+      pulsePhase: number
+    ): string[] => {
+      let iconColored: string;
+      let bashColored: string;
+      if (status === "running") {
+        const brightness =
+          MU_CONFIG.PULSE_MIN_BRIGHTNESS +
+          (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * (0.5 + 0.5 * Math.sin(pulsePhase));
+        iconColored = rgbPulse(color, icon, brightness);
+        bashColored = rgbPulse("orange", "bash", brightness);
+      } else {
+        iconColored = rgb(color, icon);
+        bashColored = rgb("orange", "bash");
+      }
+
+      const prefix = `${iconColored} ${bashColored} ${rgb("dim", "$")} `;
+      const prefixLen = visibleWidth(prefix);
+      const indent = " ".repeat(prefixLen);
+
+      const firstLineWidth = innerW - prefixLen - rightLen - 1;
+      const contLineWidth = innerW - prefixLen;
+
+      if (firstLineWidth <= 0 || contLineWidth <= 0) {
+        const fallback = `${prefix}${rgb("white", truncateToWidth(rawCmd, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
+        const fallbackLen = visibleWidth(fallback);
+        const padding = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
+        return [`${border} ${fallback}${padding}${rightPart} ${border}`];
+      }
+
+      const cmdLines = rawCmd.split("\n");
+      const allWrapped: string[] = [];
+
+      for (const cmdLine of cmdLines) {
+        if (allWrapped.length === 0) {
+          const wrapped = wrapTextWithAnsi(cmdLine, firstLineWidth);
+          if (wrapped.length === 0) {
+            allWrapped.push("");
+          } else {
+            allWrapped.push(wrapped[0]);
+            if (wrapped.length > 1) {
+              const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contLineWidth);
+              allWrapped.push(...rewrapped);
+            }
+          }
+        } else {
+          const wrapped = wrapTextWithAnsi(cmdLine, contLineWidth);
+          allWrapped.push(...(wrapped.length > 0 ? wrapped : [""]));
+        }
+      }
+
+      const resultLines: string[] = [];
+      for (let i = 0; i < allWrapped.length; i++) {
+        const line = allWrapped[i];
+        if (i === 0) {
+          const lineContent = `${prefix}${rgb("white", line)}`;
+          const lineLen = visibleWidth(lineContent);
+          const padding = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+          resultLines.push(`${border} ${lineContent}${padding}${rightPart} ${border}`);
+        } else {
+          const lineContent = `${indent}${rgb("white", line)}`;
+          const lineLen = visibleWidth(lineContent);
+          const padding = " ".repeat(Math.max(0, innerW - lineLen));
+          resultLines.push(`${border} ${lineContent}${padding} ${border}`);
+        }
+      }
+
+      return resultLines.length > 0
+        ? resultLines
+        : [
+            `${border} ${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart} ${border}`,
+          ];
+    };
+
     // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
     const patchTool = (tool: any, addLeadingSpace = false) => {
       if (tool._mu_patched) return;
@@ -913,14 +1090,35 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         const dur = completedDurations.get(sig) ?? (status !== "running" ? 0 : elapsed);
         const timerStr = dur >= 1000 ? ` ${(dur / 1000).toFixed(1)}s` : "";
 
-        const argsPreview = formatToolArgsPreview(toolName, args);
         const innerW = width - 4;
+        const border = rgb(color, "│");
 
         const statusStr = rgb(color, sym);
         const timerColored = rgb("dim", timerStr);
         const rightPart = `${statusStr}${timerColored}`;
         const rightLen = visibleWidth(rightPart);
 
+        // For bash: render multiline with full command, no truncation
+        if (toolName === "bash") {
+          const rawCmd = typeof args.command === "string" ? args.command : "";
+          const lines = renderBashMultilineForPatch(
+            rawCmd,
+            icon,
+            color,
+            border,
+            rightPart,
+            rightLen,
+            innerW,
+            status,
+            pulsePhase
+          );
+          if (tool._mu_leading_space) {
+            return ["", ...lines];
+          }
+          return lines;
+        }
+
+        // Default: single-line truncated rendering for other tools
         const leftMax = innerW - rightLen - 1;
 
         // Apply pulsing effect to icon and name when running
@@ -937,13 +1135,13 @@ const setupUIPatching = (ctx: ExtensionContext) => {
           nameColored = rgb(color, toolName);
         }
 
+        const argsPreview = formatToolArgsPreview(toolName, args);
         const argsColored = rgb("dim", ` ${argsPreview}`);
         const leftContent = `${iconColored} ${nameColored}${argsColored}`;
         const leftTrunc = truncateToWidth(leftContent, leftMax);
         const leftLen = visibleWidth(leftTrunc);
 
         const padding = " ".repeat(Math.max(0, innerW - leftLen - rightLen));
-        const border = rgb(color, "│");
         const line = `${border} ${leftTrunc}${padding}${rightPart} ${border}`;
 
         // Add leading blank line if this tool follows a user message
