@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
+    "test": "bun test",
     "install": "./install.sh",
     "uninstall": "./uninstall.sh"
   },
@@ -20,6 +21,7 @@
     "@sinclair/typebox": "^0.32.15"
   },
   "devDependencies": {
+    "@types/bun": "^1.2.19",
     "@types/node": "^22",
     "typescript": "^5"
   }
