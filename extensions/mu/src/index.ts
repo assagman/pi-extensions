@@ -229,11 +229,19 @@ interface ToolState {
 }
 
 const activeToolsById = new Map<string, ToolState>();
-const activeToolsBySig = new Map<string, ToolState>();
-const completedDurations = new Map<string, number>();
+const toolStatesBySig = new Map<string, ToolState[]>();
 const fullToolResultContentById = new Map<string, unknown>();
+const cardInstanceCountBySig = new Map<string, number>();
 
-const getToolState = (sig: string): ToolState | undefined => activeToolsBySig.get(sig);
+const getToolStateByIndex = (sig: string, index: number): ToolState | undefined => {
+  const states = toolStatesBySig.get(sig);
+  return states?.[index];
+};
+
+const getToolState = (sig: string): ToolState | undefined => {
+  const states = toolStatesBySig.get(sig);
+  return states?.[states.length - 1];
+};
 
 // Track if next tool card should have leading space (after user message)
 let nextToolNeedsLeadingSpace = false;
@@ -357,6 +365,7 @@ class BoxedToolCard implements Component {
   private args: Record<string, unknown>;
   private theme: MuTheme;
   private sig: string;
+  private instanceIndex: number;
   private pulsePhase = 0;
   private pulseTimer: ReturnType<typeof setInterval> | null = null;
   private _invalidate?: () => void;
@@ -375,20 +384,21 @@ class BoxedToolCard implements Component {
     this.args = args;
     this.theme = theme;
     this.sig = computeSignature(toolName, args);
+    this.instanceIndex = cardInstanceCountBySig.get(this.sig) ?? 0;
+    cardInstanceCountBySig.set(this.sig, this.instanceIndex + 1);
     this.needsLeadingSpace = nextToolNeedsLeadingSpace;
     nextToolNeedsLeadingSpace = false;
   }
 
   private getStatus(): ToolStatus {
-    const state = getToolState(this.sig);
+    const state = getToolStateByIndex(this.sig, this.instanceIndex);
     return state?.status ?? "pending";
   }
 
   private getElapsed(): number {
-    const completed = completedDurations.get(this.sig);
-    if (completed !== undefined) return completed;
-    const state = getToolState(this.sig);
+    const state = getToolStateByIndex(this.sig, this.instanceIndex);
     if (!state) return 0;
+    if (state.duration !== undefined) return state.duration;
     return Date.now() - state.startTime;
   }
 
@@ -1162,7 +1172,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         const { sym, color } = STATUS[status];
 
         const elapsed = state ? Date.now() - state.startTime : 0;
-        const dur = completedDurations.get(sig) ?? (status !== "running" ? 0 : elapsed);
+        const dur = state?.duration ?? (status !== "running" ? 0 : elapsed);
         const timerStr = dur >= 1000 ? ` ${(dur / 1000).toFixed(1)}s` : "";
 
         const innerW = width - 2;
@@ -1385,7 +1395,9 @@ export default function (pi: ExtensionAPI) {
     };
 
     activeToolsById.set(toolCallId, state);
-    activeToolsBySig.set(sig, state);
+    const states = toolStatesBySig.get(sig) ?? [];
+    states.push(state);
+    toolStatesBySig.set(sig, states);
   });
 
   pi.on("tool_result", (event: ToolResultEvent, _ctx: ExtensionContext) => {
@@ -1396,8 +1408,6 @@ export default function (pi: ExtensionAPI) {
     const duration = Date.now() - state.startTime;
     state.duration = duration;
     state.status = isError ? "failed" : "success";
-
-    completedDurations.set(state.sig, duration);
     fullToolResultContentById.set(toolCallId, content);
 
     const label = `${state.toolName} ${formatToolArgsPreview(state.toolName, state.args)}`;
@@ -1418,9 +1428,12 @@ export default function (pi: ExtensionAPI) {
       if (removed) fullToolResultContentById.delete(removed.key);
     }
 
-    if (completedDurations.size > MU_CONFIG.MAX_COMPLETED_DURATIONS) {
-      const first = completedDurations.keys().next().value;
-      if (first) completedDurations.delete(first);
+    if (toolStatesBySig.size > MU_CONFIG.MAX_COMPLETED_DURATIONS) {
+      const first = toolStatesBySig.keys().next().value;
+      if (first) {
+        toolStatesBySig.delete(first);
+        cardInstanceCountBySig.delete(first);
+      }
     }
   });
 
