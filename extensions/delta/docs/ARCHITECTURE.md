@@ -46,9 +46,10 @@ Delta is a persistent memory extension for Pi coding agent that provides SQLite-
 
 | File | LOC | Purpose |
 |------|-----|---------|
-| `index.ts` | ~53 | Extension entry, event handlers |
-| `db.ts` | ~800 | SQLite operations, schema, queries |
-| `tools.ts` | ~504 | Tool definitions, TypeBox schemas |
+| `index.ts` | ~170 | Extension entry, event handlers, prompt builders |
+| `db.ts` | ~890 | SQLite operations, schema, queries |
+| `tools.ts` | ~490 | Tool definitions, TypeBox schemas |
+| `db.test.ts` | ~320 | Database unit tests (vitest) |
 
 ## Data Flow
 

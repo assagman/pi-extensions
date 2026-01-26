@@ -6,18 +6,23 @@
 
 | Extension | Description |
 |-----------|-------------|
-| **delta** | Phase-gate workflow: requirements → design → plan → implement ↔ test → review → deliver |
+| **delta** | Persistent memory: SQLite-backed storage for tasks, notes, key-value pairs, episodic events |
 | **mu**    | Condenses tool call/result output in transcript while preserving full outputs for LLM |
-| **theta** | Code review extension using critique for visual diff sharing |
+| **theta** | Code review dashboard with 3-column TUI (commits, files, diff) |
 
 ## Repository Structure
 
 ```
 pi-extensions/
 ├── extensions/
-│   ├── delta/          # Phase-gate workflow
+│   ├── delta/          # Persistent memory
 │   ├── mu/             # Output condensation
 │   └── theta/          # Code review
+├── biome.json          # Linter/formatter config
+├── package.json        # Workspace config
+├── llms.txt            # LLM context doc
+├── AGENTS.md           # AI agent instructions
+├── LICENSE             # MIT
 └── README.md
 ```
 
