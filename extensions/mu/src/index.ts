@@ -813,33 +813,26 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         }
       }
 
-      // Override render to produce compact output with prefix, no truncation
-      const origRender = comp.render?.bind(comp);
-      if (!origRender) return;
-
-      comp.render = (w: number): string[] => {
-        const origLines: string[] = origRender(w - 2);
-
-        // Filter out empty/spacer lines and strip ANSI to get raw text
-        const cleanLines: string[] = [];
-        const ansiEscape = String.raw`\x1b\[[0-9;]*m`;
-        const ansiRegex = new RegExp(ansiEscape, "g");
-        for (const line of origLines) {
-          const stripped = line.replace(ansiRegex, "").trim();
-          if (stripped.length > 0) {
-            // Keep raw text, we'll apply our own styling
-            cleanLines.push(stripped);
-          }
+      // Find the Markdown child and extract its text for proper rendering
+      let markdownText = "";
+      for (const child of comp.children ?? []) {
+        if (child.constructor?.name === "Markdown" && child.text) {
+          markdownText = child.text;
+          break;
         }
+      }
 
-        if (cleanLines.length === 0) return [];
+      // Override render to use Markdown component with teal default text color
+      comp.render = (w: number): string[] => {
+        if (!markdownText) return [];
+
+        const mdTheme = getMarkdownTheme();
+        const defaultTextStyle = { color: (s: string) => rgb("teal", s) };
+        const md = new Markdown(markdownText, 0, 0, mdTheme, defaultTextStyle);
+        const lines = md.render(w);
 
         // Add blank line before user message for separation
-        const result = [""];
-        for (const line of cleanLines) {
-          result.push(rgb("teal", line));
-        }
-        return result;
+        return ["", ...lines];
       };
     };
 
