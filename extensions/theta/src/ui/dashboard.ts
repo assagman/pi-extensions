@@ -327,7 +327,7 @@ export class Dashboard implements Component {
     // Column widths: 20-20-60 distribution
     const commitWidth = Math.floor(width * 0.2);
     const fileWidth = Math.floor(width * 0.2);
-    const diffWidth = width - commitWidth - fileWidth - 4; // 4 for separators
+    const diffWidth = width - commitWidth - fileWidth - 2; // 2 for separators
 
     const lines: string[] = [];
 

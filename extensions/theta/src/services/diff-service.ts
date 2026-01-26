@@ -130,7 +130,7 @@ export class DiffService {
    */
   async getCommits(skip = 0, limit = 50): Promise<CommitInfo[]> {
     const format = "%H%x00%h%x00%s"; // full sha, short sha, subject (NUL-separated)
-    const cmd = `git log --format="${format}" --skip=${skip} -n ${limit}`;
+    const cmd = `git log --format="${format}" --skip=${skip} -n ${limit} -- .`;
 
     try {
       const { stdout } = await execAsync(cmd, {
@@ -179,8 +179,8 @@ export class DiffService {
             maxBuffer: 1024 * 1024 * 10,
           });
           raw = stdout;
-        } catch {
-          throw e;
+        } catch (showError) {
+          throw showError;
         }
       } else {
         throw e;
@@ -206,21 +206,5 @@ export class DiffService {
     }
 
     return { raw, files, metadata };
-  }
-
-  /**
-   * Get files changed in a specific commit
-   */
-  async getCommitFiles(sha: string): Promise<string[]> {
-    const cmd = `git diff-tree --no-commit-id --name-only -r ${sha} --relative`;
-    try {
-      const { stdout } = await execAsync(cmd, {
-        cwd: process.cwd(),
-        maxBuffer: 1024 * 1024 * 10,
-      });
-      return stdout.trim().split("\n").filter(Boolean);
-    } catch {
-      return [];
-    }
   }
 }
