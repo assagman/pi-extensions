@@ -16,7 +16,7 @@
   "dependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
-    "@sinclair/typebox": "^0.32.15"
+    "@pierre/diffs": "^1.0.8"
   },
   "devDependencies": {
     "@types/node": "^25.0.10",
