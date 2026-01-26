@@ -1,10 +1,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { registerTools } from "./tools/index.js";
 import { Dashboard } from "./ui/dashboard.js";
 
 export default function (pi: ExtensionAPI) {
-  registerTools(pi);
-
   pi.registerCommand("theta", {
     description: "Open Theta Code Review Dashboard",
     handler: async (_args, ctx) => {
@@ -17,11 +14,5 @@ export default function (pi: ExtensionAPI) {
         return new Dashboard(tui, theme, keybindings, done);
       });
     },
-  });
-
-  pi.on("session_start", async (_event, _ctx) => {
-    // notification suppressed to avoid noise during dev, can be enabled for debugging
-    // ctx.ui.notify("Theta extension loaded", "info");
-    // console.log("Theta extension loaded");
   });
 }

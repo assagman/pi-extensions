@@ -1,22 +1,36 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { parsePatchFiles, type FileDiffMetadata, type Hunk } from "@pierre/diffs";
 
 const execAsync = promisify(exec);
 
 export interface DiffFile {
   path: string;
+  prevPath?: string;
   additions: number;
   deletions: number;
+  type: "change" | "rename-pure" | "rename-changed" | "new" | "deleted";
 }
 
 export interface DiffResult {
   raw: string;
   files: DiffFile[];
+  metadata: FileDiffMetadata[];
+}
+
+function countHunkStats(hunks: Hunk[]): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const hunk of hunks) {
+    additions += hunk.additionLines;
+    deletions += hunk.deletionLines;
+  }
+  return { additions, deletions };
 }
 
 export class DiffService {
   async getFiles(base?: string, head?: string): Promise<string[]> {
-    const args = [];
+    const args: string[] = [];
     if (base) args.push(base);
     if (head) args.push(head);
 
@@ -39,14 +53,12 @@ export class DiffService {
   }
 
   async getDiff(base?: string, head?: string, file?: string): Promise<DiffResult> {
-    const args = [];
+    const args: string[] = [];
     if (base) args.push(base);
     if (head) args.push(head);
 
     // Default to HEAD if no refs provided
-    if (args.length === 0 && !file) {
-      args.push("HEAD");
-    } else if (args.length === 0 && file) {
+    if (args.length === 0) {
       args.push("HEAD");
     }
 
@@ -67,36 +79,25 @@ export class DiffService {
       throw e;
     }
 
-    // Get stats
-    const statCmd = `git diff --numstat ${args.join(" ")}`;
-    let files: DiffFile[] = [];
-    try {
-      const { stdout } = await execAsync(statCmd, {
-        cwd: process.cwd(),
-        maxBuffer: 1024 * 1024 * 10,
-      });
-      files = stdout
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => {
-          const parts = line.split(/\s+/);
-          // numstat output: additions deletions path
-          // path might contain spaces? git handles it, but usually separated by tab
-          // let's rely on split(/\s+/) for now as simple approach
-          const add = parts[0];
-          const del = parts[1];
-          const path = parts.slice(2).join(" ");
-          return {
-            path,
-            additions: Number.parseInt(add) || 0,
-            deletions: Number.parseInt(del) || 0,
-          };
+    // Parse with @pierre/diffs
+    const patches = parsePatchFiles(raw);
+    const metadata: FileDiffMetadata[] = [];
+    const files: DiffFile[] = [];
+
+    for (const patch of patches) {
+      for (const fileDiff of patch.files) {
+        metadata.push(fileDiff);
+        const stats = countHunkStats(fileDiff.hunks);
+        files.push({
+          path: fileDiff.name,
+          prevPath: fileDiff.prevName,
+          additions: stats.additions,
+          deletions: stats.deletions,
+          type: fileDiff.type,
         });
-    } catch (e) {
-      console.warn("Failed to get stats", e);
+      }
     }
 
-    return { raw, files };
+    return { raw, files, metadata };
   }
 }

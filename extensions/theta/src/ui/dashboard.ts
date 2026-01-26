@@ -1,12 +1,15 @@
 import type { Component, TUI } from "@mariozechner/pi-tui";
-import { DiffService } from "../services/diff-service.js";
+import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { DiffService, type DiffFile } from "../services/diff-service.js";
 
 export class Dashboard implements Component {
-  private files: string[] = [];
+  private files: DiffFile[] = [];
   private selectedIndex = 0;
   private diffContent = "Loading...";
   private diffService: DiffService;
-  private scrollOffset = 0;
+  private diffScrollOffset = 0;
+  private maxDiffLines = 0;
+  private contentHeight = 10;
 
   constructor(
     private tui: TUI,
@@ -23,9 +26,10 @@ export class Dashboard implements Component {
 
   async init() {
     try {
-      this.files = await this.diffService.getFiles();
+      const result = await this.diffService.getDiff();
+      this.files = result.files;
       if (this.files.length > 0) {
-        this.selectFile(0);
+        await this.selectFile(0);
       } else {
         this.diffContent = "No changes found.";
         this.refresh();
@@ -39,17 +43,24 @@ export class Dashboard implements Component {
   async selectFile(index: number) {
     this.selectedIndex = index;
     const file = this.files[index];
-    this.diffContent = `Loading diff for ${file}...`;
+    this.diffContent = `Loading diff for ${file.path}...`;
+    this.diffScrollOffset = 0;
     this.refresh();
 
     try {
-      const { raw } = await this.diffService.getDiff(undefined, undefined, file);
-      this.diffContent = raw || "No changes in file.";
+      const { raw } = await this.diffService.getDiff(undefined, undefined, file.path);
+      // Guard: only update if this file is still selected
+      if (this.selectedIndex === index) {
+        this.diffContent = raw || "No changes in file.";
+        this.refresh();
+      }
     } catch (_e) {
-      this.diffContent = "Error loading diff.";
+      // Guard: only show error if this file is still selected
+      if (this.selectedIndex === index) {
+        this.diffContent = "Error loading diff.";
+        this.refresh();
+      }
     }
-    this.scrollOffset = 0;
-    this.refresh();
   }
 
   invalidate() {
@@ -60,29 +71,85 @@ export class Dashboard implements Component {
     this.tui.requestRender();
   }
 
-  handleInput(key: string) {
-    if (key === "q" || key === "escape") {
+  private padToWidth(text: string, width: number): string {
+    const truncated = visibleWidth(text) > width ? truncateToWidth(text, width, "") : text;
+    const pad = width - visibleWidth(truncated);
+    return pad > 0 ? truncated + " ".repeat(pad) : truncated;
+  }
+
+  private truncateStartToWidth(text: string, width: number): string {
+    if (width <= 0) return "";
+    if (visibleWidth(text) <= width) return text;
+    if (width === 1) return "…";
+
+    const ellipsis = "…";
+    const target = Math.max(0, width - visibleWidth(ellipsis));
+
+    // Keep the tail of the string (paths are usually more useful at the end)
+    let tail = "";
+    for (let i = text.length - 1; i >= 0; i--) {
+      tail = text[i] + tail;
+      if (visibleWidth(tail) >= target) break;
+    }
+
+    tail = truncateToWidth(tail, target, "");
+    return ellipsis + tail;
+  }
+
+  handleInput(data: string) {
+    // Exit
+    if (matchesKey(data, "q") || matchesKey(data, "escape")) {
       this.done(null);
       return;
     }
-    if (key === "down" || key === "j") {
+    
+    // File navigation (C-n/C-p)
+    if (matchesKey(data, "ctrl+n")) {
       if (this.files.length > 0) {
         const next = (this.selectedIndex + 1) % this.files.length;
         this.selectFile(next);
       }
       return;
     }
-    if (key === "up" || key === "k") {
+    if (matchesKey(data, "ctrl+p")) {
       if (this.files.length > 0) {
         const prev = (this.selectedIndex - 1 + this.files.length) % this.files.length;
         this.selectFile(prev);
       }
       return;
     }
+    
+    // Diff scrolling (j/k, arrows)
+    const maxScroll = Math.max(0, this.maxDiffLines - this.contentHeight);
+
+    if (matchesKey(data, "j") || matchesKey(data, "down")) {
+      if (this.diffScrollOffset < maxScroll) {
+        this.diffScrollOffset++;
+        this.refresh();
+      }
+      return;
+    }
+    if (matchesKey(data, "k") || matchesKey(data, "up")) {
+      if (this.diffScrollOffset > 0) {
+        this.diffScrollOffset--;
+        this.refresh();
+      }
+      return;
+    }
+    if (matchesKey(data, "pageDown") || matchesKey(data, "ctrl+d")) {
+      this.diffScrollOffset = Math.min(this.diffScrollOffset + 20, maxScroll);
+      this.refresh();
+      return;
+    }
+    if (matchesKey(data, "pageUp") || matchesKey(data, "ctrl+u")) {
+      this.diffScrollOffset = Math.max(0, this.diffScrollOffset - 20);
+      this.refresh();
+      return;
+    }
   }
 
   render(width: number): string[] {
-    const sidebarWidth = Math.min(30, Math.floor(width * 0.3));
+    const sidebarWidth = Math.min(40, Math.floor(width * 0.35));
     const diffWidth = Math.max(10, width - sidebarWidth - 3);
 
     const lines: string[] = [];
@@ -91,42 +158,60 @@ export class Dashboard implements Component {
     const title = " Theta Code Review ";
     lines.push(this.theme.bg("selectedBg", this.theme.fg("text", title.padEnd(width))));
 
-    // Prepare file list
+    // Calculate available content height (reserve 2 for header + footer)
+    const termRows = this.tui.terminal.rows || 24;
+    this.contentHeight = Math.max(10, termRows - 3);
+
+    // Prepare file list with stats (ANSI-aware padding/truncation)
     const fileLines = this.files.map((f, i) => {
       const selected = i === this.selectedIndex;
-      const prefix = selected ? "> " : "  ";
-      let name = f;
-      if (name.length > sidebarWidth - 4) {
-        name = `...${name.slice(-(sidebarWidth - 7))}`;
-      }
-      const text = (prefix + name).padEnd(sidebarWidth);
-      return selected ? this.theme.fg("accent", text) : this.theme.fg("text", text);
+      const prefix = selected ? "▸ " : "  ";
+
+      const statsRaw = `+${f.additions} -${f.deletions} `;
+      const statsStyled =
+        this.theme.fg("success", `+${f.additions}`) + this.theme.fg("error", ` -${f.deletions}`) + " ";
+
+      const maxNameWidth = Math.max(0, sidebarWidth - visibleWidth(prefix) - visibleWidth(statsRaw));
+      const name = visibleWidth(f.path) > maxNameWidth ? this.truncateStartToWidth(f.path, maxNameWidth) : f.path;
+
+      const nameStyled = selected ? this.theme.fg("accent", name) : this.theme.fg("text", name);
+      const prefixStyled = selected ? this.theme.fg("accent", prefix) : this.theme.fg("dim", prefix);
+
+      return this.padToWidth(prefixStyled + statsStyled + nameStyled, sidebarWidth);
     });
 
-    // Prepare diff content
+    // Prepare diff content with scrolling
     const diffLinesRaw = this.diffContent.split("\n");
-    const diffViewLines = diffLinesRaw.map((l) => {
-      let styled = l;
-      if (l.length > diffWidth) {
-        styled = l.slice(0, diffWidth);
-      }
+    this.maxDiffLines = diffLinesRaw.length;
+    
+    const visibleDiffLines = diffLinesRaw.slice(
+      this.diffScrollOffset, 
+      this.diffScrollOffset + this.contentHeight
+    );
+    
+    const diffViewLines = visibleDiffLines.map((l) => {
+      const truncated = visibleWidth(l) > diffWidth ? truncateToWidth(l, diffWidth, "…") : l;
 
-      if (l.startsWith("+")) return this.theme.fg("success", styled);
-      if (l.startsWith("-")) return this.theme.fg("error", styled);
-      if (l.startsWith("@")) return this.theme.fg("accent", styled);
-      return this.theme.fg("text", styled);
+      if (l.startsWith("+")) return this.theme.fg("success", truncated);
+      if (l.startsWith("-")) return this.theme.fg("error", truncated);
+      if (l.startsWith("@@")) return this.theme.fg("accent", truncated);
+      if (l.startsWith("diff ") || l.startsWith("index ")) return this.theme.fg("dim", truncated);
+      return this.theme.fg("text", truncated);
     });
 
-    const contentHeight = Math.max(fileLines.length, diffViewLines.length, 20);
-
-    for (let i = 0; i < contentHeight; i++) {
-      const left = fileLines[i] || "".padEnd(sidebarWidth);
+    // Render content rows
+    for (let i = 0; i < this.contentHeight; i++) {
+      const left = this.padToWidth(fileLines[i] || "", sidebarWidth);
       const right = diffViewLines[i] || "";
       const separator = this.theme.fg("dim", " │ ");
       lines.push(left + separator + right);
     }
 
-    lines.push(this.theme.fg("dim", " [j/k] Navigate  [q] Quit"));
+    // Footer with scroll indicator
+    const scrollInfo = this.maxDiffLines > this.contentHeight 
+      ? ` (${this.diffScrollOffset + 1}-${Math.min(this.diffScrollOffset + this.contentHeight, this.maxDiffLines)}/${this.maxDiffLines})` 
+      : "";
+    lines.push(this.theme.fg("dim", ` [C-n/C-p] Files  [j/k] Scroll  [q] Quit${scrollInfo}`));
 
     return lines;
   }
