@@ -7,7 +7,7 @@ DIST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dist"
 
 # Build
 echo "Building $EXT_NAME..."
-bun run build
+npm run build
 
 # Verify dist exists
 if [ ! -d "$DIST_DIR" ]; then

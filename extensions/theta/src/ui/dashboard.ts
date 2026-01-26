@@ -1,6 +1,6 @@
 import type { Component, TUI } from "@mariozechner/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { DiffService, type DiffFile, type CommitInfo } from "../services/diff-service.js";
+import { type CommitInfo, type DiffFile, DiffService } from "../services/diff-service.js";
 
 type Panel = "commits" | "files" | "diff";
 
@@ -57,7 +57,12 @@ export class Dashboard implements Component {
       // Build commit list
       if (hasUncommitted) {
         this.commits = [
-          { sha: UNCOMMITTED_SHA, shortSha: "———", subject: "Uncommitted changes", isUncommitted: true },
+          {
+            sha: UNCOMMITTED_SHA,
+            shortSha: "———",
+            subject: "Uncommitted changes",
+            isUncommitted: true,
+          },
           ...commits,
         ];
       } else {
@@ -198,7 +203,7 @@ export class Dashboard implements Component {
       if (visibleWidth(tail) >= target) break;
     }
     tail = truncateToWidth(tail, target, "");
-    return "…" + tail;
+    return `…${tail}`;
   }
 
   handleInput(data: string) {
@@ -332,17 +337,23 @@ export class Dashboard implements Component {
     const lines: string[] = [];
 
     // Header row with focus indication
-    const commitHeader = this.activePanel === "commits" 
-      ? this.theme.bg("selectedBg", this.theme.fg("accent", this.padToWidth(" COMMITS", commitWidth)))
-      : this.theme.fg("dim", this.padToWidth(" COMMITS", commitWidth));
-    
-    const fileHeader = this.activePanel === "files"
-      ? this.theme.bg("selectedBg", this.theme.fg("accent", this.padToWidth(" FILES", fileWidth)))
-      : this.theme.fg("dim", this.padToWidth(" FILES", fileWidth));
-    
-    const diffHeader = this.activePanel === "diff"
-      ? this.theme.bg("selectedBg", this.theme.fg("accent", this.padToWidth(" DIFF", diffWidth)))
-      : this.theme.fg("dim", this.padToWidth(" DIFF", diffWidth));
+    const commitHeader =
+      this.activePanel === "commits"
+        ? this.theme.bg(
+            "selectedBg",
+            this.theme.fg("accent", this.padToWidth(" COMMITS", commitWidth))
+          )
+        : this.theme.fg("dim", this.padToWidth(" COMMITS", commitWidth));
+
+    const fileHeader =
+      this.activePanel === "files"
+        ? this.theme.bg("selectedBg", this.theme.fg("accent", this.padToWidth(" FILES", fileWidth)))
+        : this.theme.fg("dim", this.padToWidth(" FILES", fileWidth));
+
+    const diffHeader =
+      this.activePanel === "diff"
+        ? this.theme.bg("selectedBg", this.theme.fg("accent", this.padToWidth(" DIFF", diffWidth)))
+        : this.theme.fg("dim", this.padToWidth(" DIFF", diffWidth));
 
     const sep = this.theme.fg("dim", "│");
     lines.push(commitHeader + sep + fileHeader + sep + diffHeader);
@@ -369,11 +380,17 @@ export class Dashboard implements Component {
     }
 
     // Footer
-    const scrollInfo = this.maxDiffLines > this.contentHeight
-      ? ` (${this.diffScrollOffset + 1}-${Math.min(this.diffScrollOffset + this.contentHeight, this.maxDiffLines)}/${this.maxDiffLines})`
-      : "";
+    const scrollInfo =
+      this.maxDiffLines > this.contentHeight
+        ? ` (${this.diffScrollOffset + 1}-${Math.min(this.diffScrollOffset + this.contentHeight, this.maxDiffLines)}/${this.maxDiffLines})`
+        : "";
     const loadingIndicator = this.isLoadingCommits ? " [loading...]" : "";
-    lines.push(this.theme.fg("dim", ` [h/l] Panel  [j/k] Navigate  [PgUp/PgDn] Fast  [q] Quit${scrollInfo}${loadingIndicator}`));
+    lines.push(
+      this.theme.fg(
+        "dim",
+        ` [h/l] Panel  [j/k] Navigate  [PgUp/PgDn] Fast  [q] Quit${scrollInfo}${loadingIndicator}`
+      )
+    );
 
     return lines;
   }
@@ -383,7 +400,7 @@ export class Dashboard implements Component {
 
     // Calculate visible window
     const visibleCount = this.contentHeight;
-    
+
     // Adjust scroll to keep selection visible
     if (this.commitIndex < this.commitScrollOffset) {
       this.commitScrollOffset = this.commitIndex;
@@ -461,8 +478,10 @@ export class Dashboard implements Component {
       const maxName = Math.max(0, width - visibleWidth(prefix) - visibleWidth(statsRaw));
       const name = this.truncateStartToWidth(file.path, maxName);
 
-      const statsStyled = this.theme.fg("success", `+${file.additions}`) + 
-                          this.theme.fg("error", ` -${file.deletions}`) + " ";
+      const statsStyled = `${
+        this.theme.fg("success", `+${file.additions}`) +
+        this.theme.fg("error", ` -${file.deletions}`)
+      } `;
 
       let nameStyled: string;
       if (selected && focused) {
@@ -473,8 +492,8 @@ export class Dashboard implements Component {
         nameStyled = this.theme.fg("text", name);
       }
 
-      const prefixStyled = selected 
-        ? this.theme.fg("accent", prefix) 
+      const prefixStyled = selected
+        ? this.theme.fg("accent", prefix)
         : this.theme.fg("dim", prefix);
 
       let line = this.padToWidth(prefixStyled + statsStyled + nameStyled, width);
