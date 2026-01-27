@@ -576,7 +576,7 @@ class BoxedToolCard implements Component {
     let inDQ = false;
 
     for (const cmdLine of cmdLines) {
-      const highlighted = highlightBashLine(cmdLine);
+      const highlighted = highlightBashLine(cmdLine, inSQ, inDQ);
       const inQuote = inSQ || inDQ;
       // Continuation if: inside a quoted string, or previous line ended with chain operator
       const isCont = inQuote || prevChained;
@@ -1125,7 +1125,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       let inDQ = false;
 
       for (const srcLine of srcLines) {
-        const highlighted = highlightBashLine(srcLine);
+        const highlighted = highlightBashLine(srcLine, inSQ, inDQ);
         const inQuote = inSQ || inDQ;
         // Continuation if: inside a quoted string, or previous line ended with chain operator
         const isCont = inQuote || prevChained;
@@ -1584,10 +1584,42 @@ function bashUpdateQuoteState(
   return [sq, dq];
 }
 
-function highlightBashLine(line: string): string {
+function highlightBashLine(line: string, startInSQ = false, startInDQ = false): string {
   let result = "";
   let i = 0;
-  let cmdPos = true; // next word is a command name
+  let cmdPos = !startInSQ && !startInDQ; // inside a quote = not command position
+
+  // If continuing inside a single-quoted string from a previous line
+  if (startInSQ) {
+    const end = line.indexOf("'", i);
+    if (end === -1) {
+      return syn("syntaxString", line);
+    }
+    result += syn("syntaxString", line.slice(0, end + 1));
+    i = end + 1;
+    cmdPos = false;
+  } else if (startInDQ) {
+    // Continuing inside a double-quoted string from a previous line
+    let closed = false;
+    let j = 0;
+    while (j < line.length) {
+      if (line[j] === "\\" && j + 1 < line.length) {
+        j += 2;
+        continue;
+      }
+      if (line[j] === '"') {
+        result += syn("syntaxString", line.slice(0, j + 1));
+        i = j + 1;
+        cmdPos = false;
+        closed = true;
+        break;
+      }
+      j++;
+    }
+    if (!closed) {
+      return syn("syntaxString", line);
+    }
+  }
 
   while (i < line.length) {
     // Whitespace
