@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import {
+  type AgentEndEvent,
+  type AgentStartEvent,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
@@ -20,7 +22,6 @@ import {
   type Component,
   type KeyId,
   Markdown,
-  type TUI,
   Text,
   matchesKey,
   truncateToWidth,
@@ -98,98 +99,6 @@ const MU_CONFIG = {
 const MU_TOOL_VIEWER_SHORTCUT = "ctrl+alt+o";
 
 // =============================================================================
-// BOTTOM-PINNED LAYOUT: render() HOOK (SPACER INJECTION)
-// =============================================================================
-// Hooks into TUI.render() to inject spacer lines at a specific marker position.
-// This ensures the footer is ALWAYS fixed to the bottom regardless of content height.
-
-const SPACER_MARKER = "\x00_MU_SPACER_\x00";
-
-// State for the bottom-pinned layout
-interface BottomPinnedState {
-  installed: boolean;
-  resizeListener: (() => void) | null;
-  origRender: ((width: number) => string[]) | null;
-}
-
-const bottomPinnedState: BottomPinnedState = {
-  installed: false,
-  resizeListener: null,
-  origRender: null,
-};
-
-// Install the render hook on TUI
-const installBottomPinnedHook = (tui: TUI) => {
-  // biome-ignore lint/suspicious/noExplicitAny: Accessing TUI internals
-  const tuiAny = tui as any;
-
-  if (tuiAny._mu_bottomPinnedInstalled) return;
-  tuiAny._mu_bottomPinnedInstalled = true;
-
-  // Listen for terminal resize
-  bottomPinnedState.resizeListener = () => {
-    tui.requestRender?.();
-  };
-  process.stdout.on("resize", bottomPinnedState.resizeListener);
-
-  // Store original render
-  const origRender = tui.render.bind(tui);
-  bottomPinnedState.origRender = origRender;
-
-  // Patch render to inject spacer
-  tui.render = function (width: number): string[] {
-    const lines = origRender(width);
-
-    // Find our marker
-    const markerIndex = lines.indexOf(SPACER_MARKER);
-    if (markerIndex === -1) return lines;
-
-    // If disabled, remove marker (collapse spacer)
-    if (tuiAny._mu_bottomPinnedDisabled) {
-      lines.splice(markerIndex, 1);
-      return lines;
-    }
-
-    // Calculate needed spacer
-    // contentHeight = lines.length - 1 (marker itself)
-    // spacerHeight = terminal.height - contentHeight
-    const contentHeight = lines.length - 1;
-    const spacerHeight = this.terminal.rows - contentHeight;
-
-    if (spacerHeight > 0) {
-      // Replace marker with blank lines
-      const spacerLines = Array(spacerHeight).fill("");
-      lines.splice(markerIndex, 1, ...spacerLines);
-    } else {
-      // Content overflows, collapse spacer
-      lines.splice(markerIndex, 1);
-    }
-
-    return lines;
-  };
-};
-
-// Cleanup function
-const uninstallBottomPinnedHook = (tui: TUI) => {
-  // biome-ignore lint/suspicious/noExplicitAny: Accessing TUI internals
-  const tuiAny = tui as any;
-
-  if (bottomPinnedState.resizeListener) {
-    process.stdout.off("resize", bottomPinnedState.resizeListener);
-    bottomPinnedState.resizeListener = null;
-  }
-
-  // Restore original render if we saved it
-  if (bottomPinnedState.origRender) {
-    tui.render = bottomPinnedState.origRender;
-    bottomPinnedState.origRender = null;
-  }
-
-  tuiAny._mu_bottomPinnedDisabled = true;
-  tuiAny._mu_bottomPinnedInstalled = false;
-};
-
-// =============================================================================
 // UTILITIES
 // =============================================================================
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -246,6 +155,60 @@ const getToolState = (sig: string): ToolState | undefined => {
 // Track if next tool card should have leading space (after user message)
 let nextToolNeedsLeadingSpace = false;
 const _toolLeadingSpaceByToolCallId = new Map<string, boolean>();
+
+// =============================================================================
+// WORKING TIMER
+// =============================================================================
+const MIN_ELAPSED_FOR_NOTIFICATION_MS = 1000;
+
+/**
+ * Formats elapsed milliseconds as human-readable duration.
+ * Returns empty string for durations < 1 second (intentional — avoids
+ * flickering UI updates during the first second of operation).
+ */
+const formatWorkingElapsed = (ms: number): string => {
+  const s = ms / 1000;
+  if (s < 1) return "";
+  return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m${Math.floor(s % 60)}s`;
+};
+
+class WorkingTimer {
+  private interval: ReturnType<typeof setInterval> | null = null;
+  private startMs = 0;
+  private ctx: ExtensionContext | null = null;
+
+  /** Stop the timer, clear UI message, return elapsed ms. */
+  stop(): number {
+    const elapsed = this.startMs > 0 ? Date.now() - this.startMs : 0;
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+    this.startMs = 0;
+    if (this.ctx?.hasUI) {
+      this.ctx.ui.setWorkingMessage();
+    }
+    this.ctx = null;
+    return elapsed;
+  }
+
+  /** Start (or restart) the timer, updating the working message every 100ms. */
+  start(ctx: ExtensionContext): void {
+    this.stop();
+    this.startMs = Date.now();
+    this.ctx = ctx;
+    this.interval = setInterval(() => {
+      if (!this.ctx?.hasUI) return;
+      const ms = Date.now() - this.startMs;
+      const elapsed = formatWorkingElapsed(ms);
+      if (elapsed) {
+        this.ctx.ui.setWorkingMessage(`Working... ⏱ ${elapsed}`);
+      }
+    }, 100);
+  }
+}
+
+const workingTimer = new WorkingTimer();
 
 // =============================================================================
 // MU THEME INTERFACE
@@ -1291,50 +1254,6 @@ const setupUIPatching = (ctx: ExtensionContext) => {
   });
 };
 
-// =============================================================================
-// BOTTOM-PINNED LAYOUT: SETUP
-// =============================================================================
-// Uses post-render hook to inject spacer lines into the render output.
-// This is more reliable than injecting a component because we know exact line counts.
-
-let bottomPinnedEnabled = true;
-let tuiReference: TUI | null = null;
-
-const setupBottomPinnedLayout = (ctx: ExtensionContext) => {
-  if (!ctx.hasUI || !bottomPinnedEnabled) return;
-
-  // Use setWidget to get TUI access and install the hook
-  ctx.ui.setWidget(
-    "mu-flex-spacer",
-    (tui: TUI, _theme) => {
-      tuiReference = tui;
-      installBottomPinnedHook(tui);
-
-      // Return widget component that emits the marker
-      const widgetComponent: Component & { dispose(): void } = {
-        render: (): string[] => [SPACER_MARKER],
-        invalidate: () => {},
-        dispose: () => {
-          uninstallBottomPinnedHook(tui);
-          tuiReference = null;
-        },
-      };
-
-      return widgetComponent;
-    },
-    { placement: "aboveEditor" }
-  );
-};
-
-const disableBottomPinnedLayout = (ctx: ExtensionContext) => {
-  if (!ctx.hasUI) return;
-  ctx.ui.setWidget("mu-flex-spacer", undefined);
-  if (tuiReference) {
-    uninstallBottomPinnedHook(tuiReference);
-    tuiReference = null;
-  }
-};
-
 function formatToolArgsPreview(name: string, args: Record<string, unknown>): string {
   if (!args) return "";
   const p = (args.path ?? args.file_path ?? "") as string;
@@ -1365,12 +1284,24 @@ function formatToolArgsPreview(name: string, args: Record<string, unknown>): str
 export default function (pi: ExtensionAPI) {
   // Setup UI patching on session start
   pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext) => {
+    workingTimer.stop(); // defensive cleanup from any prior session
     setupUIPatching(ctx);
-    setupBottomPinnedLayout(ctx);
 
     // Enable enhanced model display footer
     if (modelDisplayEnabled) {
       enableModelDisplayFooter(ctx);
+    }
+  });
+
+  // Working timer: start on agent_start, stop on agent_end
+  pi.on("agent_start", (_event: AgentStartEvent, ctx: ExtensionContext) => {
+    workingTimer.start(ctx);
+  });
+
+  pi.on("agent_end", (_event: AgentEndEvent, ctx: ExtensionContext) => {
+    const elapsed = workingTimer.stop();
+    if (elapsed >= MIN_ELAPSED_FOR_NOTIFICATION_MS && ctx.hasUI) {
+      ctx.ui.notify(`⏱ Completed in ${formatWorkingElapsed(elapsed)}`, "info");
     }
   });
 
@@ -1741,9 +1672,9 @@ export default function (pi: ExtensionAPI) {
             statsParts.push(rgb("dim", "[") + rgb("amber", costStr) + rgb("dim", "]"));
           }
 
-          // Context group with gradient progress bar: [█▓░░░ 17%/200k]
+          // Context group with gradient progress bar: [█▓░░░ 29k/200k (14.5%)]
           const bar = progressBar(contextPercentValue, 5);
-          const contextInfo = `${contextPercent}%/${fmt(contextWindow)}`;
+          const contextInfo = `${fmt(contextTokens)}/${fmt(contextWindow)} (${contextPercent}%)`;
           statsParts.push(
             `${rgb("dim", "[")}${bar} ${rgb("white", contextInfo)}${rgb("dim", "]")}`
           );
@@ -1821,22 +1752,6 @@ export default function (pi: ExtensionAPI) {
       } else {
         ctx.ui.setFooter(undefined);
         ctx.ui.notify("Default footer restored", "info");
-      }
-    },
-  });
-
-  // Command to toggle bottom-pinned layout
-  pi.registerCommand("mu-pin", {
-    description: "mu: toggle bottom-pinned layout (keeps prompt/footer at screen bottom)",
-    handler: async (_args, ctx) => {
-      bottomPinnedEnabled = !bottomPinnedEnabled;
-
-      if (bottomPinnedEnabled) {
-        setupBottomPinnedLayout(ctx);
-        ctx.ui.notify("Bottom-pinned layout enabled", "info");
-      } else {
-        disableBottomPinnedLayout(ctx);
-        ctx.ui.notify("Bottom-pinned layout disabled", "info");
       }
     },
   });
