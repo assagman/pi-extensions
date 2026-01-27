@@ -81,11 +81,13 @@ The install script:
 ## Uninstallation
 
 ```bash
-# Uninstall all extensions (removes symlinks)
-./uninstall.sh
+# Interactive — pick which extensions to uninstall
+./uninstall.sh -i
 
-# Or uninstall a specific extension
-cd extensions/<name>
+# Uninstall a specific extension
+./uninstall.sh <name>
+
+# Uninstall all extensions (removes symlinks)
 ./uninstall.sh
 ```
 
