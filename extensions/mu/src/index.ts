@@ -138,6 +138,7 @@ const MU_CONFIG = {
   PULSE_INTERVAL_MS: 50,
   PULSE_SPEED: 0.2,
   PULSE_MIN_BRIGHTNESS: 0.4,
+  MAX_ERROR_LINES: 10,
 } as const;
 
 const MU_TOOL_VIEWER_SHORTCUT = "ctrl+alt+o";
@@ -151,6 +152,16 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 /** Safety clamp: ensure every line in array fits within maxWidth. */
 const clampLines = (lines: string[], maxWidth: number): string[] =>
   lines.map((l) => (visibleWidth(l) > maxWidth ? truncateToWidth(l, maxWidth) : l));
+
+/** Extract text content from a tool result object. */
+const extractResultText = (result: unknown): string => {
+  if (!isRecord(result)) return "";
+  const content = Array.isArray(result.content) ? result.content : [];
+  return content
+    .filter((c: unknown) => isRecord(c) && c.type === "text")
+    .map((c: unknown) => (isRecord(c) && typeof c.text === "string" ? c.text : ""))
+    .join("\n");
+};
 
 const preview = (text: string, max = 140): string => {
   const s = (text ?? "").replace(/\s+/g, " ").trim();
@@ -1197,7 +1208,25 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       if (!origRender) return;
 
       tool.render = (width: number): string[] => {
-        return clampLines(_renderStreamingTool(tool, width), width);
+        const lines = _renderStreamingTool(tool, width);
+        const res = tool.result as { isError?: boolean; content?: unknown[] } | undefined;
+        if (res?.isError) {
+          const errText = extractResultText(res);
+          if (errText) {
+            const innerW = width - 2;
+            const errLines = errText.split("\n").filter((l: string) => l.length > 0);
+            const capped = errLines.slice(0, MU_CONFIG.MAX_ERROR_LINES);
+            for (const el of capped) {
+              lines.push(truncateToWidth(`  ${mu("error", el)}`, innerW));
+            }
+            if (errLines.length > MU_CONFIG.MAX_ERROR_LINES) {
+              lines.push(
+                mu("dim", `  … ${errLines.length - MU_CONFIG.MAX_ERROR_LINES} more lines`)
+              );
+            }
+          }
+        }
+        return clampLines(lines, width);
       };
 
       const _renderStreamingTool = (
