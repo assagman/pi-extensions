@@ -89,8 +89,13 @@ const askExtension: ExtensionFactory = (pi: ExtensionAPI) => {
 
       const questions = normalizeQuestions(params.questions);
 
-      const result = await DimmedOverlay.show<AskResult>(ctx.ui, (tui, theme, done) =>
-        createAskUI(tui, theme, done, questions)
+      const result = await DimmedOverlay.show<AskResult>(
+        ctx.ui,
+        (tui, theme, done) => createAskUI(tui, theme, done, questions),
+        {
+          scrim: { twinkle: true },
+          dialog: { width: "72%", glow: { enabled: true } },
+        }
       );
 
       if (result.cancelled) {

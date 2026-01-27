@@ -1,19 +1,75 @@
+/**
+ * Ask UI — Premium floating card component for the Ask extension.
+ *
+ * Renders inside DimmedOverlay as a visually rich card with:
+ *   - Rounded box border with top→bottom gradient (muted→dim)
+ *   - Card background (distinct dark surface)
+ *   - Accent-tinted banner header with ？ icon
+ *   - Boxed number badges [1]…[9] for options, [0] for "Type something"
+ *   - Bold accent selection indicator (focused option)
+ *   - │-prefixed description blocks
+ *   - Pill-shaped tab bar (multi-question) with inverted active tab
+ *   - Clean summary table on Submit tab
+ *   - [keycap] help badges in footer
+ *   - Dotted (┄) separators between sections
+ *   - Scrollable body viewport with ▲/▼ indicators
+ */
+
 import {
   Editor,
   type EditorTheme,
   Key,
   matchesKey,
   truncateToWidth,
+  visibleWidth,
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
 import type { TUI } from "@mariozechner/pi-tui";
 import { buildOptions } from "./helpers.js";
 import type { Answer, AskResult, Question, RenderOption } from "./types.js";
 
+// ── Visual constants ────────────────────────────────────────────────────────
+
+/** Card body background: distinct dark surface, lifted from scrim. */
+const CARD_BG = "\x1b[48;2;22;22;32m";
+/** Banner header background: accent-tinted dark. */
+const BANNER_BG = "\x1b[48;2;28;24;45m";
+/** ANSI full reset. */
+const RESET = "\x1b[0m";
+/** ANSI reverse video (swap fg/bg). */
+const REVERSE = "\x1b[7m";
+/** ANSI reverse video off. */
+const REVERSE_OFF = "\x1b[27m";
+/** Horizontal content padding (columns) inside card borders. */
+const PAD = 2;
+
+// ── ANSI helpers ────────────────────────────────────────────────────────────
+
 /**
- * Create the Ask TUI component.
+ * Apply a background ANSI code to text, persisting through any \x1b[0m resets
+ * contained in the text. Ensures the bg is re-applied after each full reset.
+ */
+function applyBg(text: string, bgCode: string): string {
+  return bgCode + text.replaceAll("\x1b[0m", `\x1b[0m${bgCode}`) + RESET;
+}
+
+/**
+ * Pad text with trailing spaces to reach exact visible width.
+ * Truncates (with ellipsis) if text exceeds targetWidth.
+ */
+function padRight(text: string, targetWidth: number): string {
+  const vis = visibleWidth(text);
+  if (vis > targetWidth) return truncateToWidth(text, targetWidth);
+  if (vis === targetWidth) return text;
+  return text + " ".repeat(targetWidth - vis);
+}
+
+// ── Factory ─────────────────────────────────────────────────────────────────
+
+/**
+ * Create the Ask TUI component with premium card design.
  *
- * This is the factory passed to `ctx.ui.custom<AskResult>(...)`.
+ * This is the factory passed through DimmedOverlay.show() to ctx.ui.custom().
  * It encapsulates all mutable state, rendering, and input handling.
  */
 export function createAskUI<
@@ -36,7 +92,11 @@ export function createAskUI<
   let cachedLines: string[] | undefined;
   const answers = new Map<string, Answer>();
 
-  // Memoised options per question (PERF-001)
+  // Scroll state
+  let scrollOffset = 0;
+  let fixedBodyHeight: number | null = null;
+
+  // Memoised options per question
   const optionsCache = new Map<string, RenderOption[]>();
 
   // ── Editor for custom input ──────────────────────────────────────────
@@ -52,7 +112,7 @@ export function createAskUI<
   };
   const editor = new Editor(tui, editorTheme);
 
-  // ── Helpers ──────────────────────────────────────────────────────────
+  // ── Core helpers ─────────────────────────────────────────────────────
 
   function refresh() {
     cachedLines = undefined;
@@ -134,7 +194,7 @@ export function createAskUI<
     advanceAfterAnswer();
   };
 
-  // ── Input handling (STR-003: split into focused handlers) ────────────
+  // ── Input handling ───────────────────────────────────────────────────
 
   function handleEditorInput(data: string): boolean {
     if (!inputMode) return false;
@@ -196,10 +256,20 @@ export function createAskUI<
   }
 
   function handleNumberKeys(data: string): boolean {
-    if (data.length !== 1 || data < "1" || data > "9") return false;
     const opts = currentOptions();
+    // [0] → "Type something" (always the last option)
+    if (data === "0") {
+      const lastIdx = opts.length - 1;
+      if (lastIdx >= 0 && opts[lastIdx].isOther) {
+        selectOptionAtIndex(lastIdx);
+        return true;
+      }
+      return false;
+    }
+    // [1-9] → regular options (excluding "Type something")
+    if (data.length !== 1 || data < "1" || data > "9") return false;
     const idx = Number.parseInt(data, 10) - 1;
-    if (idx < opts.length) {
+    if (idx < opts.length - 1) {
       selectOptionAtIndex(idx);
       return true;
     }
@@ -231,146 +301,418 @@ export function createAskUI<
     handleEscapeKey(data);
   }
 
-  // ── Rendering (STR-002: split into focused renderers) ────────────────
+  // ═══════════════════════════════════════════════════════════════════════
+  // ── CARD RENDERING
+  // ═══════════════════════════════════════════════════════════════════════
 
-  function addLine(lines: string[], s: string, width: number) {
-    lines.push(truncateToWidth(s, width));
+  // ── Border gradient ──────────────────────────────────────────────────
+
+  /**
+   * 2-step border gradient: muted (top half) → dim (bottom half).
+   * Returns a semantic color name for theme.fg().
+   */
+  function borderColorName(rowIdx: number, totalRows: number): string {
+    if (totalRows <= 1) return "muted";
+    const ratio = rowIdx / (totalRows - 1);
+    if (ratio <= 0.5) return "muted";
+    return "dim";
   }
 
-  function addWrapped(lines: string[], text: string, indent: number, width: number) {
-    const usable = width - indent;
-    if (usable <= 10) {
-      addLine(lines, " ".repeat(indent) + text, width);
-      return;
-    }
-    const wrapped = wrapTextWithAnsi(text, usable);
-    const prefix = " ".repeat(indent);
-    for (const wl of wrapped) {
-      lines.push(truncateToWidth(prefix + wl, width));
-    }
+  // ── Card structural lines ────────────────────────────────────────────
+
+  /** Bordered content line: │ content │ with card bg. */
+  function cardLine(content: string, innerW: number, bcName: string): string {
+    const padded = padRight(content, innerW);
+    return applyBg(`${theme.fg(bcName, "│")}${padded}${theme.fg(bcName, "│")}`, CARD_BG);
   }
 
-  function renderTabBar(lines: string[], width: number) {
-    if (!isMulti) return;
-    const tabs: string[] = ["← "];
+  /** Top border: ╭───╮ in muted color with card bg. */
+  function topBorderLine(width: number): string {
+    return applyBg(theme.fg("muted", `╭${"─".repeat(width - 2)}╮`), CARD_BG);
+  }
+
+  /** Bottom border: ╰───╯ in dim color with card bg. */
+  function bottomBorderLine(width: number): string {
+    return applyBg(theme.fg("dim", `╰${"─".repeat(width - 2)}╯`), CARD_BG);
+  }
+
+  /** Dotted separator: ├┄┄┄┤ with optional right-aligned scroll hint. */
+  function separatorLine(width: number, bcName: string, scrollHint?: string): string {
+    const inner = width - 2;
+    if (scrollHint) {
+      const hintVis = visibleWidth(scrollHint);
+      const sepChars = inner - hintVis - 1; // 1 space before hint
+      if (sepChars >= 3) {
+        return applyBg(
+          `${theme.fg(bcName, "├")}${theme.fg("dim", "┄".repeat(sepChars))} ${theme.fg("dim", scrollHint)}${theme.fg(bcName, "┤")}`,
+          CARD_BG
+        );
+      }
+    }
+    return applyBg(
+      `${theme.fg(bcName, "├")}${theme.fg("dim", "┄".repeat(inner))}${theme.fg(bcName, "┤")}`,
+      CARD_BG
+    );
+  }
+
+  /** Banner line: │ ？ Label │ with accent-tinted bg. */
+  function bannerCardLine(label: string, innerW: number, bcName: string): string {
+    const text = ` ？ ${theme.bold(label)}`;
+    const padded = padRight(text, innerW);
+    const leftBorder = applyBg(theme.fg(bcName, "│"), CARD_BG);
+    const rightBorder = applyBg(theme.fg(bcName, "│"), CARD_BG);
+    const content = applyBg(padded, BANNER_BG);
+    return `${leftBorder}${content}${rightBorder}`;
+  }
+
+  // ── Section renderers ────────────────────────────────────────────────
+  // Each returns raw content strings (no borders/bg — cardLine wraps).
+
+  /** Pill-shaped tab bar for multi-question navigation. */
+  function renderTabBar(_innerW: number): string[] {
+    if (!isMulti) return [];
+
+    const pills: string[] = [];
+
     for (let i = 0; i < questions.length; i++) {
       const isActive = i === currentTab;
       const isAnswered = answers.has(questions[i].id);
       const lbl = questions[i].label;
-      const box = isAnswered ? "■" : "□";
-      const color = isAnswered ? "success" : "muted";
-      const text = ` ${box} ${lbl} `;
-      const styled = isActive
-        ? theme.bg("selectedBg", theme.fg("text", text))
-        : theme.fg(color as "success" | "muted", text);
-      tabs.push(`${styled} `);
+
+      if (isActive) {
+        pills.push(theme.fg("accent", `${REVERSE} ${lbl} ${REVERSE_OFF}`));
+      } else if (isAnswered) {
+        pills.push(theme.fg("success", `✓ ${lbl}`));
+      } else {
+        pills.push(theme.fg("muted", `  ${lbl}`));
+      }
     }
+
+    // Submit pill
+    const isSubmitActive = currentTab === questions.length;
     const canSubmit = allAnswered();
-    const isSubmitTab = currentTab === questions.length;
-    const submitText = " ✓ Submit ";
-    const submitStyled = isSubmitTab
-      ? theme.bg("selectedBg", theme.fg("text", submitText))
-      : theme.fg(canSubmit ? "success" : "dim", submitText);
-    tabs.push(`${submitStyled} →`);
-    addLine(lines, ` ${tabs.join("")}`, width);
-    lines.push("");
+
+    if (isSubmitActive) {
+      pills.push(theme.fg("accent", `${REVERSE} Submit ${REVERSE_OFF}`));
+    } else if (canSubmit) {
+      pills.push(theme.fg("success", "✓ Submit"));
+    } else {
+      pills.push(theme.fg("dim", "  Submit"));
+    }
+
+    return [" ".repeat(PAD) + pills.join("  ")];
   }
 
-  function renderOptionsList(lines: string[], opts: RenderOption[], width: number) {
-    for (let i = 0; i < opts.length; i++) {
-      const opt = opts[i];
-      const selected = i === optionIndex;
-      const isOther = opt.isOther === true;
-      const prefix = selected ? theme.fg("accent", "> ") : "  ";
-      const color = selected ? "accent" : "text";
+  /** Word-wrapped question prompt. */
+  function renderPrompt(q: Question, innerW: number): string[] {
+    const usable = innerW - PAD * 2;
+    if (usable <= 10) {
+      return [" ".repeat(PAD) + theme.fg("text", q.prompt)];
+    }
+    const wrapped = wrapTextWithAnsi(q.prompt, usable);
+    return wrapped.map((line) => " ".repeat(PAD) + theme.fg("text", line));
+  }
+
+  /**
+   * Options list with [N] badges, descriptions, and [0] Type something.
+   * Returns the lines and the index of the focused option line.
+   */
+  function renderOptionsList(
+    opts: RenderOption[],
+    innerW: number
+  ): { lines: string[]; focusIdx: number } {
+    const lines: string[] = [];
+    let focusIdx = 0;
+    const regularOpts = opts.filter((o) => !o.isOther);
+    const otherOpt = opts.find((o) => o.isOther);
+    const isDimmed = inputMode;
+
+    // ── Regular options ──────────────────────────────────────────────
+    for (let i = 0; i < regularOpts.length; i++) {
+      const opt = regularOpts[i];
+      const isSelected = i === optionIndex && !isDimmed;
       const num = `${i + 1}`;
 
-      if (isOther && inputMode) {
-        addLine(lines, prefix + theme.fg("accent", `${num}. ${opt.label} ✎`), width);
+      if (isSelected) focusIdx = lines.length;
+
+      let badge: string;
+      let label: string;
+
+      if (isSelected) {
+        badge = theme.fg("accent", theme.bold(`[${num}]`));
+        label = theme.fg("accent", theme.bold(opt.label));
+      } else if (isDimmed) {
+        badge = theme.fg("dim", `[${num}]`);
+        label = theme.fg("dim", opt.label);
       } else {
-        addLine(
-          lines,
-          prefix + theme.fg(color as "accent" | "text", `${num}. ${opt.label}`),
-          width
-        );
+        badge = theme.fg("muted", `[${num}]`);
+        label = theme.fg("text", opt.label);
       }
+
+      lines.push(`${" ".repeat(PAD)}${badge}  ${label}`);
+
+      // Description block: │ description text
       if (opt.description) {
-        addWrapped(lines, theme.fg("muted", opt.description), 5, width);
+        const descIndent = PAD + 6;
+        const descAvail = innerW - descIndent - 1;
+        if (descAvail > 10) {
+          const bar = theme.fg("dim", "│");
+          const wrapped = wrapTextWithAnsi(opt.description, descAvail);
+          for (const wl of wrapped) {
+            const descText = isDimmed ? theme.fg("dim", wl) : theme.fg("muted", wl);
+            lines.push(`${" ".repeat(descIndent)}${bar} ${descText}`);
+          }
+        }
       }
     }
-  }
 
-  function renderInputMode(lines: string[], q: Question, opts: RenderOption[], width: number) {
-    addWrapped(lines, theme.fg("text", q.prompt), 1, width);
-    lines.push("");
-    renderOptionsList(lines, opts, width);
-    lines.push("");
-    addLine(lines, theme.fg("muted", " Your answer:"), width);
-    for (const line of editor.render(width - 2)) {
-      addLine(lines, ` ${line}`, width);
+    // ── Dotted separator + "Type something" ──────────────────────────
+    if (otherOpt) {
+      const sepW = innerW - PAD * 2;
+      lines.push(" ".repeat(PAD) + theme.fg("dim", "┄".repeat(Math.max(1, sepW))));
+
+      const otherIdx = opts.length - 1;
+      const isSelected = optionIndex === otherIdx && !isDimmed;
+
+      if (isSelected || inputMode) focusIdx = lines.length;
+
+      let badge: string;
+      let label: string;
+
+      if (inputMode) {
+        badge = theme.fg("accent", theme.bold("[0]"));
+        label = theme.fg("accent", theme.bold("✎ Type something…"));
+      } else if (isSelected) {
+        badge = theme.fg("accent", theme.bold("[0]"));
+        label = theme.fg("accent", theme.bold("✎ Type something…"));
+      } else {
+        badge = theme.fg("dim", "[0]");
+        label = theme.fg("dim", "✎ Type something…");
+      }
+
+      lines.push(`${" ".repeat(PAD)}${badge}  ${label}`);
     }
-    lines.push("");
-    addLine(lines, theme.fg("dim", " Enter to submit • Esc to cancel"), width);
+
+    return { lines, focusIdx };
   }
 
-  function renderSubmitTab(lines: string[], width: number) {
-    addLine(lines, theme.fg("accent", theme.bold(" Ready to submit")), width);
+  /** Editor section (visible only in input mode). */
+  function renderEditorSection(innerW: number): string[] {
+    if (!inputMode) return [];
+
+    const lines: string[] = [];
     lines.push("");
+    lines.push(" ".repeat(PAD) + theme.fg("muted", "Your answer:"));
+
+    const editorW = Math.max(10, innerW - PAD * 2);
+    for (const line of editor.render(editorW)) {
+      lines.push(" ".repeat(PAD) + line);
+    }
+
+    lines.push(" ".repeat(PAD) + theme.fg("dim", "Enter to submit · Esc to cancel"));
+
+    return lines;
+  }
+
+  /** Submit tab: clean summary table with aligned label│value pairs. */
+  function renderSubmitView(_innerW: number): string[] {
+    const lines: string[] = [];
+
+    const maxLabelW = Math.max(...questions.map((q) => visibleWidth(q.label)));
+
     for (const question of questions) {
       const answer = answers.get(question.id);
+      const labelPadded = padRight(question.label, maxLabelW);
+
       if (answer) {
         const prefix = answer.wasCustom ? "(wrote) " : "";
-        addLine(
-          lines,
-          `${theme.fg("muted", ` ${question.label}: `)}${theme.fg("text", prefix + answer.label)}`,
-          width
+        lines.push(
+          `${" ".repeat(PAD)}${theme.fg("success", "✓ ")}` +
+            `${theme.fg("muted", labelPadded)} ` +
+            `${theme.fg("dim", "│")} ` +
+            `${theme.fg("text", prefix + answer.label)}`
+        );
+      } else {
+        lines.push(
+          `${" ".repeat(PAD)}${theme.fg("dim", "○ ")}` +
+            `${theme.fg("dim", labelPadded)} ` +
+            `${theme.fg("dim", "│ —")}`
         );
       }
     }
+
     lines.push("");
+
     if (allAnswered()) {
-      addLine(lines, theme.fg("success", " Press Enter to submit"), width);
+      lines.push(" ".repeat(PAD) + theme.fg("success", theme.bold("Ready to submit")));
     } else {
       const missing = questions
-        .filter((question) => !answers.has(question.id))
-        .map((question) => question.label)
+        .filter((q) => !answers.has(q.id))
+        .map((q) => q.label)
         .join(", ");
-      addLine(lines, theme.fg("warning", ` Unanswered: ${missing}`), width);
+      lines.push(" ".repeat(PAD) + theme.fg("warning", `Unanswered: ${missing}`));
     }
+
+    return lines;
   }
 
-  function renderQuestionView(lines: string[], q: Question, opts: RenderOption[], width: number) {
-    addWrapped(lines, theme.fg("text", q.prompt), 1, width);
-    lines.push("");
-    renderOptionsList(lines, opts, width);
+  /** Keycap-style help badges for the footer. */
+  function renderHelp(_innerW: number): string[] {
+    const cap = (k: string) => theme.fg("muted", `[${k}]`);
+    const lbl = (t: string) => theme.fg("dim", t);
+
+    let help: string;
+
+    if (inputMode) {
+      help = `${cap("⏎")} ${lbl("submit")}  ${cap("Esc")} ${lbl("cancel")}`;
+    } else if (currentTab === questions.length) {
+      help = [
+        `${cap("⏎")} ${lbl("submit")}`,
+        `${cap("Tab")} ${lbl("switch")}`,
+        `${cap("Esc")} ${lbl("cancel")}`,
+      ].join("  ");
+    } else if (isMulti) {
+      help = [
+        `${cap("↑↓")} ${lbl("navigate")}`,
+        `${cap("0-9")} ${lbl("pick")}`,
+        `${cap("⏎")} ${lbl("select")}`,
+        `${cap("Tab")} ${lbl("switch")}`,
+      ].join("  ");
+    } else {
+      help = [
+        `${cap("↑↓")} ${lbl("navigate")}`,
+        `${cap("0-9")} ${lbl("pick")}`,
+        `${cap("⏎")} ${lbl("select")}`,
+        `${cap("Esc")} ${lbl("cancel")}`,
+      ].join("  ");
+    }
+
+    return [" ".repeat(PAD) + help];
   }
+
+  // ── Main render ──────────────────────────────────────────────────────
 
   function render(width: number): string[] {
     if (cachedLines) return cachedLines;
 
-    const lines: string[] = [];
+    const innerW = width - 2; // space between │ borders
     const q = currentQuestion();
     const opts = currentOptions();
 
-    addLine(lines, theme.fg("accent", "─".repeat(width)), width);
-    renderTabBar(lines, width);
+    // ── Build body content + track focused line ──────────────────────
+    const body: string[] = [];
+    let focusLine = 0;
 
+    // Tab bar (multi-question only)
+    if (isMulti) {
+      body.push(""); // spacer
+      body.push(...renderTabBar(innerW));
+    }
+
+    body.push(""); // spacer after banner / tabs
+
+    // Main content area
     if (inputMode && q) {
-      renderInputMode(lines, q, opts, width);
+      body.push(...renderPrompt(q, innerW));
+      body.push("");
+      const { lines: optLines } = renderOptionsList(opts, innerW);
+      body.push(...optLines);
+      // Focus on editor area (bottom of content)
+      body.push(...renderEditorSection(innerW));
+      focusLine = body.length - 2;
     } else if (currentTab === questions.length) {
-      renderSubmitTab(lines, width);
+      body.push(...renderSubmitView(innerW));
+      focusLine = body.length - 1;
     } else if (q) {
-      renderQuestionView(lines, q, opts, width);
+      body.push(...renderPrompt(q, innerW));
+      body.push("");
+      const optStart = body.length;
+      const { lines: optLines, focusIdx } = renderOptionsList(opts, innerW);
+      body.push(...optLines);
+      focusLine = optStart + focusIdx;
     }
 
-    lines.push("");
-    if (!inputMode) {
-      const help = isMulti
-        ? " Tab/←→ navigate • ↑↓/C-p/C-n select • 1-9 quick pick • Enter confirm • Esc cancel"
-        : " ↑↓/C-p/C-n navigate • 1-9 quick pick • Enter select • Esc cancel";
-      addLine(lines, theme.fg("dim", help), width);
+    body.push(""); // spacer before footer
+
+    // ── Compute fixed body viewport height (once) ────────────────────
+    if (fixedBodyHeight === null) {
+      const chromeRows = 6 + (isMulti ? 2 : 0);
+      const maxBody = Math.max(10, Math.floor(tui.terminal.rows * 0.55) - chromeRows);
+      // For multi-question: use full max (tabs may have different content)
+      // For single: fit to content (capped)
+      fixedBodyHeight = isMulti ? maxBody : Math.min(body.length, maxBody);
     }
-    addLine(lines, theme.fg("accent", "─".repeat(width)), width);
+
+    // ── Scroll viewport ──────────────────────────────────────────────
+    const vh = fixedBodyHeight;
+    let canScrollUp = false;
+    let canScrollDown = false;
+
+    if (body.length > vh) {
+      // Keep focused line visible with 2 lines of context
+      if (focusLine < scrollOffset + 2) {
+        scrollOffset = Math.max(0, focusLine - 2);
+      } else if (focusLine >= scrollOffset + vh - 2) {
+        scrollOffset = focusLine - vh + 3;
+      }
+      scrollOffset = Math.max(0, Math.min(scrollOffset, body.length - vh));
+      canScrollUp = scrollOffset > 0;
+      canScrollDown = scrollOffset + vh < body.length;
+    } else {
+      scrollOffset = 0;
+    }
+
+    // Slice to viewport and pad to fixed height
+    const visibleBody = body.slice(scrollOffset, scrollOffset + vh);
+    while (visibleBody.length < vh) {
+      visibleBody.push("");
+    }
+
+    // ── Footer help ──────────────────────────────────────────────────
+    const helpLines = renderHelp(innerW);
+
+    // ── Compute total card height for border gradient ────────────────
+    // top + banner + sep + viewport + sep + help + bottom
+    const totalRows = 1 + 1 + 1 + vh + 1 + helpLines.length + 1;
+
+    // ── Assemble card ────────────────────────────────────────────────
+    const lines: string[] = [];
+    let row = 0;
+
+    // Top border ╭───╮
+    lines.push(topBorderLine(width));
+    row++;
+
+    // Banner │ ？ Label │
+    const bannerLabel =
+      q != null ? q.label : currentTab === questions.length ? "Submit" : "Question";
+    lines.push(bannerCardLine(bannerLabel, innerW, borderColorName(row, totalRows)));
+    row++;
+
+    // Separator ├┄┄┄┤ (with ▲ scroll hint if content above)
+    const topHint = canScrollUp ? "▲ more" : undefined;
+    lines.push(separatorLine(width, borderColorName(row, totalRows), topHint));
+    row++;
+
+    // Body viewport
+    for (const content of visibleBody) {
+      lines.push(cardLine(content, innerW, borderColorName(row, totalRows)));
+      row++;
+    }
+
+    // Separator ├┄┄┄┤ (with ▼ scroll hint if content below)
+    const bottomHint = canScrollDown ? "▼ more" : undefined;
+    lines.push(separatorLine(width, borderColorName(row, totalRows), bottomHint));
+    row++;
+
+    // Help footer
+    for (const helpStr of helpLines) {
+      lines.push(cardLine(helpStr, innerW, borderColorName(row, totalRows)));
+      row++;
+    }
+
+    // Bottom border ╰───╯
+    lines.push(bottomBorderLine(width));
 
     cachedLines = lines;
     return lines;
