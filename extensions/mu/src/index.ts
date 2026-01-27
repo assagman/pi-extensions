@@ -20,7 +20,6 @@ import {
   type Component,
   type KeyId,
   Markdown,
-  type TUI,
   Text,
   matchesKey,
   truncateToWidth,
@@ -96,98 +95,6 @@ const MU_CONFIG = {
 } as const;
 
 const MU_TOOL_VIEWER_SHORTCUT = "ctrl+alt+o";
-
-// =============================================================================
-// BOTTOM-PINNED LAYOUT: render() HOOK (SPACER INJECTION)
-// =============================================================================
-// Hooks into TUI.render() to inject spacer lines at a specific marker position.
-// This ensures the footer is ALWAYS fixed to the bottom regardless of content height.
-
-const SPACER_MARKER = "\x00_MU_SPACER_\x00";
-
-// State for the bottom-pinned layout
-interface BottomPinnedState {
-  installed: boolean;
-  resizeListener: (() => void) | null;
-  origRender: ((width: number) => string[]) | null;
-}
-
-const bottomPinnedState: BottomPinnedState = {
-  installed: false,
-  resizeListener: null,
-  origRender: null,
-};
-
-// Install the render hook on TUI
-const installBottomPinnedHook = (tui: TUI) => {
-  // biome-ignore lint/suspicious/noExplicitAny: Accessing TUI internals
-  const tuiAny = tui as any;
-
-  if (tuiAny._mu_bottomPinnedInstalled) return;
-  tuiAny._mu_bottomPinnedInstalled = true;
-
-  // Listen for terminal resize
-  bottomPinnedState.resizeListener = () => {
-    tui.requestRender?.();
-  };
-  process.stdout.on("resize", bottomPinnedState.resizeListener);
-
-  // Store original render
-  const origRender = tui.render.bind(tui);
-  bottomPinnedState.origRender = origRender;
-
-  // Patch render to inject spacer
-  tui.render = function (width: number): string[] {
-    const lines = origRender(width);
-
-    // Find our marker
-    const markerIndex = lines.indexOf(SPACER_MARKER);
-    if (markerIndex === -1) return lines;
-
-    // If disabled, remove marker (collapse spacer)
-    if (tuiAny._mu_bottomPinnedDisabled) {
-      lines.splice(markerIndex, 1);
-      return lines;
-    }
-
-    // Calculate needed spacer
-    // contentHeight = lines.length - 1 (marker itself)
-    // spacerHeight = terminal.height - contentHeight
-    const contentHeight = lines.length - 1;
-    const spacerHeight = this.terminal.rows - contentHeight;
-
-    if (spacerHeight > 0) {
-      // Replace marker with blank lines
-      const spacerLines = Array(spacerHeight).fill("");
-      lines.splice(markerIndex, 1, ...spacerLines);
-    } else {
-      // Content overflows, collapse spacer
-      lines.splice(markerIndex, 1);
-    }
-
-    return lines;
-  };
-};
-
-// Cleanup function
-const uninstallBottomPinnedHook = (tui: TUI) => {
-  // biome-ignore lint/suspicious/noExplicitAny: Accessing TUI internals
-  const tuiAny = tui as any;
-
-  if (bottomPinnedState.resizeListener) {
-    process.stdout.off("resize", bottomPinnedState.resizeListener);
-    bottomPinnedState.resizeListener = null;
-  }
-
-  // Restore original render if we saved it
-  if (bottomPinnedState.origRender) {
-    tui.render = bottomPinnedState.origRender;
-    bottomPinnedState.origRender = null;
-  }
-
-  tuiAny._mu_bottomPinnedDisabled = true;
-  tuiAny._mu_bottomPinnedInstalled = false;
-};
 
 // =============================================================================
 // UTILITIES
@@ -1291,50 +1198,6 @@ const setupUIPatching = (ctx: ExtensionContext) => {
   });
 };
 
-// =============================================================================
-// BOTTOM-PINNED LAYOUT: SETUP
-// =============================================================================
-// Uses post-render hook to inject spacer lines into the render output.
-// This is more reliable than injecting a component because we know exact line counts.
-
-let bottomPinnedEnabled = true;
-let tuiReference: TUI | null = null;
-
-const setupBottomPinnedLayout = (ctx: ExtensionContext) => {
-  if (!ctx.hasUI || !bottomPinnedEnabled) return;
-
-  // Use setWidget to get TUI access and install the hook
-  ctx.ui.setWidget(
-    "mu-flex-spacer",
-    (tui: TUI, _theme) => {
-      tuiReference = tui;
-      installBottomPinnedHook(tui);
-
-      // Return widget component that emits the marker
-      const widgetComponent: Component & { dispose(): void } = {
-        render: (): string[] => [SPACER_MARKER],
-        invalidate: () => {},
-        dispose: () => {
-          uninstallBottomPinnedHook(tui);
-          tuiReference = null;
-        },
-      };
-
-      return widgetComponent;
-    },
-    { placement: "aboveEditor" }
-  );
-};
-
-const disableBottomPinnedLayout = (ctx: ExtensionContext) => {
-  if (!ctx.hasUI) return;
-  ctx.ui.setWidget("mu-flex-spacer", undefined);
-  if (tuiReference) {
-    uninstallBottomPinnedHook(tuiReference);
-    tuiReference = null;
-  }
-};
-
 function formatToolArgsPreview(name: string, args: Record<string, unknown>): string {
   if (!args) return "";
   const p = (args.path ?? args.file_path ?? "") as string;
@@ -1366,7 +1229,6 @@ export default function (pi: ExtensionAPI) {
   // Setup UI patching on session start
   pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext) => {
     setupUIPatching(ctx);
-    setupBottomPinnedLayout(ctx);
 
     // Enable enhanced model display footer
     if (modelDisplayEnabled) {
@@ -1821,22 +1683,6 @@ export default function (pi: ExtensionAPI) {
       } else {
         ctx.ui.setFooter(undefined);
         ctx.ui.notify("Default footer restored", "info");
-      }
-    },
-  });
-
-  // Command to toggle bottom-pinned layout
-  pi.registerCommand("mu-pin", {
-    description: "mu: toggle bottom-pinned layout (keeps prompt/footer at screen bottom)",
-    handler: async (_args, ctx) => {
-      bottomPinnedEnabled = !bottomPinnedEnabled;
-
-      if (bottomPinnedEnabled) {
-        setupBottomPinnedLayout(ctx);
-        ctx.ui.notify("Bottom-pinned layout enabled", "info");
-      } else {
-        disableBottomPinnedLayout(ctx);
-        ctx.ui.notify("Bottom-pinned layout disabled", "info");
       }
     },
   });
