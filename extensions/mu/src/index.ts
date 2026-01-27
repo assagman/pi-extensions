@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import {
+  type AgentEndEvent,
+  type AgentStartEvent,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
@@ -153,6 +155,60 @@ const getToolState = (sig: string): ToolState | undefined => {
 // Track if next tool card should have leading space (after user message)
 let nextToolNeedsLeadingSpace = false;
 const _toolLeadingSpaceByToolCallId = new Map<string, boolean>();
+
+// =============================================================================
+// WORKING TIMER
+// =============================================================================
+const MIN_ELAPSED_FOR_NOTIFICATION_MS = 1000;
+
+/**
+ * Formats elapsed milliseconds as human-readable duration.
+ * Returns empty string for durations < 1 second (intentional — avoids
+ * flickering UI updates during the first second of operation).
+ */
+const formatWorkingElapsed = (ms: number): string => {
+  const s = ms / 1000;
+  if (s < 1) return "";
+  return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m${Math.floor(s % 60)}s`;
+};
+
+class WorkingTimer {
+  private interval: ReturnType<typeof setInterval> | null = null;
+  private startMs = 0;
+  private ctx: ExtensionContext | null = null;
+
+  /** Stop the timer, clear UI message, return elapsed ms. */
+  stop(): number {
+    const elapsed = this.startMs > 0 ? Date.now() - this.startMs : 0;
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+    this.startMs = 0;
+    if (this.ctx?.hasUI) {
+      this.ctx.ui.setWorkingMessage();
+    }
+    this.ctx = null;
+    return elapsed;
+  }
+
+  /** Start (or restart) the timer, updating the working message every second. */
+  start(ctx: ExtensionContext): void {
+    this.stop();
+    this.startMs = Date.now();
+    this.ctx = ctx;
+    this.interval = setInterval(() => {
+      if (!this.ctx?.hasUI) return;
+      const ms = Date.now() - this.startMs;
+      const elapsed = formatWorkingElapsed(ms);
+      if (elapsed) {
+        this.ctx.ui.setWorkingMessage(`Working... ⏱ ${elapsed}`);
+      }
+    }, 1000);
+  }
+}
+
+const workingTimer = new WorkingTimer();
 
 // =============================================================================
 // MU THEME INTERFACE
@@ -1228,11 +1284,24 @@ function formatToolArgsPreview(name: string, args: Record<string, unknown>): str
 export default function (pi: ExtensionAPI) {
   // Setup UI patching on session start
   pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext) => {
+    workingTimer.stop(); // defensive cleanup from any prior session
     setupUIPatching(ctx);
 
     // Enable enhanced model display footer
     if (modelDisplayEnabled) {
       enableModelDisplayFooter(ctx);
+    }
+  });
+
+  // Working timer: start on agent_start, stop on agent_end
+  pi.on("agent_start", (_event: AgentStartEvent, ctx: ExtensionContext) => {
+    workingTimer.start(ctx);
+  });
+
+  pi.on("agent_end", (_event: AgentEndEvent, ctx: ExtensionContext) => {
+    const elapsed = workingTimer.stop();
+    if (elapsed >= MIN_ELAPSED_FOR_NOTIFICATION_MS && ctx.hasUI) {
+      ctx.ui.notify(`⏱ Completed in ${formatWorkingElapsed(elapsed)}`, "info");
     }
   });
 
