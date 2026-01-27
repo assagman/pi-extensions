@@ -192,7 +192,7 @@ class WorkingTimer {
     return elapsed;
   }
 
-  /** Start (or restart) the timer, updating the working message every second. */
+  /** Start (or restart) the timer, updating the working message every 100ms. */
   start(ctx: ExtensionContext): void {
     this.stop();
     this.startMs = Date.now();
@@ -204,7 +204,7 @@ class WorkingTimer {
       if (elapsed) {
         this.ctx.ui.setWorkingMessage(`Working... ⏱ ${elapsed}`);
       }
-    }, 1000);
+    }, 100);
   }
 }
 
