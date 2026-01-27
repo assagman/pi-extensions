@@ -16,7 +16,7 @@ Persistent memory extension for Pi coding agent using SQLite.
 
 ```bash
 cd extensions/delta
-npm install
+bun install
 ./install.sh
 ```
 
