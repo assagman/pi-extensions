@@ -365,18 +365,31 @@ export function getTaskSummary(): TaskSummary {
 
 // ============ Prompt Builder ============
 
-export function buildTasksPrompt(): string {
-  const summary = getTaskSummary();
+export interface PromptOptions {
+  instructions?: boolean;
+  summary?: TaskSummary;
+}
+
+export function buildTasksPrompt(options: PromptOptions = {}): string {
+  const includeInstructions = options.instructions !== false;
+  const summary = options.summary ?? getTaskSummary();
   const lines: string[] = [];
 
   lines.push("<epsilon_tasks>");
   lines.push("");
 
-  lines.push("## Task Workflow");
-  lines.push("1. Create tasks for ALL work items using epsilon_task_create");
-  lines.push("2. Update task status as you progress (in_progress, done, blocked)");
-  lines.push("3. Mark tasks done when complete using epsilon_task_update");
-  lines.push("");
+  if (includeInstructions) {
+    lines.push("## Task Workflow");
+    lines.push(
+      "1. **ALWAYS create tasks BEFORE acting** — Every work item gets a task via epsilon_task_create before execution begins"
+    );
+    lines.push(
+      "2. **ALWAYS update tasks AFTER acting** — Update status (in_progress/done/blocked), progress, and completion via epsilon_task_update"
+    );
+    lines.push("3. Mark tasks done when complete — no task left behind");
+    lines.push("4. Check **epsilon_task_list** before creating to avoid duplicates");
+    lines.push("");
+  }
 
   const activeCount = summary.todo + summary.in_progress + summary.blocked;
   if (activeCount > 0) {

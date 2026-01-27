@@ -717,27 +717,36 @@ export function getMemoryContext(): MemoryContext {
   };
 }
 
-export function buildMemoryPrompt(): string {
-  const ctx = getMemoryContext();
+export interface PromptOptions {
+  instructions?: boolean;
+  ctx?: MemoryContext;
+}
+
+export function buildMemoryPrompt(options: PromptOptions = {}): string {
+  const includeInstructions = options.instructions !== false;
+  const ctx = options.ctx ?? getMemoryContext();
   const lines: string[] = [];
 
   lines.push("<delta_memory>");
   lines.push("");
 
-  // MANDATORY workflow
-  lines.push("## MANDATORY Workflow");
-  lines.push("1. Log ALL discoveries with delta_log:");
-  lines.push('   - Bugs → tags=["bug", "discovery"]');
-  lines.push('   - Patterns → tags=["pattern", "discovery"]');
-  lines.push('   - Decisions → tags=["decision"]');
-  lines.push('   - Gotchas → tags=["gotcha", "discovery"]');
-  lines.push("2. Create delta_note for REUSABLE project knowledge:");
-  lines.push("   - issue: bugs, limitations, workarounds, tech debt");
-  lines.push("   - convention: code patterns, naming, architecture decisions");
-  lines.push("   - workflow: build/deploy/test commands and procedures");
-  lines.push("   - reminder: common mistakes, review checklist items");
-  lines.push("3. Check delta_note_list and delta_recall before creating to avoid duplicates");
-  lines.push("");
+  if (includeInstructions) {
+    lines.push("## MANDATORY Workflow");
+    lines.push(
+      "1. **ALWAYS recall first** — Before ANY task, search related memories with delta_recall/delta_index_search/delta_note_get"
+    );
+    lines.push("2. **ALWAYS save discoveries** — Log every new finding, exploration, or learning:");
+    lines.push("   - delta_log for events: bugs, decisions, patterns, gotchas");
+    lines.push('     Bugs → tags=["bug", "discovery"], Patterns → tags=["pattern", "discovery"]');
+    lines.push('     Decisions → tags=["decision"], Gotchas → tags=["gotcha", "discovery"]');
+    lines.push("   - delta_note_create for reusable knowledge:");
+    lines.push("     issue: bugs, limitations, workarounds, tech debt");
+    lines.push("     convention: code patterns, naming, architecture decisions");
+    lines.push("     workflow: build/deploy/test commands and procedures");
+    lines.push("     reminder: common mistakes, review checklist items");
+    lines.push("3. Check delta_note_list and delta_recall before creating to avoid duplicates");
+    lines.push("");
+  }
 
   // Critical Knowledge: HIGH/CRITICAL notes loaded in full
   if (ctx.criticalNotes.length > 0) {

@@ -24,10 +24,13 @@ const epsilonExtension: ExtensionFactory = (pi: ExtensionAPI) => {
     const activeCount = summary.todo + summary.in_progress + summary.blocked;
     const hasContent = activeCount > 0 || summary.done > 0;
 
-    const systemPromptAddition = hasContent ? buildTasksPrompt() : buildMinimalPrompt();
-
+    // First turn: instructions + data + hidden summary message
     if (!firstTurnInjected) {
       firstTurnInjected = true;
+
+      const systemPromptAddition = hasContent
+        ? buildTasksPrompt({ instructions: true, summary })
+        : buildMinimalPrompt();
 
       const messageContent = hasContent ? buildFirstTurnMessage(summary) : buildEmptyStateMessage();
 
@@ -41,9 +44,14 @@ const epsilonExtension: ExtensionFactory = (pi: ExtensionAPI) => {
       };
     }
 
-    return {
-      systemPrompt: `${event.systemPrompt}\n\n${systemPromptAddition}`,
-    };
+    // Subsequent turns: data only, no instructions
+    if (hasContent) {
+      return {
+        systemPrompt: `${event.systemPrompt}\n\n${buildTasksPrompt({ instructions: false, summary })}`,
+      };
+    }
+
+    return { systemPrompt: event.systemPrompt };
   });
 
   pi.on("session_shutdown", () => {
@@ -54,9 +62,10 @@ const epsilonExtension: ExtensionFactory = (pi: ExtensionAPI) => {
 function buildMinimalPrompt(): string {
   return `<epsilon_tasks>
 ## Task Workflow
-1. **epsilon_task_create** — Create a task for the user's request
-2. **epsilon_task_update** — Update status as you work (in_progress → done)
-3. **epsilon_task_list** — Check existing tasks before creating duplicates
+1. **ALWAYS create tasks BEFORE acting** — Every work item gets a task via epsilon_task_create before execution begins
+2. **ALWAYS update tasks AFTER acting** — Update status (in_progress/done/blocked), progress, and completion via epsilon_task_update
+3. Mark tasks done when complete — no task left behind
+4. Check **epsilon_task_list** before creating to avoid duplicates
 
 Tools: epsilon_task_create/list/update/delete/get, epsilon_info, epsilon_version
 </epsilon_tasks>`;

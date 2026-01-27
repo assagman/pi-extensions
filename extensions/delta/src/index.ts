@@ -24,18 +24,18 @@ const deltaExtension: ExtensionFactory = (pi: ExtensionAPI) => {
 
   // Inject memory context before each agent turn
   pi.on("before_agent_start", async (event) => {
-    const memoryCtx = getMemoryContext();
+    const ctx = getMemoryContext();
+    const hasContent = ctx.indexEntries.length > 0;
 
-    const hasContent = memoryCtx.indexEntries.length > 0;
-
-    const systemPromptAddition = hasContent ? buildMemoryPrompt() : buildMinimalPrompt();
-
+    // First turn: instructions + data + hidden summary message
     if (!firstTurnInjected) {
       firstTurnInjected = true;
 
-      const messageContent = hasContent
-        ? buildFirstTurnMessage(memoryCtx)
-        : buildEmptyStateMessage();
+      const systemPromptAddition = hasContent
+        ? buildMemoryPrompt({ instructions: true, ctx })
+        : buildMinimalPrompt();
+
+      const messageContent = hasContent ? buildFirstTurnMessage(ctx) : buildEmptyStateMessage();
 
       return {
         systemPrompt: `${event.systemPrompt}\n\n${systemPromptAddition}`,
@@ -47,9 +47,14 @@ const deltaExtension: ExtensionFactory = (pi: ExtensionAPI) => {
       };
     }
 
-    return {
-      systemPrompt: `${event.systemPrompt}\n\n${systemPromptAddition}`,
-    };
+    // Subsequent turns: data only, no instructions
+    if (hasContent) {
+      return {
+        systemPrompt: `${event.systemPrompt}\n\n${buildMemoryPrompt({ instructions: false, ctx })}`,
+      };
+    }
+
+    return { systemPrompt: event.systemPrompt };
   });
 
   // Cleanup on shutdown
@@ -62,8 +67,10 @@ function buildMinimalPrompt(): string {
   return `<delta_memory>
 ## MANDATORY — Memory workflow:
 
-1. **delta_log** — Log every discovery: bugs, decisions, patterns, gotchas
-2. **delta_note_create** — Save reusable knowledge (issues, conventions, workflows)
+1. **ALWAYS recall first** — Before ANY task, search related memories with delta_recall/delta_index_search/delta_note_get
+2. **ALWAYS save discoveries** — Log every new finding, exploration, or learning:
+   - **delta_log** — events: bugs, decisions, patterns, gotchas
+   - **delta_note_create** — reusable knowledge: issues, conventions, workflows
 3. Check **delta_recall** and **delta_note_list** before creating to avoid duplicates
 
 Tools: delta_note_create/list/update/delete/get, delta_log/recall/episode_delete, delta_get/set/delete, delta_index_search/rebuild
