@@ -44,9 +44,6 @@ export function resetSession(): void {
   currentSessionId = null;
 }
 
-// Re-export for use in tools
-export { escapeLike as escapeLikeChars } from "pi-ext-shared";
-
 function escapeLike(s: string): string {
   return sharedEscapeLike(s);
 }
@@ -390,14 +387,9 @@ export function rebuildIndex(): number {
 // ============ Key-Value Operations ============
 
 export function kvGet(key: string): string | null {
-  const database = getDb();
-  const row = database.prepare("SELECT value FROM kv WHERE key = ?").get(key) as
+  const row = getDb().prepare("SELECT value FROM kv WHERE key = ?").get(key) as
     | { value: string }
     | undefined;
-  if (row) {
-    // Update last_accessed on read
-    database.prepare("UPDATE kv SET last_accessed = ? WHERE key = ?").run(Date.now(), key);
-  }
   return row?.value ?? null;
 }
 
@@ -466,6 +458,7 @@ export function deleteEpisode(id: number): boolean {
 
 export function recallEpisodes(options: RecallOptions = {}): Episode[] {
   const { query, tags, limit = 20, sessionOnly = false, since } = options;
+  const database = getDb();
 
   let sql = "SELECT id, content, context, tags, timestamp, session_id FROM episodes WHERE 1=1";
   const params: (string | number)[] = [];
@@ -494,9 +487,7 @@ export function recallEpisodes(options: RecallOptions = {}): Episode[] {
   sql += " ORDER BY timestamp DESC LIMIT ?";
   params.push(limit);
 
-  const rows = getDb()
-    .prepare(sql)
-    .all(...params) as Array<{
+  const rows = database.prepare(sql).all(...params) as Array<{
     id: number;
     content: string;
     context: string | null;
@@ -505,11 +496,12 @@ export function recallEpisodes(options: RecallOptions = {}): Episode[] {
     session_id: string | null;
   }>;
 
-  // Update last_accessed for returned episodes
+  // Guard: skip UPDATE when no rows matched to avoid empty IN() syntax error.
+  // last_accessed is intentionally updated on explicit recall (not on passive reads).
   if (rows.length > 0) {
     const now = Date.now();
     const ids = rows.map((r) => r.id);
-    getDb()
+    database
       .prepare(
         `UPDATE episodes SET last_accessed = ? WHERE id IN (${ids.map(() => "?").join(",")})`
       )
@@ -670,8 +662,7 @@ export function deleteNote(id: number): boolean {
 }
 
 export function getNote(id: number): ProjectNote | null {
-  const database = getDb();
-  const row = database.prepare("SELECT * FROM project_notes WHERE id = ?").get(id) as
+  const row = getDb().prepare("SELECT * FROM project_notes WHERE id = ?").get(id) as
     | {
         id: number;
         title: string;
@@ -685,9 +676,6 @@ export function getNote(id: number): ProjectNote | null {
     | undefined;
 
   if (!row) return null;
-
-  // Update last_accessed on read
-  database.prepare("UPDATE project_notes SET last_accessed = ? WHERE id = ?").run(Date.now(), id);
 
   return {
     ...row,

@@ -1,7 +1,7 @@
 /**
  * Delta v3 tools — memory operations only (no tasks).
  *
- * Tools: 17 total
+ * Tools: 16 total
  *   KV:       delta_get, delta_set, delta_delete (3)
  *   Episodic: delta_log, delta_recall, delta_episode_delete (3)
  *   Notes:    delta_note_create/list/update/delete/get (5)
