@@ -14,6 +14,8 @@
 echo "shipping fun..."
 ```
 
+<video src="https://github.com/assagman/pi-extensions/releases/download/assets/demo.mov" width="100%"></video>
+
 ## Extensions
 
 | Extension | Description |
