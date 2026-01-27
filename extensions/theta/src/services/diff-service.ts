@@ -53,8 +53,8 @@ export class DiffService {
     try {
       const { stdout } = await execAsync(cmd, { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 10 });
       return stdout.trim().split("\n").filter(Boolean);
-    } catch (e) {
-      console.error("Failed to get files", e);
+    } catch {
+      // Intentional: git diff fails for invalid refs or empty repos — return empty list
       return [];
     }
   }
@@ -77,14 +77,8 @@ export class DiffService {
 
     // Get raw diff
     const cmd = `git diff ${args.join(" ")}`;
-    let raw = "";
-    try {
-      const { stdout } = await execAsync(cmd, { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 10 });
-      raw = stdout;
-    } catch (e) {
-      console.error("Failed to get diff", e);
-      throw e;
-    }
+    const { stdout } = await execAsync(cmd, { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 10 });
+    const raw = stdout;
 
     // Parse with @pierre/diffs
     const patches = parsePatchFiles(raw);
