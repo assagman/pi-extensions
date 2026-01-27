@@ -14,6 +14,7 @@
 import type { ExtensionAPI, ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { DimmedOverlay } from "shared-tui";
 import { createAskUI } from "./ask-ui.js";
 import { errorResult, formatAnswerLines, normalizeQuestions } from "./helpers.js";
 import type { AskResult, Question } from "./types.js";
@@ -88,9 +89,9 @@ const askExtension: ExtensionFactory = (pi: ExtensionAPI) => {
 
       const questions = normalizeQuestions(params.questions);
 
-      const result = await ctx.ui.custom<AskResult>((tui, theme, _kb, done) => {
-        return createAskUI(tui, theme, done, questions);
-      });
+      const result = await DimmedOverlay.show<AskResult>(ctx.ui, (tui, theme, done) =>
+        createAskUI(tui, theme, done, questions)
+      );
 
       if (result.cancelled) {
         return {
