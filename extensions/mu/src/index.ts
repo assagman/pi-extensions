@@ -552,68 +552,51 @@ class BoxedToolCard implements Component {
     innerW: number
   ): string[] {
     const iconColored = mu(color, icon);
-    const prefix = `${iconColored} ${mu(color, "bash")} ${mu("dim", "$")} `;
-    const prefixLen = visibleWidth(prefix);
-    const indent = " ".repeat(prefixLen);
 
-    // Available width for command text on first line (needs room for status)
-    const firstLineWidth = innerW - prefixLen - rightLen - 1;
-    // Continuation lines have full width minus indent
-    const contLineWidth = innerW - prefixLen;
+    // Line 1: header with $ prompt — no command text on this line
+    const header = `${iconColored} ${mu(color, "bash")} ${mu("dim", "$")}`;
+    const headerLen = visibleWidth(header);
+    const headerPad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
+    const resultLines: string[] = [`${header}${headerPad}${rightPart}`];
 
-    if (firstLineWidth <= 0 || contLineWidth <= 0) {
-      // Terminal too narrow, show truncated
-      const fallback = `${prefix}${mu("text", truncateToWidth(rawCmd, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
-      const fallbackLen = visibleWidth(fallback);
-      const padding = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
-      return [`${fallback}${padding}${rightPart}`];
+    // Line 2+: 2-space indent for new statements, 4-space for chain continuations & wraps
+    const stmtIndent = "  ";
+    const contIndent = "    ";
+    const stmtWidth = innerW - 2;
+    const contWidth = innerW - 4;
+
+    if (stmtWidth <= 0) {
+      resultLines.push(`${stmtIndent}${mu("text", rawCmd)}`);
+      return resultLines;
     }
 
-    // Split command preserving original line breaks, then wrap each segment
     const cmdLines = rawCmd.split("\n");
-    const allWrapped: string[] = [];
+    let prevChained = false;
 
     for (const cmdLine of cmdLines) {
-      if (allWrapped.length === 0) {
-        // First segment uses first-line width
-        const wrapped = wrapTextWithAnsi(cmdLine, firstLineWidth);
-        if (wrapped.length === 0) {
-          allWrapped.push("");
-        } else {
-          allWrapped.push(wrapped[0]);
-          // Remaining from first segment use continuation width
-          if (wrapped.length > 1) {
-            const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contLineWidth);
-            allWrapped.push(...rewrapped);
+      const highlighted = highlightBashLine(cmdLine);
+      // Chain continuation if previous line ended with && || | or \
+      const indent = prevChained ? contIndent : stmtIndent;
+      const lineWidth = prevChained ? contWidth : stmtWidth;
+
+      const wrapped = wrapTextWithAnsi(highlighted, lineWidth);
+      if (wrapped.length === 0) {
+        resultLines.push(indent);
+      } else {
+        resultLines.push(`${indent}${wrapped[0]}`);
+        if (wrapped.length > 1) {
+          // Wrap continuations always at 4-space indent
+          const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contWidth);
+          for (const rw of rewrapped) {
+            resultLines.push(`${contIndent}${rw}`);
           }
         }
-      } else {
-        // Subsequent segments use continuation width
-        const wrapped = wrapTextWithAnsi(cmdLine, contLineWidth);
-        allWrapped.push(...(wrapped.length > 0 ? wrapped : [""]));
       }
+
+      prevChained = bashLineIsChained(cmdLine);
     }
 
-    const resultLines: string[] = [];
-
-    for (let i = 0; i < allWrapped.length; i++) {
-      const line = allWrapped[i];
-      if (i === 0) {
-        // First line: prefix + command + padding + status
-        const lineContent = `${prefix}${mu("text", line)}`;
-        const lineLen = visibleWidth(lineContent);
-        const padding = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
-        resultLines.push(`${lineContent}${padding}${rightPart}`);
-      } else {
-        // Continuation: indent + command + padding
-        const lineContent = `${indent}${mu("text", line)}`;
-        resultLines.push(lineContent);
-      }
-    }
-
-    return resultLines.length > 0
-      ? resultLines
-      : [`${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart}`];
+    return resultLines;
   }
 
   invalidate(): void {
@@ -1113,39 +1096,47 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         bashColored = mu(color, "bash");
       }
 
-      // Line 1: icon + "bash" + status (no command on this line)
-      const header = `${iconColored} ${bashColored}`;
+      // Line 1: header with $ prompt — no command text on this line
+      const header = `${iconColored} ${bashColored} ${mu("dim", "$")}`;
       const headerLen = visibleWidth(header);
       const headerPad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
       const resultLines: string[] = [`${header}${headerPad}${rightPart}`];
 
-      // Line 2+: "  $ " + syntax-highlighted command
-      const cmdPrefix = `  ${mu("dim", "$")} `;
-      const cmdPrefixLen = visibleWidth(cmdPrefix);
-      const cmdIndent = " ".repeat(cmdPrefixLen);
-      const cmdWidth = innerW - cmdPrefixLen;
+      // Line 2+: 2-space indent for new statements, 4-space for chain continuations & wraps
+      const stmtIndent = "  ";
+      const contIndent = "    ";
+      const stmtWidth = innerW - 2;
+      const contWidth = innerW - 4;
 
-      if (cmdWidth <= 0) {
-        resultLines.push(`${cmdPrefix}${mu("text", rawCmd)}`);
+      if (stmtWidth <= 0) {
+        resultLines.push(`${stmtIndent}${mu("text", rawCmd)}`);
         return resultLines;
       }
 
-      // Syntax-highlight each line of the command
       const srcLines = rawCmd.split("\n");
-      for (let lineIdx = 0; lineIdx < srcLines.length; lineIdx++) {
-        const highlighted = highlightBashLine(srcLines[lineIdx]);
-        const wrapped = wrapTextWithAnsi(highlighted, cmdWidth);
+      let prevChained = false;
 
-        for (let wi = 0; wi < wrapped.length; wi++) {
-          if (lineIdx === 0 && wi === 0) {
-            resultLines.push(`${cmdPrefix}${wrapped[wi]}`);
-          } else {
-            resultLines.push(`${cmdIndent}${wrapped[wi]}`);
+      for (const srcLine of srcLines) {
+        const highlighted = highlightBashLine(srcLine);
+        // Chain continuation if previous line ended with && || | or \
+        const indent = prevChained ? contIndent : stmtIndent;
+        const lineWidth = prevChained ? contWidth : stmtWidth;
+
+        const wrapped = wrapTextWithAnsi(highlighted, lineWidth);
+        if (wrapped.length === 0) {
+          resultLines.push(indent);
+        } else {
+          resultLines.push(`${indent}${wrapped[0]}`);
+          if (wrapped.length > 1) {
+            // Wrap continuations always at 4-space indent
+            const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contWidth);
+            for (const rw of rewrapped) {
+              resultLines.push(`${contIndent}${rw}`);
+            }
           }
         }
-        if (wrapped.length === 0) {
-          resultLines.push(lineIdx === 0 ? cmdPrefix : cmdIndent);
-        }
+
+        prevChained = bashLineIsChained(srcLine);
       }
 
       return resultLines;
@@ -1545,6 +1536,17 @@ const BASH_BUILTINS = new Set([
 
 /** Apply a pi syntax theme color directly. */
 const syn = (c: ThemeColor, text: string): string => getTheme().fg(c, text);
+
+/** Check if a bash line ends with a chain operator (&&, ||, |, \) */
+function bashLineIsChained(line: string): boolean {
+  const trimmed = line.trimEnd();
+  return (
+    trimmed.endsWith("&&") ||
+    trimmed.endsWith("||") ||
+    trimmed.endsWith("|") ||
+    trimmed.endsWith("\\")
+  );
+}
 
 function highlightBashLine(line: string): string {
   let result = "";
