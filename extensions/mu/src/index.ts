@@ -7,6 +7,8 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
   type SessionStartEvent,
+  type Theme,
+  type ThemeColor,
   type ToolCallEvent,
   type ToolResultEvent,
   createBashTool,
@@ -32,31 +34,72 @@ import {
 } from "@mariozechner/pi-tui";
 
 // =============================================================================
-// THEME COLORS (Orange Premium Palette)
+// THEME INTEGRATION
 // =============================================================================
-const C = {
-  orange: { r: 255, g: 159, b: 67 },
-  green: { r: 38, g: 222, b: 129 },
-  red: { r: 238, g: 90, b: 82 },
-  yellow: { r: 254, g: 211, b: 48 },
-  dim: { r: 92, g: 92, b: 92 },
-  gray: { r: 140, g: 140, b: 140 },
-  teal: { r: 84, g: 160, b: 160 },
-  amber: { r: 254, g: 202, b: 87 },
-  white: { r: 220, g: 220, b: 220 },
-  violet: { r: 167, g: 139, b: 250 },
-  cyan: { r: 34, g: 211, b: 238 },
-} as const;
+// Access pi's Theme singleton via globalThis Symbol (not directly exported).
+// All mu colors map to ThemeColor semantic names for theme-awareness.
 
-type ColorKey = keyof typeof C;
+const PI_THEME_KEY = Symbol.for("@mariozechner/pi-coding-agent:theme");
 
-const rgb = (c: ColorKey, text: string): string => {
-  const { r, g, b } = C[c];
-  return `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
+const getTheme = (): Theme => {
+  const t = (globalThis as Record<symbol, Theme | undefined>)[PI_THEME_KEY];
+  if (!t) throw new Error("Theme not initialized — mu requires pi theme.");
+  return t;
 };
 
-const rgbPulse = (c: ColorKey, text: string, brightness: number): string => {
-  const { r, g, b } = C[c];
+// Mu semantic color → ThemeColor mapping
+type MuColor =
+  | "accent" // brand, running state (was orange)
+  | "success" // success status (was green)
+  | "error" // error status (was red)
+  | "warning" // highlights, numbers (was amber/yellow)
+  | "dim" // muted text, operators
+  | "muted" // canceled, secondary (was gray)
+  | "text" // normal text (was white)
+  | "info" // info, key names, dividers (was teal)
+  | "keyword" // keywords (was violet)
+  | "variable"; // flags, variables (was cyan)
+
+const MU_THEME_MAP: Record<MuColor, ThemeColor> = {
+  accent: "accent",
+  success: "success",
+  error: "error",
+  warning: "warning",
+  dim: "dim",
+  muted: "muted",
+  text: "text",
+  info: "syntaxType",
+  keyword: "syntaxKeyword",
+  variable: "syntaxVariable",
+};
+
+/** Apply mu semantic color via pi theme. */
+const mu = (c: MuColor, text: string): string => getTheme().fg(MU_THEME_MAP[c], text);
+
+/** Pulse animation: scale theme color brightness for running indicators. */
+const rgbCache = new Map<ThemeColor, { r: number; g: number; b: number }>();
+
+/** Parse RGB values from theme ANSI escape. Cached, auto-clears on theme switch. */
+const parseThemeRgb = (tc: ThemeColor): { r: number; g: number; b: number } => {
+  const cached = rgbCache.get(tc);
+  if (cached) return cached;
+  const ansi = getTheme().getFgAnsi(tc);
+  const m = ansi.match(/38;2;(\d+);(\d+);(\d+)/);
+  const result = m
+    ? { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]) }
+    : { r: 200, g: 200, b: 200 }; // fallback
+  rgbCache.set(tc, result);
+  return result;
+};
+
+/** Call when theme changes to refresh cached RGB values.
+ *  Not connected yet — onThemeChange() is not exported from pi. */
+const _clearThemeCache = (): void => {
+  rgbCache.clear();
+};
+
+const muPulse = (c: MuColor, text: string, brightness: number): string => {
+  const { r, g, b } = parseThemeRgb(MU_THEME_MAP[c]);
   const f = Math.max(0.3, Math.min(1, brightness));
   return `\x1b[38;2;${Math.round(r * f)};${Math.round(g * f)};${Math.round(b * f)}m${text}\x1b[0m`;
 };
@@ -66,12 +109,12 @@ const rgbPulse = (c: ColorKey, text: string, brightness: number): string => {
 // =============================================================================
 type ToolStatus = "pending" | "running" | "success" | "failed" | "canceled";
 
-const STATUS: Record<ToolStatus, { sym: string; color: ColorKey }> = {
+const STATUS: Record<ToolStatus, { sym: string; color: MuColor }> = {
   pending: { sym: "◌", color: "dim" },
-  running: { sym: "●", color: "orange" },
-  success: { sym: "", color: "green" },
-  failed: { sym: "", color: "red" },
-  canceled: { sym: "", color: "gray" },
+  running: { sym: "●", color: "accent" },
+  success: { sym: "", color: "success" },
+  failed: { sym: "", color: "error" },
+  canceled: { sym: "", color: "muted" },
 };
 
 const TOOL_ICONS: Record<string, string> = {
@@ -294,7 +337,7 @@ const progressBar = (percent: number, width = 5): string => {
   const filledStr = "█".repeat(filled);
   const emptyStr = "░".repeat(empty);
 
-  return rgbRaw(color.r, color.g, color.b, filledStr) + rgb("dim", emptyStr);
+  return rgbRaw(color.r, color.g, color.b, filledStr) + mu("dim", emptyStr);
 };
 
 const formatModelDisplay = (
@@ -409,12 +452,12 @@ class BoxedToolCard implements Component {
       const brightness =
         MU_CONFIG.PULSE_MIN_BRIGHTNESS +
         (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * (0.5 + 0.5 * Math.sin(this.pulsePhase));
-      statusStr = rgbPulse(color, sym, brightness);
+      statusStr = muPulse(color, sym, brightness);
     } else {
-      statusStr = rgb(color, sym);
+      statusStr = mu(color, sym);
     }
 
-    const timerStr = elapsed ? rgb("dim", ` ${elapsed}`) : "";
+    const timerStr = elapsed ? mu("dim", ` ${elapsed}`) : "";
     const rightPart = `${statusStr}${timerStr}`;
     const rightLen = visibleWidth(rightPart);
 
@@ -428,9 +471,9 @@ class BoxedToolCard implements Component {
     }
 
     // Non-bash tools: multiline rendering with full args, no truncation
-    const iconColored = rgb(color, icon);
+    const iconColored = mu(color, icon);
     const toolLabel = this.toolName;
-    const prefix = `${iconColored} ${rgb(color, toolLabel)} `;
+    const prefix = `${iconColored} ${mu(color, toolLabel)} `;
     const prefixLen = visibleWidth(prefix);
     const indent = " ".repeat(prefixLen);
 
@@ -438,7 +481,7 @@ class BoxedToolCard implements Component {
     const contLineWidth = innerW - prefixLen;
 
     if (firstLineWidth <= 0 || contLineWidth <= 0) {
-      const fallback = `${prefix}${rgb("dim", truncateToWidth(content, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
+      const fallback = `${prefix}${mu("dim", truncateToWidth(content, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
       const fallbackLen = visibleWidth(fallback);
       const pad = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
       const line = `${fallback}${pad}${rightPart}`;
@@ -472,12 +515,12 @@ class BoxedToolCard implements Component {
     for (let i = 0; i < allWrapped.length; i++) {
       const wl = allWrapped[i];
       if (i === 0) {
-        const lineContent = `${prefix}${rgb("dim", wl)}`;
+        const lineContent = `${prefix}${mu("dim", wl)}`;
         const lineLen = visibleWidth(lineContent);
         const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
         resultLines.push(`${lineContent}${pad}${rightPart}`);
       } else {
-        resultLines.push(`${indent}${rgb("dim", wl)}`);
+        resultLines.push(`${indent}${mu("dim", wl)}`);
       }
     }
 
@@ -495,13 +538,13 @@ class BoxedToolCard implements Component {
   private renderBashMultiline(
     rawCmd: string,
     icon: string,
-    color: ColorKey,
+    color: MuColor,
     rightPart: string,
     rightLen: number,
     innerW: number
   ): string[] {
-    const iconColored = rgb(color, icon);
-    const prefix = `${iconColored} ${rgb(color, "bash")} ${rgb("dim", "$")} `;
+    const iconColored = mu(color, icon);
+    const prefix = `${iconColored} ${mu(color, "bash")} ${mu("dim", "$")} `;
     const prefixLen = visibleWidth(prefix);
     const indent = " ".repeat(prefixLen);
 
@@ -512,7 +555,7 @@ class BoxedToolCard implements Component {
 
     if (firstLineWidth <= 0 || contLineWidth <= 0) {
       // Terminal too narrow, show truncated
-      const fallback = `${prefix}${rgb("white", truncateToWidth(rawCmd, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
+      const fallback = `${prefix}${mu("text", truncateToWidth(rawCmd, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
       const fallbackLen = visibleWidth(fallback);
       const padding = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
       return [`${fallback}${padding}${rightPart}`];
@@ -549,13 +592,13 @@ class BoxedToolCard implements Component {
       const line = allWrapped[i];
       if (i === 0) {
         // First line: prefix + command + padding + status
-        const lineContent = `${prefix}${rgb("white", line)}`;
+        const lineContent = `${prefix}${mu("text", line)}`;
         const lineLen = visibleWidth(lineContent);
         const padding = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
         resultLines.push(`${lineContent}${padding}${rightPart}`);
       } else {
         // Continuation: indent + command + padding
-        const lineContent = `${indent}${rgb("white", line)}`;
+        const lineContent = `${indent}${mu("text", line)}`;
         resultLines.push(lineContent);
       }
     }
@@ -623,17 +666,17 @@ class ToolResultDetailViewer implements Component {
     const { toolName, args, result, duration, isError } = this.option;
     const out: string[] = [];
 
-    const header = `${rgb("amber", "─")} ${rgb("amber", toolName)} ${rgb("dim", "─".repeat(Math.max(0, width - toolName.length - 4)))}`;
+    const header = `${mu("warning", "─")} ${mu("warning", toolName)} ${mu("dim", "─".repeat(Math.max(0, width - toolName.length - 4)))}`;
     out.push(header);
 
     const argLines = Object.entries(args).map(([k, v]) => {
       const val = typeof v === "string" ? preview(v, 80) : JSON.stringify(v);
-      return `  ${rgb("teal", k)}: ${rgb("white", val)}`;
+      return `  ${mu("info", k)}: ${mu("text", val)}`;
     });
     out.push(...argLines);
 
     if (duration !== undefined) {
-      out.push(`  ${rgb("dim", `duration: ${(duration / 1000).toFixed(2)}s`)}`);
+      out.push(`  ${mu("dim", `duration: ${(duration / 1000).toFixed(2)}s`)}`);
     }
 
     out.push("");
@@ -646,8 +689,8 @@ class ToolResultDetailViewer implements Component {
       .map((c) => (c as { text?: string }).text ?? "")
       .join("\n");
 
-    const resultColor = isError ? "red" : "green";
-    out.push(rgb(resultColor, isError ? "─ Error ─" : "─ Result ─"));
+    const resultColor: MuColor = isError ? "error" : "success";
+    out.push(mu(resultColor, isError ? "─ Error ─" : "─ Result ─"));
 
     const textLines = text.split("\n");
     for (const line of textLines) {
@@ -704,11 +747,11 @@ class MuToolsOverlay implements Component {
     const innerW = width - 2;
 
     const titleText = "μ Tools";
-    const titleLine = `${rgb("amber", titleText)} ${rgb("teal", "─".repeat(Math.max(0, innerW - titleText.length - 1)))}`;
+    const titleLine = `${mu("warning", titleText)} ${mu("info", "─".repeat(Math.max(0, innerW - titleText.length - 1)))}`;
     lines.push(titleLine);
 
     if (this.options.length === 0) {
-      lines.push(rgb("dim", "No tool results yet"));
+      lines.push(mu("dim", "No tool results yet"));
     } else {
       const visibleCount = Math.min(10, this.options.length);
       const maxScroll = Math.max(0, this.options.length - visibleCount);
@@ -725,21 +768,21 @@ class MuToolsOverlay implements Component {
         if (!opt) continue;
 
         const isSelected = idx === this.selectedIndex;
-        const pointer = isSelected ? rgb("orange", "▸") : " ";
+        const pointer = isSelected ? mu("accent", "▸") : " ";
         const status = opt.isError ? STATUS.failed : STATUS.success;
-        const statusSym = rgb(status.color, status.sym);
+        const statusSym = mu(status.color, status.sym);
         const icon = TOOL_ICONS[opt.toolName] ?? "⚙";
 
         const dur = opt.duration !== undefined ? `${(opt.duration / 1000).toFixed(1)}s` : "";
-        const durStr = rgb("dim", dur.padStart(6));
+        const durStr = mu("dim", dur.padStart(6));
 
         const label = truncateToWidth(opt.label, innerW - 14);
-        const line = `${pointer}${statusSym} ${rgb("teal", icon)} ${label}${" ".repeat(Math.max(0, innerW - visibleWidth(label) - 12))}${durStr}`;
+        const line = `${pointer}${statusSym} ${mu("info", icon)} ${label}${" ".repeat(Math.max(0, innerW - visibleWidth(label) - 12))}${durStr}`;
         lines.push(line);
       }
     }
 
-    const divider = rgb("teal", "─".repeat(innerW));
+    const divider = mu("info", "─".repeat(innerW));
     lines.push(divider);
 
     const selected = this.options[this.selectedIndex];
@@ -747,19 +790,19 @@ class MuToolsOverlay implements Component {
       const args = Object.entries(selected.args).slice(0, 3);
       for (const [k, v] of args) {
         const val = typeof v === "string" ? preview(v, innerW - k.length - 4) : JSON.stringify(v);
-        const argLine = `${rgb("dim", k)}: ${rgb("white", val)}`;
+        const argLine = `${mu("dim", k)}: ${mu("text", val)}`;
         lines.push(truncateToWidth(argLine, innerW));
       }
       if (args.length === 0) {
-        lines.push(rgb("dim", "(no args)"));
+        lines.push(mu("dim", "(no args)"));
       }
     } else {
       lines.push("");
     }
 
-    lines.push(rgb("teal", "─".repeat(innerW)));
+    lines.push(mu("info", "─".repeat(innerW)));
 
-    const help = rgb("dim", "↑↓ navigate   enter expand   esc close");
+    const help = mu("dim", "↑↓ navigate   enter expand   esc close");
     lines.push(help);
 
     return lines;
@@ -804,10 +847,13 @@ class MuToolsOverlay implements Component {
 async function openMuToolsOverlay(ctx: ExtensionCommandContext): Promise<void> {
   if (!ctx.hasUI) return;
 
-  const theme: ThemeWithAnsi = {
+  const overlayTheme: ThemeWithAnsi = {
     fg: (color, text) => {
-      const c = C[color as ColorKey];
-      return c ? rgbRaw(c.r, c.g, c.b, text) : text;
+      try {
+        return getTheme().fg(color as ThemeColor, text);
+      } catch {
+        return text;
+      }
     },
     bg: (_color, text) => text,
   };
@@ -825,10 +871,10 @@ async function openMuToolsOverlay(ctx: ExtensionCommandContext): Promise<void> {
       };
 
       const openDetail = (opt: ToolResultOption) => {
-        detailViewer = new ToolResultDetailViewer(opt, theme);
+        detailViewer = new ToolResultDetailViewer(opt, overlayTheme);
       };
 
-      currentOverlay = new MuToolsOverlay(options, theme, openDetail, closeOverlay);
+      currentOverlay = new MuToolsOverlay(options, overlayTheme, openDetail, closeOverlay);
 
       return {
         render(width: number): string[] {
@@ -946,7 +992,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         if (!markdownText) return [];
 
         const mdTheme = getMarkdownTheme();
-        const defaultTextStyle = { color: (s: string) => rgb("teal", s) };
+        const defaultTextStyle = { color: (s: string) => mu("info", s) };
         const md = new Markdown(markdownText, 0, 0, mdTheme, defaultTextStyle);
         const lines = md.render(w);
 
@@ -977,7 +1023,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       // Block styles
       const THINKING_STYLE = {
         icon: "󰛨",
-        color: "violet" as ColorKey,
+        color: "keyword" as MuColor,
       };
 
       // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
@@ -996,7 +1042,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
           // Thinking blocks: icon prefix on first line
           block.render = (w: number): string[] => {
             const lines: string[] = orig(w - 2);
-            const iconStyled = rgb(THINKING_STYLE.color, THINKING_STYLE.icon);
+            const iconStyled = mu(THINKING_STYLE.color, THINKING_STYLE.icon);
 
             return lines.map((line: string, i: number) => {
               if (i === 0) {
@@ -1039,7 +1085,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
     const renderBashMultilineForPatch = (
       rawCmd: string,
       icon: string,
-      color: ColorKey,
+      color: MuColor,
       rightPart: string,
       rightLen: number,
       innerW: number,
@@ -1052,11 +1098,11 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         const brightness =
           MU_CONFIG.PULSE_MIN_BRIGHTNESS +
           (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * (0.5 + 0.5 * Math.sin(pulsePhase));
-        iconColored = rgbPulse(color, icon, brightness);
-        bashColored = rgbPulse(color, "bash", brightness);
+        iconColored = muPulse(color, icon, brightness);
+        bashColored = muPulse(color, "bash", brightness);
       } else {
-        iconColored = rgb(color, icon);
-        bashColored = rgb(color, "bash");
+        iconColored = mu(color, icon);
+        bashColored = mu(color, "bash");
       }
 
       // Line 1: icon + "bash" + status (no command on this line)
@@ -1066,13 +1112,13 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       const resultLines: string[] = [`${header}${headerPad}${rightPart}`];
 
       // Line 2+: "  $ " + syntax-highlighted command
-      const cmdPrefix = `  ${rgb("dim", "$")} `;
+      const cmdPrefix = `  ${mu("dim", "$")} `;
       const cmdPrefixLen = visibleWidth(cmdPrefix);
       const cmdIndent = " ".repeat(cmdPrefixLen);
       const cmdWidth = innerW - cmdPrefixLen;
 
       if (cmdWidth <= 0) {
-        resultLines.push(`${cmdPrefix}${rgb("white", rawCmd)}`);
+        resultLines.push(`${cmdPrefix}${mu("text", rawCmd)}`);
         return resultLines;
       }
 
@@ -1176,8 +1222,8 @@ const setupUIPatching = (ctx: ExtensionContext) => {
 
         const innerW = width - 2;
 
-        const statusStr = rgb(color, sym);
-        const timerColored = rgb("dim", timerStr);
+        const statusStr = mu(color, sym);
+        const timerColored = mu("dim", timerStr);
         const rightPart = `${statusStr}${timerColored}`;
         const rightLen = visibleWidth(rightPart);
 
@@ -1207,11 +1253,11 @@ const setupUIPatching = (ctx: ExtensionContext) => {
           const brightness =
             MU_CONFIG.PULSE_MIN_BRIGHTNESS +
             (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * (0.5 + 0.5 * Math.sin(pulsePhase));
-          iconColored = rgbPulse(color, icon, brightness);
-          nameColored = rgbPulse(color, toolName, brightness);
+          iconColored = muPulse(color, icon, brightness);
+          nameColored = muPulse(color, toolName, brightness);
         } else {
-          iconColored = rgb(color, icon);
-          nameColored = rgb(color, toolName);
+          iconColored = mu(color, icon);
+          nameColored = mu(color, toolName);
         }
 
         // Special case: ask tool — suppress args, show only user's answer
@@ -1233,7 +1279,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
             const pad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
             const lines: string[] = [`${headerContent}${pad}${rightPart}`];
             for (const aLine of answerLines) {
-              lines.push(`  ${rgb("white", aLine)}`);
+              lines.push(`  ${mu("text", aLine)}`);
             }
             if (tool._mu_leading_space) return ["", ...lines];
             return lines;
@@ -1257,7 +1303,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
 
           const BLOCK_INDENT = "  ";
           for (const [k, v] of Object.entries(args)) {
-            const keyStr = `${rgb("teal", k)}${rgb("dim", "=")}`;
+            const keyStr = `${mu("info", k)}${mu("dim", "=")}`;
 
             if (isComplexValue(v)) {
               const highlighted = highlightValue(v);
@@ -1271,14 +1317,14 @@ const setupUIPatching = (ctx: ExtensionContext) => {
             } else {
               const valStr =
                 v === null
-                  ? rgb("violet", "null")
+                  ? mu("keyword", "null")
                   : v === undefined
-                    ? rgb("dim", "undefined")
+                    ? mu("dim", "undefined")
                     : typeof v === "boolean"
-                      ? rgb("violet", String(v))
+                      ? mu("keyword", String(v))
                       : typeof v === "number"
-                        ? rgb("amber", String(v))
-                        : rgb("white", String(v));
+                        ? mu("warning", String(v))
+                        : mu("text", String(v));
               resultLines.push(`${BLOCK_INDENT}${keyStr}${valStr}`);
             }
           }
@@ -1297,7 +1343,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         const contLineWidth = innerW - prefixLen;
 
         if (firstLineWidth <= 0 || contLineWidth <= 0) {
-          const fallback = `${prefix}${rgb("dim", truncateToWidth(argsStr, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
+          const fallback = `${prefix}${mu("dim", truncateToWidth(argsStr, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
           const fallbackLen = visibleWidth(fallback);
           const pad = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
           const lines = [`${fallback}${pad}${rightPart}`];
@@ -1330,12 +1376,12 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         for (let i = 0; i < allWrapped.length; i++) {
           const wl = allWrapped[i];
           if (i === 0) {
-            const lineContent = `${prefix}${rgb("dim", wl)}`;
+            const lineContent = `${prefix}${mu("dim", wl)}`;
             const lineLen = visibleWidth(lineContent);
             const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
             resultLines.push(`${lineContent}${pad}${rightPart}`);
           } else {
-            resultLines.push(`${indent}${rgb("dim", wl)}`);
+            resultLines.push(`${indent}${mu("dim", wl)}`);
           }
         }
 
@@ -1482,6 +1528,9 @@ const BASH_BUILTINS = new Set([
   "umask",
 ]);
 
+/** Apply a pi syntax theme color directly. */
+const syn = (c: ThemeColor, text: string): string => getTheme().fg(c, text);
+
 function highlightBashLine(line: string): string {
   let result = "";
   let i = 0;
@@ -1497,7 +1546,7 @@ function highlightBashLine(line: string): string {
 
     // Comment
     if (line[i] === "#" && (i === 0 || line[i - 1] === " ")) {
-      result += rgb("dim", line.slice(i));
+      result += syn("syntaxComment", line.slice(i));
       break;
     }
 
@@ -1505,7 +1554,7 @@ function highlightBashLine(line: string): string {
     if (line[i] === "'") {
       const end = line.indexOf("'", i + 1);
       const s = end === -1 ? line.slice(i) : line.slice(i, end + 1);
-      result += rgb("green", s);
+      result += syn("syntaxString", s);
       i += s.length;
       cmdPos = false;
       continue;
@@ -1519,7 +1568,7 @@ function highlightBashLine(line: string): string {
         j++;
       }
       const s = line.slice(i, j + 1);
-      result += rgb("green", s);
+      result += syn("syntaxString", s);
       i = j + 1;
       cmdPos = false;
       continue;
@@ -1529,7 +1578,7 @@ function highlightBashLine(line: string): string {
     if (line[i] === "$") {
       const m = line.slice(i).match(/^\$(\{[^}]*\}|[A-Za-z_]\w*|\(.*?\)|\d|[?!#$@*-])/);
       if (m) {
-        result += rgb("violet", m[0]);
+        result += syn("syntaxVariable", m[0]);
         i += m[0].length;
       } else {
         result += line[i];
@@ -1543,7 +1592,7 @@ function highlightBashLine(line: string): string {
     if (line[i] === "`") {
       const end = line.indexOf("`", i + 1);
       const s = end === -1 ? line.slice(i) : line.slice(i, end + 1);
-      result += rgb("violet", s);
+      result += syn("syntaxVariable", s);
       i += s.length;
       cmdPos = false;
       continue;
@@ -1551,13 +1600,13 @@ function highlightBashLine(line: string): string {
 
     // Operators: &&, ||
     if (line[i] === "&" && line[i + 1] === "&") {
-      result += rgb("dim", "&&");
+      result += syn("syntaxOperator", "&&");
       i += 2;
       cmdPos = true;
       continue;
     }
     if (line[i] === "|" && line[i + 1] === "|") {
-      result += rgb("dim", "||");
+      result += syn("syntaxOperator", "||");
       i += 2;
       cmdPos = true;
       continue;
@@ -1565,7 +1614,7 @@ function highlightBashLine(line: string): string {
 
     // Pipe
     if (line[i] === "|") {
-      result += rgb("dim", "|");
+      result += syn("syntaxOperator", "|");
       i++;
       cmdPos = true;
       continue;
@@ -1573,7 +1622,7 @@ function highlightBashLine(line: string): string {
 
     // Semicolon
     if (line[i] === ";") {
-      result += rgb("dim", ";");
+      result += syn("syntaxPunctuation", ";");
       i++;
       cmdPos = true;
       continue;
@@ -1581,10 +1630,10 @@ function highlightBashLine(line: string): string {
 
     // Heredoc <<
     if (line[i] === "<" && line[i + 1] === "<") {
-      result += rgb("dim", "<<");
+      result += syn("syntaxOperator", "<<");
       i += 2;
       if (i < line.length && line[i] === "-") {
-        result += rgb("dim", "-");
+        result += syn("syntaxOperator", "-");
         i++;
       }
       cmdPos = false;
@@ -1594,7 +1643,7 @@ function highlightBashLine(line: string): string {
     // Redirections: 2>&1, &>>, &>, >>, 2>, <, >
     const redir = line.slice(i).match(/^(2>&1|&>>|&>|>>|2>|[<>])/);
     if (redir) {
-      result += rgb("dim", redir[0]);
+      result += syn("syntaxOperator", redir[0]);
       i += redir[0].length;
       cmdPos = false;
       continue;
@@ -1602,7 +1651,7 @@ function highlightBashLine(line: string): string {
 
     // Background &
     if (line[i] === "&") {
-      result += rgb("dim", "&");
+      result += syn("syntaxOperator", "&");
       i++;
       cmdPos = true;
       continue;
@@ -1610,7 +1659,7 @@ function highlightBashLine(line: string): string {
 
     // Parentheses / braces
     if (line[i] === "(" || line[i] === ")" || line[i] === "{" || line[i] === "}") {
-      result += rgb("dim", line[i]);
+      result += syn("syntaxPunctuation", line[i]);
       i++;
       if (line[i - 1] === "(" || line[i - 1] === "{") cmdPos = true;
       continue;
@@ -1637,19 +1686,19 @@ function highlightBashLine(line: string): string {
     // Classify word
     if (cmdPos) {
       if (BASH_KEYWORDS.has(word)) {
-        result += rgb("violet", word);
+        result += syn("syntaxKeyword", word);
       } else if (BASH_BUILTINS.has(word)) {
-        result += rgb("teal", word);
+        result += syn("syntaxFunction", word);
       } else {
-        result += rgb("green", word);
+        result += syn("syntaxType", word);
       }
       cmdPos = BASH_FLOW_RESUME.has(word);
     } else if (word.startsWith("--") || (word.startsWith("-") && word.length > 1)) {
-      result += rgb("cyan", word);
+      result += syn("syntaxVariable", word);
     } else if (/^\d+(\.\d+)?$/.test(word)) {
-      result += rgb("amber", word);
+      result += syn("syntaxNumber", word);
     } else {
-      result += rgb("white", word);
+      result += syn("syntaxOperator", word);
     }
   }
 
@@ -1692,7 +1741,7 @@ function isComplexValue(v: unknown): boolean {
 function highlightValue(v: unknown): string[] {
   ensureTheme();
   if (v === null) return highlightCode("null", "json");
-  if (v === undefined) return [rgb("dim", "undefined")];
+  if (v === undefined) return [mu("dim", "undefined")];
   if (typeof v === "boolean" || typeof v === "number") {
     return highlightCode(JSON.stringify(v), "json");
   }
@@ -1925,16 +1974,11 @@ export default function (pi: ExtensionAPI) {
 
   const _muTheme: MuTheme = {
     fg: (color, text) => {
-      const colorMap: Record<string, ColorKey> = {
-        accent: "orange",
-        text: "white",
-        dim: "dim",
-        success: "green",
-        error: "red",
-        warning: "yellow",
-      };
-      const c = C[colorMap[color] ?? (color as ColorKey)];
-      return c ? rgbRaw(c.r, c.g, c.b, text) : text;
+      try {
+        return getTheme().fg(color as ThemeColor, text);
+      } catch {
+        return text;
+      }
     },
     bg: (_color, text) => text,
   };
@@ -2113,7 +2157,7 @@ export default function (pi: ExtensionAPI) {
             const tokenParts: string[] = [];
             if (totalInput) tokenParts.push(`↑${fmt(totalInput)}`);
             if (totalOutput) tokenParts.push(`↓${fmt(totalOutput)}`);
-            statsParts.push(rgb("dim", "[") + rgb("cyan", tokenParts.join(" ")) + rgb("dim", "]"));
+            statsParts.push(mu("dim", "[") + mu("variable", tokenParts.join(" ")) + mu("dim", "]"));
           }
 
           // Cache group (green): [Rread Wwrite]
@@ -2121,22 +2165,20 @@ export default function (pi: ExtensionAPI) {
             const cacheParts: string[] = [];
             if (totalCacheRead) cacheParts.push(`R${fmt(totalCacheRead)}`);
             if (totalCacheWrite) cacheParts.push(`W${fmt(totalCacheWrite)}`);
-            statsParts.push(rgb("dim", "[") + rgb("green", cacheParts.join(" ")) + rgb("dim", "]"));
+            statsParts.push(mu("dim", "[") + mu("success", cacheParts.join(" ")) + mu("dim", "]"));
           }
 
           // Cost group (amber): [$cost sub]
           const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
           if (totalCost || usingSubscription) {
             const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " sub" : ""}`;
-            statsParts.push(rgb("dim", "[") + rgb("amber", costStr) + rgb("dim", "]"));
+            statsParts.push(mu("dim", "[") + mu("warning", costStr) + mu("dim", "]"));
           }
 
           // Context group with gradient progress bar: [█▓░░░ 29k/200k (14.5%)]
           const bar = progressBar(contextPercentValue, 5);
           const contextInfo = `${fmt(contextTokens)}/${fmt(contextWindow)} (${contextPercent}%)`;
-          statsParts.push(
-            `${rgb("dim", "[")}${bar} ${rgb("white", contextInfo)}${rgb("dim", "]")}`
-          );
+          statsParts.push(`${mu("dim", "[")}${bar} ${mu("text", contextInfo)}${mu("dim", "]")}`);
 
           const statsLeft = statsParts.join(" ");
 
