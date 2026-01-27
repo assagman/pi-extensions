@@ -9,9 +9,15 @@ This is a **monorepo** containing extensions for the [Pi coding agent](https://g
 ```
 pi-extensions/
 ├── extensions/
-│   ├── delta/          # Phase-gate workflow (56KB)
-│   ├── mu/             # Output condensation (56KB)  
-│   └── theta/          # Code review (24KB)
+│   ├── ask/            # Better questionnaire tool
+│   ├── delta/          # Persistent memory (KV, episodic, notes)
+│   ├── epsilon/        # Task management
+│   ├── mu/             # Output condensation
+│   ├── omega/          # Step looper
+│   ├── shared/         # Shared libraries (not deployable)
+│   │   ├── core/       # Repo ID, SQLite helpers, tool factory
+│   │   └── tui/        # Dimmed overlays, shared TUI components
+│   └── theta/          # Code review
 ├── README.md
 ├── AGENTS.md           # (this file)
 └── llms.txt
@@ -29,6 +35,8 @@ extension/
 ├── docs/
 │   ├── README.md       # User documentation
 │   └── ARCHITECTURE.md # Technical details
+├── AGENTS.md           # AI agent instructions for this extension
+├── llms.txt            # LLM context doc for this extension
 ├── install.sh          # Build + symlink to ~/.pi/agent/extensions/<name>
 ├── uninstall.sh        # Remove symlink
 ├── package.json        # name, version: 1.0.0, pi.extensions field
@@ -177,8 +185,11 @@ pi  # Start Pi agent, test extension features
 
 ```
 ~/.pi/agent/extensions/
+├── ask -> /path/to/extensions/ask/dist
 ├── delta -> /path/to/extensions/delta/dist
+├── epsilon -> /path/to/extensions/epsilon/dist
 ├── mu -> /path/to/extensions/mu/dist
+├── omega -> /path/to/extensions/omega/dist
 └── theta -> /path/to/extensions/theta/dist
 ```
 

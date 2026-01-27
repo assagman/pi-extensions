@@ -1,0 +1,20 @@
+# Ask — Better Questionnaire Extension
+
+Pi extension replacing the built-in `questionnaire` tool with improved UX: number keys (1-9) for quick select, C-n/C-p navigation, proper long text wrapping, and always-present "Type something" option.
+
+## Architecture
+
+Single tool (`ask`) with TUI component. Injects mandatory usage rules into system prompt. Supports single-question (auto-submit) and multi-question (tab navigation + submit) modes.
+
+## Files
+
+- [README](docs/README.md): User documentation, keybindings, install
+- [ARCHITECTURE](docs/ARCHITECTURE.md): Module structure, data flow, design decisions
+- [AGENTS](AGENTS.md): Agent instructions
+
+## Key Modules
+
+- `src/index.ts`: Extension factory, tool registration, system prompt injection
+- `src/types.ts`: Question, Answer, AskResult interfaces
+- `src/helpers.ts`: Pure functions for normalizing questions and formatting answers
+- `src/ask-ui.ts`: TUI component factory with state, rendering, input handling
