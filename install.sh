@@ -74,6 +74,33 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━"
 
 mkdir -p "$TARGET_DIR"
 
+# Build shared dependencies if the extension needs them
+build_shared_dep() {
+  local dep_dir="$1"
+  local dep_name
+  dep_name=$(basename "$dep_dir")
+  if [[ ! -d "$dep_dir/dist" ]]; then
+    echo ""
+    echo "[shared/$dep_name] (dependency)"
+    echo "  bun install..."
+    (cd "$dep_dir" && bun install --silent "${BUN_INSTALL_FLAGS[@]}")
+    echo "  bun run build..."
+    if ! (cd "$dep_dir" && bun run build 2>&1); then
+      echo -e "  ${RED}✗ shared/$dep_name build failed${NC}"
+      exit 1
+    fi
+    echo -e "  ${GREEN}✓ built${NC}"
+  fi
+}
+
+# Check if extension depends on pi-ext-shared
+if grep -q '"pi-ext-shared"' "$ext_dir/package.json" 2>/dev/null; then
+  shared_core="$EXTENSIONS_DIR/shared/core"
+  if [[ -d "$shared_core" ]]; then
+    build_shared_dep "$shared_core"
+  fi
+fi
+
 echo ""
 echo "[$EXT_NAME]"
 

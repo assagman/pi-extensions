@@ -9,8 +9,8 @@
     "clean": "rm -rf dist",
     "test": "vitest run",
     "test:watch": "vitest",
-    "install": "./install.sh",
-    "uninstall": "./uninstall.sh"
+    "deploy": "./install.sh",
+    "undeploy": "./uninstall.sh"
   },
   "pi": {
     "extensions": ["./dist/index.js"]
