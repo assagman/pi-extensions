@@ -42,24 +42,31 @@ extension/
 ## Installation
 
 ```bash
-# Install a specific extension
+# Install all extensions
+./install.sh
+
+# Or install a specific extension
 cd extensions/<name>
-npm install
+bun install
 ./install.sh
 
 # Example: Install delta
 cd extensions/delta
-npm install
+bun install
 ./install.sh
 ```
 
 The install script:
-1. Runs `npm run build` (compiles TypeScript)
+1. Runs `bun run build` (compiles TypeScript)
 2. Creates symlink: `~/.pi/agent/extensions/<name>` → `dist/`
 
 ## Uninstallation
 
 ```bash
+# Uninstall all extensions
+./uninstall.sh
+
+# Or uninstall a specific extension
 cd extensions/<name>
 ./uninstall.sh
 ```
@@ -77,10 +84,10 @@ See each extension's `docs/` directory:
 ```bash
 # Build an extension
 cd extensions/<name>
-npm run build
+bun run build
 
 # Clean build artifacts
-npm run clean
+bun run clean
 ```
 
 ## License

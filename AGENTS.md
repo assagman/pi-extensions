@@ -77,12 +77,12 @@ extension/
 ## Adding a New Extension
 
 1. Create directory: `extensions/<name>/`
-2. Initialize: `npm init`
+2. Initialize: `bun init`
 3. Create structure matching convention above
 4. Add dependencies:
    ```bash
-   npm install @mariozechner/pi-coding-agent @mariozechner/pi-tui
-   npm install -D typescript @types/node
+   bun add @mariozechner/pi-coding-agent @mariozechner/pi-tui
+   bun add -d typescript @types/node
    ```
 5. Implement `src/index.ts` exporting Pi extension
 6. Create `install.sh` and `uninstall.sh` (copy from existing)
@@ -93,14 +93,14 @@ extension/
 ```bash
 # Build single extension
 cd extensions/<name>
-npm install
-npm run build
+bun install
+bun run build
 
 # Install (build + symlink)
 ./install.sh
 
 # Clean
-npm run clean
+bun run clean
 ```
 
 ## Key Dependencies
@@ -123,10 +123,52 @@ npm run clean
 
 ## Testing
 
-Run from extension directory:
+**Pi runs extensions with Node.js, NOT Bun.** This has critical testing implications:
+
+| Constraint | Detail |
+|-----------|--------|
+| `better-sqlite3` | Cannot load under `bun test` — native bindings are Node-only |
+| `bun:sqlite` | Cannot be used at all — Bun-specific, fails in Pi's Node.js runtime |
+| Test runner | **Use `vitest`** (runs on Node.js), never `bun:test` |
+| Test imports | `import { describe, it, expect } from "vitest"` |
+
+### Setup
+
+Each extension with tests needs:
 
 ```bash
-# Build and manually test in Pi
+bun add -d vitest
+```
+
+`vitest.config.ts`:
+```ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["src/**/*.test.ts"],
+  },
+});
+```
+
+`package.json` scripts:
+```json
+{
+  "test": "vitest run",
+  "test:watch": "vitest"
+}
+```
+
+### Running Tests
+
+```bash
+cd extensions/<name>
+bun run test          # vitest run (Node.js runtime)
+```
+
+### Manual Testing
+
+```bash
 ./install.sh
 pi  # Start Pi agent, test extension features
 ```
@@ -145,7 +187,7 @@ pi  # Start Pi agent, test extension features
 | Task | Command |
 |------|---------|
 | Add extension | Create dir, copy structure, implement |
-| Build | `npm run build` |
+| Build | `bun run build` |
 | Install | `./install.sh` |
 | Remove | `./uninstall.sh` |
-| Clean | `npm run clean` |
+| Clean | `bun run clean` |
