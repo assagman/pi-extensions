@@ -9,6 +9,7 @@ export {
   type DialogConfig,
   type DialogFactory,
   type DimmedOverlayConfig,
+  type GlowConfig,
   type HAlign,
   type RGB,
   type ScrimConfig,
