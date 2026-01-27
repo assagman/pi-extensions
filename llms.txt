@@ -1,21 +1,38 @@
 # pi-extensions
 
-> Monorepo of TypeScript extensions for the Pi coding agent. Extensions enhance Pi with persistent memory, output condensation, and code review capabilities.
+> Monorepo of TypeScript extensions for the Pi coding agent. Extensions enhance Pi with persistent memory, task management, output condensation, questionnaire UI, step looping, and code review capabilities.
 
-This repository contains three Pi coding agent extensions built with TypeScript/ESM. Each extension follows a standard structure with src/, docs/, dist/, install.sh, and uninstall.sh.
+This repository contains six Pi coding agent extensions plus shared libraries, built with TypeScript/ESM. Each extension follows a standard structure with src/, docs/, dist/, install.sh, and uninstall.sh.
 
 ## Extensions
 
-- [delta](extensions/delta/docs/README.md): Persistent memory extension with SQLite-backed storage for tasks, notes, key-value pairs, and episodic events
+- [ask](extensions/ask/docs/README.md): Better questionnaire tool — number keys, C-n/C-p nav, proper long text wrapping, always-present "Type something" option
+- [delta](extensions/delta/docs/README.md): Persistent memory with SQLite-backed KV storage, episodic events, project notes, and memory index
+- [epsilon](extensions/epsilon/docs/README.md): Task management with SQLite-backed tasks, subtasks, priorities, statuses, and tags
 - [mu](extensions/mu/docs/README.md): Condenses tool call/result output in Pi transcript while preserving full outputs for LLM context
-- [theta](extensions/theta/docs/README.md): Code review extension using critique for visual diff sharing
+- [omega](extensions/omega/docs/README.md): Generic step looper — repeat user-defined steps with aggressive compaction
+- [theta](extensions/theta/docs/README.md): Code review extension with 3-column TUI dashboard (commits, files, diff)
+
+## Shared Libraries
+
+- shared/core: Repo identification, SQLite helpers, tool factory utilities
+- shared/tui: Dimmed overlays and shared TUI components
 
 ## Documentation
 
 - [README](README.md): Repository overview and installation instructions
 - [AGENTS](AGENTS.md): Instructions for AI coding agents working on this codebase
+
+### Per-Extension
+
+Each extension has: `AGENTS.md`, `llms.txt`, `docs/README.md`, `docs/ARCHITECTURE.md`
+
+- [ask/ARCHITECTURE](extensions/ask/docs/ARCHITECTURE.md): Ask extension technical architecture
 - [delta/ARCHITECTURE](extensions/delta/docs/ARCHITECTURE.md): Delta extension technical architecture
+- [epsilon/ARCHITECTURE](extensions/epsilon/docs/ARCHITECTURE.md): Epsilon extension technical architecture
 - [mu/ARCHITECTURE](extensions/mu/docs/ARCHITECTURE.md): Mu extension technical architecture
+- [omega/ARCHITECTURE](extensions/omega/docs/ARCHITECTURE.md): Omega extension technical architecture
+- [theta/ARCHITECTURE](extensions/theta/docs/ARCHITECTURE.md): Theta extension technical architecture
 - [theta/CHANGELOG](extensions/theta/docs/CHANGELOG.md): Theta extension changelog
 
 ## Optional

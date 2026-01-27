@@ -1,0 +1,19 @@
+# Omega — Step Looper Extension
+
+Generic step looper for Pi coding agent. Define workflow steps, set repetitions, omega executes each step with aggressive session compaction between them to provide fresh context.
+
+## Architecture
+
+Three modules: extension entry (command + step editor), execution loop (AgentEndAwaiter + compaction), and types. Uses `sendUserMessage` → `agent_end` event → `compact` cycle. State persisted via `appendEntry` for interrupt recovery. Context filter strips stale omega messages.
+
+## Files
+
+- [README](docs/README.md): User documentation, commands, examples
+- [ARCHITECTURE](docs/ARCHITECTURE.md): Module structure, execution model, key components
+- [AGENTS](AGENTS.md): Agent instructions
+
+## Key Modules
+
+- `src/index.ts`: Extension entry, `/omega` command, step collection UI, events
+- `src/loop.ts`: Step execution loop, AgentEndAwaiter, compactAndSettle
+- `src/types.ts`: OmegaState type and factory

@@ -1,0 +1,18 @@
+# Epsilon — Task Management Extension
+
+SQLite-backed task management for Pi coding agent. Provides task CRUD with subtasks, priorities (low/medium/high/critical), statuses (todo/in_progress/blocked/done/cancelled), and tags.
+
+## Architecture
+
+7 tools: Task CRUD(5), Info(1), Version(1). Database is repo-scoped at `~/.local/share/pi-ext-epsilon/`. Injects `<epsilon_tasks>` block into system prompt with active tasks and status overview.
+
+## Files
+
+- [README](docs/README.md): User documentation, tools, schema, examples
+- [AGENTS](AGENTS.md): Agent instructions
+
+## Key Modules
+
+- `src/index.ts`: Extension factory, event handlers, prompt builders
+- `src/db.ts`: SQLite operations, schema init, task queries
+- `src/tools.ts`: 7 tool definitions with TypeBox schemas

@@ -1,0 +1,17 @@
+# Mu — Output Condensation Extension
+
+Condenses tool call/result output in Pi transcript while preserving full outputs for LLM context. Overrides builtin tools (bash, read, write, edit, grep, find, ls) with minimal CLI-style summaries. Redacts non-builtin tool results. Provides on-demand result viewer.
+
+## Architecture
+
+"Condense-and-Persist" strategy with two state layers: in-memory (200 results) and session persistence (custom entries). Context hook swaps summaries back to full content for LLM. Pulsing tool line animation at 20 FPS. Result viewer via `/mu-tools` command.
+
+## Files
+
+- [README](docs/README.md): User documentation, features, keybindings
+- [ARCHITECTURE](docs/ARCHITECTURE.md): Full system design, data flow, state management
+- [AGENTS](AGENTS.md): Agent instructions
+
+## Key Modules
+
+- `src/index.ts`: All logic — tool overrides, event interception, state management, UI components (~1750 LOC)

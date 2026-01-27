@@ -1,0 +1,19 @@
+# Theta — Code Review Extension
+
+Interactive code review extension with 3-column TUI dashboard for browsing git diffs: commits (20%), files (20%), diff (60%). Dynamic commit loading (50 per batch), auto-detects uncommitted changes.
+
+## Architecture
+
+Dashboard class implements Pi's `Component` interface. DiffService wraps git operations via `child_process.exec`. Uses `@pierre/diffs` for structured diff parsing. Vim-style navigation (h/l panels, j/k scroll).
+
+## Files
+
+- [README](docs/README.md): User documentation, layout, keybindings
+- [CHANGELOG](docs/CHANGELOG.md): Change history
+- [AGENTS](AGENTS.md): Agent instructions
+
+## Key Modules
+
+- `src/index.ts`: Extension entry, `/theta` command registration
+- `src/services/diff-service.ts`: Git operations — commits, diffs, file lists
+- `src/ui/dashboard.ts`: 3-column TUI dashboard component

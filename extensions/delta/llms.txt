@@ -1,0 +1,19 @@
+# Delta — Persistent Memory Extension
+
+SQLite-backed persistent memory for Pi coding agent. Provides key-value storage, episodic events with tags, project notes loaded at session start, and a full-text memory index across all types.
+
+## Architecture
+
+16 tools organized as: KV(3), Episodic(3), Notes(5), Index(2), Info(1), Version(2). Database is per-project and per-branch at `~/.local/share/pi-ext-delta/`. Injects `<delta_memory>` block into system prompt with active notes, index summary, and stats.
+
+## Files
+
+- [README](docs/README.md): User documentation, tools, schemas, examples
+- [ARCHITECTURE](docs/ARCHITECTURE.md): Module structure, data flow, DB schema, storage
+- [AGENTS](AGENTS.md): Agent instructions
+
+## Key Modules
+
+- `src/index.ts`: Extension factory, event handlers, prompt builders
+- `src/db.ts`: SQLite operations, schema init, all queries
+- `src/tools.ts`: 16 tool definitions with TypeBox schemas
