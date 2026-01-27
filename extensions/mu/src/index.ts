@@ -1603,9 +1603,9 @@ export default function (pi: ExtensionAPI) {
             statsParts.push(rgb("dim", "[") + rgb("amber", costStr) + rgb("dim", "]"));
           }
 
-          // Context group with gradient progress bar: [█▓░░░ 17%/200k]
+          // Context group with gradient progress bar: [█▓░░░ 29k/200k (14.5%)]
           const bar = progressBar(contextPercentValue, 5);
-          const contextInfo = `${contextPercent}%/${fmt(contextWindow)}`;
+          const contextInfo = `${fmt(contextTokens)}/${fmt(contextWindow)} (${contextPercent}%)`;
           statsParts.push(
             `${rgb("dim", "[")}${bar} ${rgb("white", contextInfo)}${rgb("dim", "]")}`
           );
