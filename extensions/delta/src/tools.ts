@@ -1,39 +1,38 @@
-import type {
-  AgentToolResult,
-  AgentToolUpdateCallback,
-  ExtensionAPI,
-  ExtensionContext,
-  ToolDefinition,
-} from "@mariozechner/pi-coding-agent";
-import { type Static, type TSchema, Type } from "@sinclair/typebox";
+/**
+ * Delta v3 tools — memory operations only (no tasks).
+ *
+ * Tools: 16 total
+ *   KV:       delta_get, delta_set, delta_delete (3)
+ *   Episodic: delta_log, delta_recall, delta_episode_delete (3)
+ *   Notes:    delta_note_create/list/update/delete/get (5)
+ *   Index:    delta_index_search, delta_index_rebuild (2)
+ *   Info:     delta_info (1)
+ *   Version:  delta_version, delta_schema (2)
+ *   Total:    16
+ */
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
+import { createTool } from "pi-ext-shared";
 import {
   type ListNotesOptions,
-  type ListTasksOptions,
   type ProjectNote,
   type RecallOptions,
-  TASK_STATUS_ICONS,
-  type Task,
   createNote,
-  createTask,
   deleteEpisode,
   deleteNote,
-  deleteTask,
   getDatabaseSchema,
   getDbLocation,
   getNote,
-  getTask,
   getVersionInfo,
   kvDelete,
   kvGet,
   kvSet,
   listNotes,
-  listTasks,
   logEpisode,
   rebuildIndex,
   recallEpisodes,
   searchIndex,
   updateNote,
-  updateTask,
 } from "./db.js";
 
 // ============ Schemas ============
@@ -71,94 +70,80 @@ const RecallSchema = Type.Object({
   since: Type.Optional(Type.Number({ description: "Unix timestamp to filter from" })),
 });
 
-const TaskStatusEnum = Type.Union([
-  Type.Literal("todo"),
-  Type.Literal("in_progress"),
-  Type.Literal("blocked"),
-  Type.Literal("done"),
-  Type.Literal("cancelled"),
+const EpisodeDeleteSchema = Type.Object({
+  id: Type.Number({ description: "Episode ID to delete" }),
+});
+
+const NoteCategoryEnum = Type.Union([
+  Type.Literal("issue"),
+  Type.Literal("convention"),
+  Type.Literal("workflow"),
+  Type.Literal("reminder"),
+  Type.Literal("general"),
 ]);
 
-const TaskPriorityEnum = Type.Union([
+const NoteImportanceEnum = Type.Union([
   Type.Literal("low"),
-  Type.Literal("medium"),
+  Type.Literal("normal"),
   Type.Literal("high"),
   Type.Literal("critical"),
 ]);
 
-const TaskCreateSchema = Type.Object({
-  title: Type.String({ description: "Task title" }),
-  description: Type.Optional(Type.String({ description: "Task description" })),
-  status: Type.Optional(TaskStatusEnum),
-  priority: Type.Optional(TaskPriorityEnum),
-  tags: Type.Optional(Type.Array(Type.String())),
-  parent_id: Type.Optional(Type.Number({ description: "Parent task ID for subtasks" })),
+const NoteCreateSchema = Type.Object({
+  title: Type.String({ description: "Note title" }),
+  content: Type.String({ description: "Note content (markdown supported)" }),
+  category: Type.Optional(NoteCategoryEnum),
+  importance: Type.Optional(NoteImportanceEnum),
+  active: Type.Optional(
+    Type.Boolean({ description: "Whether note is active (loaded at session start)" })
+  ),
 });
 
-const TaskListSchema = Type.Object({
-  status: Type.Optional(
-    Type.Union([TaskStatusEnum, Type.Array(TaskStatusEnum)], {
-      description: "Filter by status (single or array)",
-    })
-  ),
-  priority: Type.Optional(TaskPriorityEnum),
-  tags: Type.Optional(Type.Array(Type.String())),
-  parent_id: Type.Optional(
-    Type.Union([Type.Number(), Type.Null()], {
-      description: "Filter by parent (null = root tasks only)",
-    })
-  ),
+const NoteListSchema = Type.Object({
+  category: Type.Optional(NoteCategoryEnum),
+  importance: Type.Optional(NoteImportanceEnum),
+  activeOnly: Type.Optional(Type.Boolean({ description: "Only active notes (default: false)" })),
   limit: Type.Optional(Type.Number()),
 });
 
-const TaskUpdateSchema = Type.Object({
-  id: Type.Number({ description: "Task ID to update" }),
+const NoteUpdateSchema = Type.Object({
+  id: Type.Number({ description: "Note ID to update" }),
   title: Type.Optional(Type.String()),
-  description: Type.Optional(Type.String()),
-  status: Type.Optional(TaskStatusEnum),
-  priority: Type.Optional(TaskPriorityEnum),
-  tags: Type.Optional(Type.Array(Type.String())),
-  parent_id: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+  content: Type.Optional(Type.String()),
+  category: Type.Optional(NoteCategoryEnum),
+  importance: Type.Optional(NoteImportanceEnum),
+  active: Type.Optional(Type.Boolean()),
 });
 
-const TaskDeleteSchema = Type.Object({
-  id: Type.Number({ description: "Task ID to delete" }),
+const NoteDeleteSchema = Type.Object({
+  id: Type.Number({ description: "Note ID to delete" }),
 });
 
-const TaskGetSchema = Type.Object({
-  id: Type.Number({ description: "Task ID to retrieve" }),
+const NoteGetSchema = Type.Object({
+  id: Type.Number({ description: "Note ID to retrieve" }),
 });
 
-// ============ Helper ============
+const IndexSearchSchema = Type.Object({
+  query: Type.String({ description: "Search term to find in memory index summaries and keywords" }),
+  source_type: Type.Optional(
+    Type.Union([Type.Literal("note"), Type.Literal("episode"), Type.Literal("kv")], {
+      description: "Filter by source type",
+    })
+  ),
+});
 
-function createTool<T extends TSchema>(
-  name: string,
-  label: string,
-  description: string,
-  parameters: T,
-  handler: (params: Static<T>) => string
-): ToolDefinition<T, undefined> {
-  return {
-    name,
-    label,
-    description,
-    parameters,
-    execute: async (
-      _toolCallId: string,
-      params: Static<T>,
-      _onUpdate: AgentToolUpdateCallback<undefined> | undefined,
-      _ctx: ExtensionContext,
-      _signal?: AbortSignal
-    ): Promise<AgentToolResult<undefined>> => {
-      try {
-        const output = handler(params);
-        return { content: [{ type: "text", text: output }], details: undefined };
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        return { content: [{ type: "text", text: `Error: ${msg}` }], details: undefined };
-      }
-    },
-  };
+const IndexRebuildSchema = Type.Object({});
+const InfoSchema = Type.Object({});
+const VersionSchema = Type.Object({});
+const SchemaSchema = Type.Object({});
+
+// ============ Helpers ============
+
+function formatNote(note: ProjectNote): string {
+  const date = new Date(note.created_at).toISOString().split("T")[0];
+  const activeStr = note.active ? "active" : "archived";
+  const impStr = note.importance !== "normal" ? ` [${note.importance.toUpperCase()}]` : "";
+  return `#${note.id}${impStr} ${note.title}\n  ${note.category} | ${activeStr} | ${date}\n  ${note.content.substring(0, 100)}${note.content.length > 100 ? "..." : ""}`;
 }
 
 // ============ KV Tools ============
@@ -234,10 +219,6 @@ const deltaRecall = createTool(
   }
 );
 
-const EpisodeDeleteSchema = Type.Object({
-  id: Type.Number({ description: "Episode ID to delete" }),
-});
-
 const deltaEpisodeDelete = createTool(
   "delta_episode_delete",
   "Delete Episode",
@@ -249,146 +230,7 @@ const deltaEpisodeDelete = createTool(
   }
 );
 
-// ============ Task Tools ============
-
-function formatTask(task: Task): string {
-  const date = new Date(task.created_at).toISOString().split("T")[0];
-  const tagsStr = task.tags.length > 0 ? ` [${task.tags.join(", ")}]` : "";
-  const parentStr = task.parent_id ? ` (subtask of #${task.parent_id})` : "";
-  const statusIcon = TASK_STATUS_ICONS[task.status];
-
-  return `${statusIcon} #${task.id} [${task.priority}] ${task.title}${tagsStr}${parentStr}\n  ${task.status} | ${date}${task.description ? `\n  ${task.description}` : ""}`;
-}
-
-const deltaTaskCreate = createTool(
-  "delta_task_create",
-  "Create Task",
-  "Create a new task. Tasks are branch-scoped (visible to any session on the same git branch). Priority: low/medium/high/critical. Status: todo/in_progress/blocked/done/cancelled.",
-  TaskCreateSchema,
-  (input) => {
-    const id = createTask(input);
-    const task = getTask(id);
-    return `Created task #${id}:\n${task ? formatTask(task) : ""}`;
-  }
-);
-
-const deltaTaskList = createTool(
-  "delta_task_list",
-  "List Tasks",
-  "List tasks with optional filters. Filter by status, priority, tags, or parent_id (null = root tasks only).",
-  TaskListSchema,
-  (options) => {
-    const tasks = listTasks(options as ListTasksOptions);
-
-    if (tasks.length === 0) {
-      return "No tasks found matching criteria";
-    }
-
-    const formatted = tasks.map(formatTask).join("\n\n");
-    return `Found ${tasks.length} tasks:\n\n${formatted}`;
-  }
-);
-
-const deltaTaskUpdate = createTool(
-  "delta_task_update",
-  "Update Task",
-  "Update an existing task. Only provided fields will be updated.",
-  TaskUpdateSchema,
-  ({ id, ...updates }) => {
-    const updated = updateTask(id, updates);
-    if (!updated) {
-      return `Task #${id} not found`;
-    }
-    const task = getTask(id);
-    return `Updated task #${id}:\n${task ? formatTask(task) : ""}`;
-  }
-);
-
-const deltaTaskDelete = createTool(
-  "delta_task_delete",
-  "Delete Task",
-  "Delete a task by ID. Also deletes subtasks.",
-  TaskDeleteSchema,
-  ({ id }) => {
-    const deleted = deleteTask(id);
-    return deleted ? `Deleted task #${id}` : `Task #${id} not found`;
-  }
-);
-
-const deltaTaskGet = createTool(
-  "delta_task_get",
-  "Get Task",
-  "Get a single task by ID with full details.",
-  TaskGetSchema,
-  ({ id }) => {
-    const task = getTask(id);
-    if (!task) {
-      return `Task #${id} not found`;
-    }
-    return formatTask(task);
-  }
-);
-
-// ============ Note Schemas ============
-
-const NoteCategoryEnum = Type.Union([
-  Type.Literal("issue"),
-  Type.Literal("convention"),
-  Type.Literal("workflow"),
-  Type.Literal("reminder"),
-  Type.Literal("general"),
-]);
-
-const NoteImportanceEnum = Type.Union([
-  Type.Literal("low"),
-  Type.Literal("normal"),
-  Type.Literal("high"),
-  Type.Literal("critical"),
-]);
-
-const NoteCreateSchema = Type.Object({
-  title: Type.String({ description: "Note title" }),
-  content: Type.String({ description: "Note content (markdown supported)" }),
-  category: Type.Optional(NoteCategoryEnum),
-  importance: Type.Optional(NoteImportanceEnum),
-  active: Type.Optional(
-    Type.Boolean({ description: "Whether note is active (loaded at session start)" })
-  ),
-});
-
-const NoteListSchema = Type.Object({
-  category: Type.Optional(NoteCategoryEnum),
-  importance: Type.Optional(NoteImportanceEnum),
-  activeOnly: Type.Optional(Type.Boolean({ description: "Only active notes (default: false)" })),
-  limit: Type.Optional(Type.Number()),
-});
-
-const NoteUpdateSchema = Type.Object({
-  id: Type.Number({ description: "Note ID to update" }),
-  title: Type.Optional(Type.String()),
-  content: Type.Optional(Type.String()),
-  category: Type.Optional(NoteCategoryEnum),
-  importance: Type.Optional(NoteImportanceEnum),
-  active: Type.Optional(Type.Boolean()),
-});
-
-const NoteDeleteSchema = Type.Object({
-  id: Type.Number({ description: "Note ID to delete" }),
-});
-
-const NoteGetSchema = Type.Object({
-  id: Type.Number({ description: "Note ID to retrieve" }),
-});
-
 // ============ Note Tools ============
-
-function formatNote(note: ProjectNote): string {
-  const date = new Date(note.created_at).toISOString().split("T")[0];
-  const activeStr = note.active ? "active" : "archived";
-  const impStr = note.importance !== "normal" ? ` [${note.importance.toUpperCase()}]` : "";
-
-  return `#${note.id}${impStr} ${note.title}\n  ${note.category} | ${activeStr} | ${date}\n  ${note.content.substring(0, 100)}${note.content.length > 100 ? "..." : ""}`;
-}
 
 const deltaNoteCreate = createTool(
   "delta_note_create",
@@ -409,13 +251,8 @@ const deltaNoteList = createTool(
   NoteListSchema,
   (options) => {
     const notes = listNotes(options as ListNotesOptions);
-
-    if (notes.length === 0) {
-      return "No notes found matching criteria";
-    }
-
-    const formatted = notes.map(formatNote).join("\n\n");
-    return `Found ${notes.length} notes:\n\n${formatted}`;
+    if (notes.length === 0) return "No notes found matching criteria";
+    return `Found ${notes.length} notes:\n\n${notes.map(formatNote).join("\n\n")}`;
   }
 );
 
@@ -426,9 +263,7 @@ const deltaNoteUpdate = createTool(
   NoteUpdateSchema,
   ({ id, ...updates }) => {
     const updated = updateNote(id, updates);
-    if (!updated) {
-      return `Note #${id} not found`;
-    }
+    if (!updated) return `Note #${id} not found`;
     const note = getNote(id);
     return `Updated note #${id}:\n${note ? formatNote(note) : ""}`;
   }
@@ -452,9 +287,7 @@ const deltaNoteGet = createTool(
   NoteGetSchema,
   ({ id }) => {
     const note = getNote(id);
-    if (!note) {
-      return `Note #${id} not found`;
-    }
+    if (!note) return `Note #${id} not found`;
     const date = new Date(note.created_at).toISOString().split("T")[0];
     const activeStr = note.active ? "active" : "archived";
     const impStr = note.importance !== "normal" ? ` [${note.importance.toUpperCase()}]` : "";
@@ -462,33 +295,18 @@ const deltaNoteGet = createTool(
   }
 );
 
-// ============ Memory Index Tools ============
-
-const IndexSearchSchema = Type.Object({
-  query: Type.String({ description: "Search term to find in memory index summaries and keywords" }),
-  source_type: Type.Optional(
-    Type.Union(
-      [Type.Literal("note"), Type.Literal("episode"), Type.Literal("task"), Type.Literal("kv")],
-      { description: "Filter by source type" }
-    )
-  ),
-});
-
-const IndexRebuildSchema = Type.Object({});
+// ============ Index Tools ============
 
 const deltaIndexSearch = createTool(
   "delta_index_search",
   "Search Memory Index",
-  "Search the memory index by keywords across all memory types (notes, episodes, tasks, kv). Returns matching entries with source references for selective retrieval.",
+  "Search the memory index by keywords across all memory types (notes, episodes, kv). Returns matching entries with source references for selective retrieval.",
   IndexSearchSchema,
   ({ query, source_type }) => {
     const results = searchIndex(query, source_type);
+    if (results.length === 0) return "No matching memory entries found";
 
-    if (results.length === 0) {
-      return "No matching memory entries found";
-    }
-
-    const prefixMap: Record<string, string> = { note: "N", episode: "E", task: "T", kv: "K" };
+    const prefixMap: Record<string, string> = { note: "N", episode: "E", kv: "K" };
     const formatted = results
       .map((e) => {
         const prefix = prefixMap[e.source_type] || "?";
@@ -513,24 +331,15 @@ const deltaIndexRebuild = createTool(
   }
 );
 
-// ============ Info Tool ============
-
-const InfoSchema = Type.Object({});
+// ============ Info & Version Tools ============
 
 const deltaInfo = createTool(
   "delta_info",
   "Memory Info",
   "Get information about the delta memory database location and stats.",
   InfoSchema,
-  () => {
-    const location = getDbLocation();
-    return `Database location: ${location}`;
-  }
+  () => `Database location: ${getDbLocation()}`
 );
-
-// ============ Version & Schema Tools ============
-
-const VersionSchema = Type.Object({});
 
 const deltaVersion = createTool(
   "delta_version",
@@ -554,24 +363,19 @@ const deltaVersion = createTool(
       `  Shipped (code):  ${info.shipped}`,
       `  Current (DB):    ${currentStr}`,
       `  Status:          ${status}`,
-      "",
-      info.match ? "" : "Use delta_schema to inspect current DB structure.",
+      info.match ? "" : "\nUse delta_schema to inspect current DB structure.",
     ]
       .filter(Boolean)
       .join("\n");
   }
 );
 
-const SchemaSchema = Type.Object({});
-
 const deltaSchema = createTool(
   "delta_schema",
   "DB Schema",
   "Dumps the complete DDL schema of the current database — all tables, indexes, triggers, and other objects. For diagnostics and migration planning.",
   SchemaSchema,
-  () => {
-    return getDatabaseSchema();
-  }
+  () => getDatabaseSchema()
 );
 
 // ============ Export ============
@@ -585,12 +389,6 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool(deltaLog);
   pi.registerTool(deltaRecall);
   pi.registerTool(deltaEpisodeDelete);
-  // Tasks
-  pi.registerTool(deltaTaskCreate);
-  pi.registerTool(deltaTaskList);
-  pi.registerTool(deltaTaskUpdate);
-  pi.registerTool(deltaTaskDelete);
-  pi.registerTool(deltaTaskGet);
   // Notes
   pi.registerTool(deltaNoteCreate);
   pi.registerTool(deltaNoteList);

@@ -1,0 +1,21 @@
+{
+  "name": "pi-ext-shared",
+  "version": "1.0.0",
+  "description": "Shared utilities for Pi extensions (repo identification, SQLite helpers, tool factories)",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "^0.32.15",
+    "better-sqlite3": "^11.7.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22",
+    "typescript": "^5"
+  }
+}
