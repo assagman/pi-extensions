@@ -1007,58 +1007,42 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         bashColored = rgb(color, "bash");
       }
 
-      const prefix = `${iconColored} ${bashColored} ${rgb("dim", "$")} `;
-      const prefixLen = visibleWidth(prefix);
-      const indent = " ".repeat(prefixLen);
+      // Line 1: icon + "bash" + status (no command on this line)
+      const header = `${iconColored} ${bashColored}`;
+      const headerLen = visibleWidth(header);
+      const headerPad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
+      const resultLines: string[] = [`${header}${headerPad}${rightPart}`];
 
-      const firstLineWidth = innerW - prefixLen - rightLen - 1;
-      const contLineWidth = innerW - prefixLen;
+      // Line 2+: "  $ " + syntax-highlighted command
+      const cmdPrefix = `  ${rgb("dim", "$")} `;
+      const cmdPrefixLen = visibleWidth(cmdPrefix);
+      const cmdIndent = " ".repeat(cmdPrefixLen);
+      const cmdWidth = innerW - cmdPrefixLen;
 
-      if (firstLineWidth <= 0 || contLineWidth <= 0) {
-        const fallback = `${prefix}${rgb("white", truncateToWidth(rawCmd, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
-        const fallbackLen = visibleWidth(fallback);
-        const padding = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
-        return [`${fallback}${padding}${rightPart}`];
+      if (cmdWidth <= 0) {
+        resultLines.push(`${cmdPrefix}${rgb("white", rawCmd)}`);
+        return resultLines;
       }
 
-      const cmdLines = rawCmd.split("\n");
-      const allWrapped: string[] = [];
+      // Syntax-highlight each line of the command
+      const srcLines = rawCmd.split("\n");
+      for (let lineIdx = 0; lineIdx < srcLines.length; lineIdx++) {
+        const highlighted = highlightBashLine(srcLines[lineIdx]);
+        const wrapped = wrapTextWithAnsi(highlighted, cmdWidth);
 
-      for (const cmdLine of cmdLines) {
-        if (allWrapped.length === 0) {
-          const wrapped = wrapTextWithAnsi(cmdLine, firstLineWidth);
-          if (wrapped.length === 0) {
-            allWrapped.push("");
+        for (let wi = 0; wi < wrapped.length; wi++) {
+          if (lineIdx === 0 && wi === 0) {
+            resultLines.push(`${cmdPrefix}${wrapped[wi]}`);
           } else {
-            allWrapped.push(wrapped[0]);
-            if (wrapped.length > 1) {
-              const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contLineWidth);
-              allWrapped.push(...rewrapped);
-            }
+            resultLines.push(`${cmdIndent}${wrapped[wi]}`);
           }
-        } else {
-          const wrapped = wrapTextWithAnsi(cmdLine, contLineWidth);
-          allWrapped.push(...(wrapped.length > 0 ? wrapped : [""]));
+        }
+        if (wrapped.length === 0) {
+          resultLines.push(lineIdx === 0 ? cmdPrefix : cmdIndent);
         }
       }
 
-      const resultLines: string[] = [];
-      for (let i = 0; i < allWrapped.length; i++) {
-        const line = allWrapped[i];
-        if (i === 0) {
-          const lineContent = `${prefix}${rgb("white", line)}`;
-          const lineLen = visibleWidth(lineContent);
-          const padding = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
-          resultLines.push(`${lineContent}${padding}${rightPart}`);
-        } else {
-          const lineContent = `${indent}${rgb("white", line)}`;
-          resultLines.push(lineContent);
-        }
-      }
-
-      return resultLines.length > 0
-        ? resultLines
-        : [`${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart}`];
+      return resultLines;
     };
 
     // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
@@ -1253,6 +1237,256 @@ const setupUIPatching = (ctx: ExtensionContext) => {
     return { render: () => [], invalidate: () => {}, handleInput: () => {} };
   });
 };
+
+// =============================================================================
+// BASH SYNTAX HIGHLIGHTING (Custom Tokenizer)
+// =============================================================================
+// Full custom tokenizer — colors commands, keywords, builtins, strings,
+// variables, flags, pipes, redirections, and arguments.
+
+const BASH_KEYWORDS = new Set([
+  "if",
+  "then",
+  "else",
+  "elif",
+  "fi",
+  "for",
+  "while",
+  "until",
+  "do",
+  "done",
+  "case",
+  "esac",
+  "in",
+  "function",
+  "select",
+  "time",
+  "coproc",
+]);
+const BASH_FLOW_RESUME = new Set(["do", "then", "else", "elif"]);
+const BASH_BUILTINS = new Set([
+  "cd",
+  "echo",
+  "printf",
+  "read",
+  "export",
+  "source",
+  "alias",
+  "unalias",
+  "set",
+  "unset",
+  "shift",
+  "return",
+  "exit",
+  "exec",
+  "eval",
+  "trap",
+  "wait",
+  "kill",
+  "jobs",
+  "fg",
+  "bg",
+  "declare",
+  "local",
+  "readonly",
+  "typeset",
+  "let",
+  "test",
+  "true",
+  "false",
+  "pwd",
+  "pushd",
+  "popd",
+  "dirs",
+  "getopts",
+  "hash",
+  "type",
+  "command",
+  "builtin",
+  "enable",
+  "help",
+  "logout",
+  "mapfile",
+  "readarray",
+  "shopt",
+  "bind",
+  "ulimit",
+  "umask",
+]);
+
+function highlightBashLine(line: string): string {
+  let result = "";
+  let i = 0;
+  let cmdPos = true; // next word is a command name
+
+  while (i < line.length) {
+    // Whitespace
+    if (line[i] === " " || line[i] === "\t") {
+      result += line[i];
+      i++;
+      continue;
+    }
+
+    // Comment
+    if (line[i] === "#" && (i === 0 || line[i - 1] === " ")) {
+      result += rgb("dim", line.slice(i));
+      break;
+    }
+
+    // Single-quoted string
+    if (line[i] === "'") {
+      const end = line.indexOf("'", i + 1);
+      const s = end === -1 ? line.slice(i) : line.slice(i, end + 1);
+      result += rgb("green", s);
+      i += s.length;
+      cmdPos = false;
+      continue;
+    }
+
+    // Double-quoted string
+    if (line[i] === '"') {
+      let j = i + 1;
+      while (j < line.length && line[j] !== '"') {
+        if (line[j] === "\\") j++;
+        j++;
+      }
+      const s = line.slice(i, j + 1);
+      result += rgb("green", s);
+      i = j + 1;
+      cmdPos = false;
+      continue;
+    }
+
+    // Variable
+    if (line[i] === "$") {
+      const m = line.slice(i).match(/^\$(\{[^}]*\}|[A-Za-z_]\w*|\(.*?\)|\d|[?!#$@*-])/);
+      if (m) {
+        result += rgb("violet", m[0]);
+        i += m[0].length;
+      } else {
+        result += line[i];
+        i++;
+      }
+      cmdPos = false;
+      continue;
+    }
+
+    // Backtick command substitution
+    if (line[i] === "`") {
+      const end = line.indexOf("`", i + 1);
+      const s = end === -1 ? line.slice(i) : line.slice(i, end + 1);
+      result += rgb("violet", s);
+      i += s.length;
+      cmdPos = false;
+      continue;
+    }
+
+    // Operators: &&, ||
+    if (line[i] === "&" && line[i + 1] === "&") {
+      result += rgb("dim", "&&");
+      i += 2;
+      cmdPos = true;
+      continue;
+    }
+    if (line[i] === "|" && line[i + 1] === "|") {
+      result += rgb("dim", "||");
+      i += 2;
+      cmdPos = true;
+      continue;
+    }
+
+    // Pipe
+    if (line[i] === "|") {
+      result += rgb("dim", "|");
+      i++;
+      cmdPos = true;
+      continue;
+    }
+
+    // Semicolon
+    if (line[i] === ";") {
+      result += rgb("dim", ";");
+      i++;
+      cmdPos = true;
+      continue;
+    }
+
+    // Heredoc <<
+    if (line[i] === "<" && line[i + 1] === "<") {
+      result += rgb("dim", "<<");
+      i += 2;
+      if (i < line.length && line[i] === "-") {
+        result += rgb("dim", "-");
+        i++;
+      }
+      cmdPos = false;
+      continue;
+    }
+
+    // Redirections: 2>&1, &>>, &>, >>, 2>, <, >
+    const redir = line.slice(i).match(/^(2>&1|&>>|&>|>>|2>|[<>])/);
+    if (redir) {
+      result += rgb("dim", redir[0]);
+      i += redir[0].length;
+      cmdPos = false;
+      continue;
+    }
+
+    // Background &
+    if (line[i] === "&") {
+      result += rgb("dim", "&");
+      i++;
+      cmdPos = true;
+      continue;
+    }
+
+    // Parentheses / braces
+    if (line[i] === "(" || line[i] === ")" || line[i] === "{" || line[i] === "}") {
+      result += rgb("dim", line[i]);
+      i++;
+      if (line[i - 1] === "(" || line[i - 1] === "{") cmdPos = true;
+      continue;
+    }
+
+    // Word token
+    let word = "";
+    while (i < line.length && " \t|&;<>\"'`$#(){}".indexOf(line[i]) === -1) {
+      // Break before redirection: digit followed by > or <
+      if ((line[i] === ">" || line[i] === "<") && word.length > 0 && /^\d+$/.test(word)) {
+        break;
+      }
+      word += line[i];
+      i++;
+    }
+
+    if (!word) {
+      // Safety: consume one char to avoid infinite loop
+      result += line[i] ?? "";
+      i++;
+      continue;
+    }
+
+    // Classify word
+    if (cmdPos) {
+      if (BASH_KEYWORDS.has(word)) {
+        result += rgb("violet", word);
+      } else if (BASH_BUILTINS.has(word)) {
+        result += rgb("teal", word);
+      } else {
+        result += rgb("green", word);
+      }
+      cmdPos = BASH_FLOW_RESUME.has(word);
+    } else if (word.startsWith("--") || (word.startsWith("-") && word.length > 1)) {
+      result += rgb("cyan", word);
+    } else if (/^\d+(\.\d+)?$/.test(word)) {
+      result += rgb("amber", word);
+    } else {
+      result += rgb("white", word);
+    }
+  }
+
+  return result;
+}
 
 function formatToolArgsPreview(name: string, args: Record<string, unknown>): string {
   if (!args) return "";
