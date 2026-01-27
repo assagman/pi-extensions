@@ -47,8 +47,8 @@ extension/
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
-    "install": "./install.sh",
-    "uninstall": "./uninstall.sh"
+    "deploy": "./install.sh",
+    "undeploy": "./uninstall.sh"
   },
   "pi": {
     "extensions": ["./dist/index.js"]
