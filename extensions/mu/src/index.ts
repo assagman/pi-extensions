@@ -572,12 +572,16 @@ class BoxedToolCard implements Component {
 
     const cmdLines = rawCmd.split("\n");
     let prevChained = false;
+    let inSQ = false;
+    let inDQ = false;
 
     for (const cmdLine of cmdLines) {
       const highlighted = highlightBashLine(cmdLine);
-      // Chain continuation if previous line ended with && || | or \
-      const indent = prevChained ? contIndent : stmtIndent;
-      const lineWidth = prevChained ? contWidth : stmtWidth;
+      const inQuote = inSQ || inDQ;
+      // Continuation if: inside a quoted string, or previous line ended with chain operator
+      const isCont = inQuote || prevChained;
+      const indent = isCont ? contIndent : stmtIndent;
+      const lineWidth = isCont ? contWidth : stmtWidth;
 
       const wrapped = wrapTextWithAnsi(highlighted, lineWidth);
       if (wrapped.length === 0) {
@@ -593,7 +597,9 @@ class BoxedToolCard implements Component {
         }
       }
 
-      prevChained = bashLineIsChained(cmdLine);
+      [inSQ, inDQ] = bashUpdateQuoteState(cmdLine, inSQ, inDQ);
+      // Only check chain operators when not inside a quote
+      prevChained = !(inSQ || inDQ) && bashLineIsChained(cmdLine);
     }
 
     return resultLines;
@@ -1115,12 +1121,16 @@ const setupUIPatching = (ctx: ExtensionContext) => {
 
       const srcLines = rawCmd.split("\n");
       let prevChained = false;
+      let inSQ = false;
+      let inDQ = false;
 
       for (const srcLine of srcLines) {
         const highlighted = highlightBashLine(srcLine);
-        // Chain continuation if previous line ended with && || | or \
-        const indent = prevChained ? contIndent : stmtIndent;
-        const lineWidth = prevChained ? contWidth : stmtWidth;
+        const inQuote = inSQ || inDQ;
+        // Continuation if: inside a quoted string, or previous line ended with chain operator
+        const isCont = inQuote || prevChained;
+        const indent = isCont ? contIndent : stmtIndent;
+        const lineWidth = isCont ? contWidth : stmtWidth;
 
         const wrapped = wrapTextWithAnsi(highlighted, lineWidth);
         if (wrapped.length === 0) {
@@ -1136,7 +1146,9 @@ const setupUIPatching = (ctx: ExtensionContext) => {
           }
         }
 
-        prevChained = bashLineIsChained(srcLine);
+        [inSQ, inDQ] = bashUpdateQuoteState(srcLine, inSQ, inDQ);
+        // Only check chain operators when not inside a quote
+        prevChained = !(inSQ || inDQ) && bashLineIsChained(srcLine);
       }
 
       return resultLines;
@@ -1546,6 +1558,30 @@ function bashLineIsChained(line: string): boolean {
     trimmed.endsWith("|") ||
     trimmed.endsWith("\\")
   );
+}
+
+/**
+ * Track quote state across a bash line.
+ * Returns updated [inSingle, inDouble] state after processing the line.
+ */
+function bashUpdateQuoteState(
+  line: string,
+  inSingle: boolean,
+  inDouble: boolean
+): [boolean, boolean] {
+  let sq = inSingle;
+  let dq = inDouble;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    // Backslash escapes next char inside double quotes (not single quotes)
+    if (ch === "\\" && dq && !sq) {
+      i++;
+      continue;
+    }
+    if (ch === "'" && !dq) sq = !sq;
+    if (ch === '"' && !sq) dq = !dq;
+  }
+  return [sq, dq];
 }
 
 function highlightBashLine(line: string): string {
