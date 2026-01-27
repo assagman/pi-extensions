@@ -149,6 +149,10 @@ const MU_TOOL_VIEWER_SHORTCUT = "ctrl+alt+o";
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);
 
+/** Safety clamp: ensure every line in array fits within maxWidth. */
+const clampLines = (lines: string[], maxWidth: number): string[] =>
+  lines.map((l) => (visibleWidth(l) > maxWidth ? truncateToWidth(l, maxWidth) : l));
+
 const preview = (text: string, max = 140): string => {
   const s = (text ?? "").replace(/\s+/g, " ").trim();
   return s.length <= max ? s : `${s.slice(0, max - 3)}...`;
@@ -464,7 +468,10 @@ class BoxedToolCard implements Component {
     // For bash: render multiline with full command, no truncation
     if (this.toolName === "bash") {
       const rawCmd = typeof this.args.command === "string" ? this.args.command : "";
-      const lines = this.renderBashMultiline(rawCmd, icon, color, rightPart, rightLen, innerW);
+      const lines = clampLines(
+        this.renderBashMultiline(rawCmd, icon, color, rightPart, rightLen, innerW),
+        width
+      );
       this.lastWidth = width;
       this.cachedLines = this.needsLeadingSpace ? ["", ...lines] : lines;
       return this.cachedLines;
@@ -531,7 +538,8 @@ class BoxedToolCard implements Component {
     }
 
     this.lastWidth = width;
-    this.cachedLines = this.needsLeadingSpace ? ["", ...resultLines] : resultLines;
+    const clamped = clampLines(resultLines, width);
+    this.cachedLines = this.needsLeadingSpace ? ["", ...clamped] : clamped;
     return this.cachedLines;
   }
 
@@ -671,7 +679,7 @@ class ToolResultDetailViewer implements Component {
 
     const argLines = Object.entries(args).map(([k, v]) => {
       const val = typeof v === "string" ? preview(v, 80) : JSON.stringify(v);
-      return `  ${mu("info", k)}: ${mu("text", val)}`;
+      return truncateToWidth(`  ${mu("info", k)}: ${mu("text", val)}`, width);
     });
     out.push(...argLines);
 
@@ -700,8 +708,8 @@ class ToolResultDetailViewer implements Component {
       }
     }
 
-    this.lines = out;
-    return out;
+    this.lines = clampLines(out, width);
+    return this.lines;
   }
 
   handleInput(key: KeyId): boolean {
@@ -1187,6 +1195,13 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       if (!origRender) return;
 
       tool.render = (width: number): string[] => {
+        return clampLines(_renderStreamingTool(tool, width), width);
+      };
+
+      const _renderStreamingTool = (
+        tool: Component & Record<string, unknown>,
+        width: number
+      ): string[] => {
         const toolName = tool.toolName as string;
         const args = (tool.args ?? {}) as Record<string, unknown>;
         const isPartial = tool.isPartial as boolean;
@@ -1279,7 +1294,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
             const pad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
             const lines: string[] = [`${headerContent}${pad}${rightPart}`];
             for (const aLine of answerLines) {
-              lines.push(`  ${mu("text", aLine)}`);
+              lines.push(truncateToWidth(`  ${mu("text", aLine)}`, innerW));
             }
             if (tool._mu_leading_space) return ["", ...lines];
             return lines;
@@ -1308,11 +1323,11 @@ const setupUIPatching = (ctx: ExtensionContext) => {
             if (isComplexValue(v)) {
               const highlighted = highlightValue(v);
               for (let i = 0; i < highlighted.length; i++) {
-                if (i === 0) {
-                  resultLines.push(`${BLOCK_INDENT}${keyStr}${highlighted[i]}`);
-                } else {
-                  resultLines.push(`${BLOCK_INDENT}${highlighted[i]}`);
-                }
+                const raw =
+                  i === 0
+                    ? `${BLOCK_INDENT}${keyStr}${highlighted[i]}`
+                    : `${BLOCK_INDENT}${highlighted[i]}`;
+                resultLines.push(truncateToWidth(raw, innerW));
               }
             } else {
               const valStr =
@@ -1325,7 +1340,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
                       : typeof v === "number"
                         ? mu("warning", String(v))
                         : mu("text", String(v));
-              resultLines.push(`${BLOCK_INDENT}${keyStr}${valStr}`);
+              resultLines.push(truncateToWidth(`${BLOCK_INDENT}${keyStr}${valStr}`, innerW));
             }
           }
 
@@ -1393,7 +1408,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
 
         if (tool._mu_leading_space) return ["", ...resultLines];
         return resultLines;
-      };
+      }; // end _renderStreamingTool
 
       // Cleanup on dispose
       const origDispose = tool.dispose?.bind(tool);
