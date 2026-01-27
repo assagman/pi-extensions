@@ -17,7 +17,7 @@
         "@mariozechner/pi-coding-agent": "*",
         "@sinclair/typebox": "^0.32.15",
         "better-sqlite3": "^11.7.0",
-        "pi-ext-shared": "../shared",
+        "pi-ext-shared": "../shared/core",
       },
       "devDependencies": {
         "@types/better-sqlite3": "^7.6.12",
@@ -33,7 +33,7 @@
         "@mariozechner/pi-coding-agent": "*",
         "@sinclair/typebox": "^0.32.15",
         "better-sqlite3": "^11.7.0",
-        "pi-ext-shared": "../shared",
+        "pi-ext-shared": "../shared/core",
       },
       "devDependencies": {
         "@types/better-sqlite3": "^7.6.12",
@@ -51,20 +51,6 @@
         "@mariozechner/pi-tui": "*",
       },
       "devDependencies": {
-        "@types/node": "^22",
-        "typescript": "^5",
-      },
-    },
-    "extensions/shared": {
-      "name": "pi-ext-shared",
-      "version": "1.0.0",
-      "dependencies": {
-        "@mariozechner/pi-coding-agent": "*",
-        "@sinclair/typebox": "^0.32.15",
-        "better-sqlite3": "^11.7.0",
-      },
-      "devDependencies": {
-        "@types/better-sqlite3": "^7.6.12",
         "@types/node": "^22",
         "typescript": "^5",
       },
@@ -804,8 +790,6 @@
 
     "pathe": ["pathe@2.0.3", "", {}, "sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w=="],
 
-    "pi-ext-shared": ["pi-ext-shared@workspace:extensions/shared"],
-
     "picocolors": ["picocolors@1.1.1", "", {}, "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA=="],
 
     "picomatch": ["picomatch@4.0.3", "", {}, "sha512-5gTmgEY/sqK6gFXLIsQNH19lWb4ebPDLA4SdLP7dsWkIXHWlG66oPuVvXSGFPppYZz8ZDZq0dYYrbHfBCVUb1Q=="],
@@ -1026,9 +1010,9 @@
 
     "cliui/wrap-ansi": ["wrap-ansi@7.0.0", "", { "dependencies": { "ansi-styles": "^4.0.0", "string-width": "^4.1.0", "strip-ansi": "^6.0.0" } }, "sha512-YVGIj2kamLSTxw6NsZjoBxfSwsn0ycdesmc4p+Q21c5zPuZ1pl+NfxVdxPtdHvmNVOQ6XSYG4AUtyt/Fi7D16Q=="],
 
-    "delta/pi-ext-shared": ["pi-ext-shared@file:extensions/shared", { "dependencies": { "@mariozechner/pi-coding-agent": "*", "@sinclair/typebox": "^0.32.15", "better-sqlite3": "^11.7.0" }, "devDependencies": { "@types/better-sqlite3": "^7.6.12", "@types/node": "^22", "typescript": "^5" } }],
+    "delta/pi-ext-shared": ["pi-ext-shared@file:extensions/shared/core", { "dependencies": { "@mariozechner/pi-coding-agent": "*", "@sinclair/typebox": "^0.32.15", "better-sqlite3": "^11.7.0" }, "devDependencies": { "@types/better-sqlite3": "^7.6.12", "@types/node": "^22", "typescript": "^5" } }],
 
-    "epsilon/pi-ext-shared": ["pi-ext-shared@file:extensions/shared", { "dependencies": { "@mariozechner/pi-coding-agent": "*", "@sinclair/typebox": "^0.32.15", "better-sqlite3": "^11.7.0" }, "devDependencies": { "@types/better-sqlite3": "^7.6.12", "@types/node": "^22", "typescript": "^5" } }],
+    "epsilon/pi-ext-shared": ["pi-ext-shared@file:extensions/shared/core", { "dependencies": { "@mariozechner/pi-coding-agent": "*", "@sinclair/typebox": "^0.32.15", "better-sqlite3": "^11.7.0" }, "devDependencies": { "@types/better-sqlite3": "^7.6.12", "@types/node": "^22", "typescript": "^5" } }],
 
     "log-update/slice-ansi": ["slice-ansi@7.1.2", "", { "dependencies": { "ansi-styles": "^6.2.1", "is-fullwidth-code-point": "^5.0.0" } }, "sha512-iOBWFgUX7caIZiuutICxVgX1SdxwAVFFKwt1EvMYYec/NWO5meOJ6K5uQxhrYBdQJne4KxiqZc+KptFOWFSI9w=="],
 

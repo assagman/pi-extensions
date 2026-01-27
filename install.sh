@@ -10,7 +10,7 @@ RED='\033[0;31m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-# Non-deployable extensions (libraries, shared code)
+# Non-deployable directories (libraries, shared code)
 SKIP_EXTENSIONS=("shared")
 
 usage() {

@@ -19,7 +19,7 @@
     "@mariozechner/pi-coding-agent": "*",
     "@sinclair/typebox": "^0.32.15",
     "better-sqlite3": "^11.7.0",
-    "pi-ext-shared": "../shared"
+    "pi-ext-shared": "../shared/core"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
