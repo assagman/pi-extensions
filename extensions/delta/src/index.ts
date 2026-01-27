@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionFactory } from "@mariozechner/pi-coding-agent";
+import { buildMemoryPrompt, closeDb, getMemoryContext, initBranchCacheAsync } from "./db.js";
 import { registerTools } from "./tools.js";
-import { closeDb, buildMemoryPrompt, getMemoryContext, initBranchCacheAsync } from "./db.js";
 
 const deltaExtension: ExtensionFactory = (pi: ExtensionAPI) => {
   // Track if we've injected the first-turn message this session
@@ -21,10 +21,7 @@ const deltaExtension: ExtensionFactory = (pi: ExtensionAPI) => {
     const memoryCtx = getMemoryContext();
 
     const hasContent =
-      memoryCtx.notes.length > 0 ||
-      memoryCtx.taskSummary.activeTasks.length > 0 ||
-      memoryCtx.kvKeys.length > 0 ||
-      memoryCtx.recentEpisodes > 0;
+      memoryCtx.indexEntries.length > 0 || memoryCtx.taskSummary.activeTasks.length > 0;
 
     // Build system prompt addition
     const systemPromptAddition = hasContent ? buildMemoryPrompt() : buildMinimalPrompt();
@@ -60,111 +57,67 @@ const deltaExtension: ExtensionFactory = (pi: ExtensionAPI) => {
 
 function buildMinimalPrompt(): string {
   return `<delta_memory>
-## MANDATORY: Task-Driven Workflow
+## MANDATORY — You MUST do ALL of these BEFORE any work:
 
-You MUST use delta_* tools for ALL work:
+1. **delta_task_create** — Create a task for the user's request RIGHT NOW
+2. **delta_task_update** — Update status as you work (in_progress → done)
+3. **delta_log** — Log every discovery: bugs, decisions, patterns, gotchas
+4. **delta_note_create** — Save reusable knowledge (issues, conventions, workflows)
 
-1. **FIRST**: Create a task for the user's request with delta_task_create
-2. **DURING**: Update task status (in_progress) and log decisions with delta_log  
-3. **AFTER**: Mark task done and log outcome
-
-## MANDATORY: Log Discoveries
-
-When you discover something new, IMMEDIATELY log it:
-- Bug found → delta_log with tags=["bug", "discovery"]
-- Pattern/convention discovered → delta_log with tags=["pattern", "discovery"] 
-- Important decision made → delta_log with tags=["decision"]
-- Gotcha/pitfall found → delta_log with tags=["gotcha", "discovery"]
-- Useful insight → delta_log with tags=["insight", "discovery"]
-
-Before logging, use delta_recall tags=["discovery"] query="<topic>" to check if already logged.
-
-## MANDATORY: Create Project Notes
-
-For REUSABLE project knowledge, create a delta_note (loaded every session):
-
-| Category | When to Create Note |
-|----------|---------------------|
-| issue | Known bugs, limitations, tech debt, workarounds needed |
-| convention | Code patterns, naming rules, architectural decisions |
-| workflow | Build commands, deploy steps, test procedures |
-| reminder | Things to check, common mistakes, review points |
-| general | Project context future sessions need to know |
-
-**ALWAYS create notes for:**
-- Architecture/design decisions that affect future work
-- Non-obvious project setup or configuration
-- Recurring issues and their solutions
-- Code conventions specific to this project
-- Important dependencies or version constraints
-
-Check delta_note_list before creating to avoid duplicates.
-
-Available tools:
-- delta_task_create/list/update/delete/get - Task tracking (REQUIRED)
-- delta_note_create/list/update/delete/get - Project notes (REQUIRED for reusable knowledge)
-- delta_log/recall - Event/decision logging (REQUIRED for discoveries)
-- delta_get/set/delete - Key-value preferences
-
-NEVER skip task creation. NEVER skip logging discoveries. NEVER skip noting reusable knowledge.
+Tools: delta_task_create/list/update/delete/get, delta_note_create/list/update/delete/get, delta_log/recall, delta_get/set/delete, delta_index_search/rebuild
 </delta_memory>`;
 }
 
 function buildFirstTurnMessage(ctx: ReturnType<typeof getMemoryContext>): string {
   const lines: string[] = [];
 
-  lines.push("[DELTA MEMORY LOADED]");
+  // Lead with the ACTION REQUIRED — not the stats
+  lines.push("⚠️ MANDATORY — Do these NOW before any other work:");
+  lines.push("1. delta_task_create → Create a task for this request");
+  lines.push("2. delta_log → Log any discoveries as you work");
+  lines.push("3. delta_note_create → Save reusable knowledge when found");
+  lines.push("4. delta_task_update → Mark task done when complete");
   lines.push("");
 
-  if (ctx.notes.length > 0) {
-    lines.push(`📝 ${ctx.notes.length} active project notes`);
-  } else {
-    lines.push("📝 0 project notes - CREATE NOTES for reusable knowledge!");
+  // Then show context summary
+  if (ctx.indexEntries.length > 0) {
+    const noteCount = ctx.indexEntries.filter((e) => e.source_type === "note").length;
+    const episodeCount = ctx.indexEntries.filter((e) => e.source_type === "episode").length;
+    const taskCount = ctx.indexEntries.filter((e) => e.source_type === "task").length;
+    const kvCount = ctx.indexEntries.filter((e) => e.source_type === "kv").length;
+
+    lines.push(`🧠 Memory: ${ctx.indexEntries.length} entries`);
+    const parts: string[] = [];
+    if (noteCount > 0) parts.push(`${noteCount} notes`);
+    if (episodeCount > 0) parts.push(`${episodeCount} episodes`);
+    if (taskCount > 0) parts.push(`${taskCount} tasks`);
+    if (kvCount > 0) parts.push(`${kvCount} kv`);
+    if (parts.length > 0) lines.push(`  ${parts.join(", ")}`);
   }
 
   const active = ctx.taskSummary.todo + ctx.taskSummary.in_progress + ctx.taskSummary.blocked;
   if (active > 0) {
     lines.push(
-      `📋 ${active} active tasks (${ctx.taskSummary.todo} todo, ${ctx.taskSummary.in_progress} in progress, ${ctx.taskSummary.blocked} blocked)`
+      `⏳ ${active} active tasks (${ctx.taskSummary.todo} todo, ${ctx.taskSummary.in_progress} in progress, ${ctx.taskSummary.blocked} blocked)`
     );
   }
 
-  if (ctx.kvKeys.length > 0) {
-    lines.push(`🔑 ${ctx.kvKeys.length} stored values`);
+  if (ctx.indexEntries.length > 0) {
+    lines.push("");
+    lines.push("Use delta_index_search(query) to find relevant memories");
   }
-
-  if (ctx.recentEpisodes > 0) {
-    lines.push(`📚 ${ctx.recentEpisodes} logged episodes`);
-  }
-
-  lines.push("");
-  lines.push("⚠️ MANDATORY:");
-  lines.push("- Create task for this request (or update existing)");
-  lines.push("- Log discoveries with delta_log");
-  lines.push("- Create delta_note for reusable project knowledge:");
-  lines.push("  conventions, issues, workflows, gotchas, architecture");
-  lines.push("- Update task status when done");
 
   return lines.join("\n");
 }
 
 function buildEmptyStateMessage(): string {
-  return `[DELTA MEMORY: EMPTY STATE]
+  return `⚠️ MANDATORY — Do these NOW before any other work:
+1. delta_task_create → Create a task for this request
+2. delta_log → Log any discoveries as you work
+3. delta_note_create → Save reusable knowledge when found
+4. delta_task_update → Mark task done when complete
 
-No tasks, notes, or memory entries found for this project/branch.
-
-⚠️ MANDATORY WORKFLOW:
-1. Create a task NOW with delta_task_create for the user's request
-2. Update status as you work (in_progress → done)
-3. Log ALL discoveries with delta_log (bugs, patterns, decisions, gotchas)
-4. Create delta_note for ANY reusable project knowledge:
-   - Architecture decisions → category="convention"
-   - Known issues/workarounds → category="issue"  
-   - Build/deploy/test steps → category="workflow"
-   - Project-specific gotchas → category="reminder"
-
-Do NOT proceed without creating a task first.
-Do NOT skip logging discoveries or creating notes for reusable knowledge.`;
+Empty memory — first session for this project/branch.`;
 }
 
 export default deltaExtension;
