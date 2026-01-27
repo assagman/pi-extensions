@@ -1,26 +1,37 @@
-import type { AgentToolResult, AgentToolUpdateCallback } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
+import type {
+  AgentToolResult,
+  AgentToolUpdateCallback,
+  ExtensionAPI,
+  ExtensionContext,
+  ToolDefinition,
+} from "@mariozechner/pi-coding-agent";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import {
   type ListNotesOptions,
   type ListTasksOptions,
   type ProjectNote,
   type RecallOptions,
+  TASK_STATUS_ICONS,
   type Task,
   createNote,
   createTask,
+  deleteEpisode,
   deleteNote,
   deleteTask,
+  getDatabaseSchema,
   getDbLocation,
   getNote,
   getTask,
+  getVersionInfo,
   kvDelete,
   kvGet,
   kvSet,
   listNotes,
   listTasks,
   logEpisode,
+  rebuildIndex,
   recallEpisodes,
+  searchIndex,
   updateNote,
   updateTask,
 } from "./db.js";
@@ -75,14 +86,11 @@ const TaskPriorityEnum = Type.Union([
   Type.Literal("critical"),
 ]);
 
-const TaskScopeEnum = Type.Union([Type.Literal("session"), Type.Literal("project")]);
-
 const TaskCreateSchema = Type.Object({
   title: Type.String({ description: "Task title" }),
   description: Type.Optional(Type.String({ description: "Task description" })),
   status: Type.Optional(TaskStatusEnum),
   priority: Type.Optional(TaskPriorityEnum),
-  scope: Type.Optional(TaskScopeEnum),
   tags: Type.Optional(Type.Array(Type.String())),
   parent_id: Type.Optional(Type.Number({ description: "Parent task ID for subtasks" })),
 });
@@ -93,7 +101,6 @@ const TaskListSchema = Type.Object({
       description: "Filter by status (single or array)",
     })
   ),
-  scope: Type.Optional(TaskScopeEnum),
   priority: Type.Optional(TaskPriorityEnum),
   tags: Type.Optional(Type.Array(Type.String())),
   parent_id: Type.Optional(
@@ -101,7 +108,6 @@ const TaskListSchema = Type.Object({
       description: "Filter by parent (null = root tasks only)",
     })
   ),
-  sessionOnly: Type.Optional(Type.Boolean()),
   limit: Type.Optional(Type.Number()),
 });
 
@@ -228,27 +234,36 @@ const deltaRecall = createTool(
   }
 );
 
+const EpisodeDeleteSchema = Type.Object({
+  id: Type.Number({ description: "Episode ID to delete" }),
+});
+
+const deltaEpisodeDelete = createTool(
+  "delta_episode_delete",
+  "Delete Episode",
+  "Delete an episode from episodic memory by ID.",
+  EpisodeDeleteSchema,
+  ({ id }) => {
+    const deleted = deleteEpisode(id);
+    return deleted ? `Deleted episode #${id}` : `Episode #${id} not found`;
+  }
+);
+
 // ============ Task Tools ============
 
 function formatTask(task: Task): string {
   const date = new Date(task.created_at).toISOString().split("T")[0];
   const tagsStr = task.tags.length > 0 ? ` [${task.tags.join(", ")}]` : "";
   const parentStr = task.parent_id ? ` (subtask of #${task.parent_id})` : "";
-  const statusIcon = {
-    todo: "○",
-    in_progress: "◐",
-    blocked: "⊘",
-    done: "●",
-    cancelled: "✕",
-  }[task.status];
+  const statusIcon = TASK_STATUS_ICONS[task.status];
 
-  return `${statusIcon} #${task.id} [${task.priority}] ${task.title}${tagsStr}${parentStr}\n  ${task.scope} | ${task.status} | ${date}${task.description ? `\n  ${task.description}` : ""}`;
+  return `${statusIcon} #${task.id} [${task.priority}] ${task.title}${tagsStr}${parentStr}\n  ${task.status} | ${date}${task.description ? `\n  ${task.description}` : ""}`;
 }
 
 const deltaTaskCreate = createTool(
   "delta_task_create",
   "Create Task",
-  "Create a new task. Scope: 'session' (current session only) or 'project' (persists across sessions). Priority: low/medium/high/critical. Status: todo/in_progress/blocked/done/cancelled.",
+  "Create a new task. Tasks are branch-scoped (visible to any session on the same git branch). Priority: low/medium/high/critical. Status: todo/in_progress/blocked/done/cancelled.",
   TaskCreateSchema,
   (input) => {
     const id = createTask(input);
@@ -260,7 +275,7 @@ const deltaTaskCreate = createTool(
 const deltaTaskList = createTool(
   "delta_task_list",
   "List Tasks",
-  "List tasks with optional filters. Filter by status, scope, priority, tags, or parent_id (null = root tasks only).",
+  "List tasks with optional filters. Filter by status, priority, tags, or parent_id (null = root tasks only).",
   TaskListSchema,
   (options) => {
     const tasks = listTasks(options as ListTasksOptions);
@@ -447,6 +462,57 @@ const deltaNoteGet = createTool(
   }
 );
 
+// ============ Memory Index Tools ============
+
+const IndexSearchSchema = Type.Object({
+  query: Type.String({ description: "Search term to find in memory index summaries and keywords" }),
+  source_type: Type.Optional(
+    Type.Union(
+      [Type.Literal("note"), Type.Literal("episode"), Type.Literal("task"), Type.Literal("kv")],
+      { description: "Filter by source type" }
+    )
+  ),
+});
+
+const IndexRebuildSchema = Type.Object({});
+
+const deltaIndexSearch = createTool(
+  "delta_index_search",
+  "Search Memory Index",
+  "Search the memory index by keywords across all memory types (notes, episodes, tasks, kv). Returns matching entries with source references for selective retrieval.",
+  IndexSearchSchema,
+  ({ query, source_type }) => {
+    const results = searchIndex(query, source_type);
+
+    if (results.length === 0) {
+      return "No matching memory entries found";
+    }
+
+    const prefixMap: Record<string, string> = { note: "N", episode: "E", task: "T", kv: "K" };
+    const formatted = results
+      .map((e) => {
+        const prefix = prefixMap[e.source_type] || "?";
+        const imp = e.importance !== "normal" ? ` [${e.importance.toUpperCase()}]` : "";
+        const kw = e.keywords ? ` (${e.keywords})` : "";
+        return `[${prefix}${e.source_id}]${imp} ${e.summary}${kw}`;
+      })
+      .join("\n");
+
+    return `Found ${results.length} matching entries:\n\n${formatted}`;
+  }
+);
+
+const deltaIndexRebuild = createTool(
+  "delta_index_rebuild",
+  "Rebuild Memory Index",
+  "Force rebuild the memory index from all source tables. Use if index appears stale or after manual DB edits.",
+  IndexRebuildSchema,
+  () => {
+    const count = rebuildIndex();
+    return `Memory index rebuilt: ${count} entries indexed`;
+  }
+);
+
 // ============ Info Tool ============
 
 const InfoSchema = Type.Object({});
@@ -462,6 +528,52 @@ const deltaInfo = createTool(
   }
 );
 
+// ============ Version & Schema Tools ============
+
+const VersionSchema = Type.Object({});
+
+const deltaVersion = createTool(
+  "delta_version",
+  "DB Version",
+  "Reports the shipped extension DB version alongside the current database's stored version. Shows whether they match or if the DB is outdated. Use to detect schema mismatches before/after upgrades.",
+  VersionSchema,
+  () => {
+    const info = getVersionInfo();
+    const currentStr =
+      info.current === null ? "unversioned (pre-versioning DB)" : String(info.current);
+    const status = info.match
+      ? "✓ Up to date"
+      : info.current === null
+        ? "⚠ MISMATCH — DB predates versioning system"
+        : info.current < info.shipped
+          ? `⚠ MISMATCH — DB is behind (${info.current} → ${info.shipped})`
+          : `⚠ MISMATCH — DB is ahead (${info.current} > ${info.shipped})`;
+
+    return [
+      "Database Version Info",
+      `  Shipped (code):  ${info.shipped}`,
+      `  Current (DB):    ${currentStr}`,
+      `  Status:          ${status}`,
+      "",
+      info.match ? "" : "Use delta_schema to inspect current DB structure.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+);
+
+const SchemaSchema = Type.Object({});
+
+const deltaSchema = createTool(
+  "delta_schema",
+  "DB Schema",
+  "Dumps the complete DDL schema of the current database — all tables, indexes, triggers, and other objects. For diagnostics and migration planning.",
+  SchemaSchema,
+  () => {
+    return getDatabaseSchema();
+  }
+);
+
 // ============ Export ============
 
 export function registerTools(pi: ExtensionAPI): void {
@@ -472,6 +584,7 @@ export function registerTools(pi: ExtensionAPI): void {
   // Episodic
   pi.registerTool(deltaLog);
   pi.registerTool(deltaRecall);
+  pi.registerTool(deltaEpisodeDelete);
   // Tasks
   pi.registerTool(deltaTaskCreate);
   pi.registerTool(deltaTaskList);
@@ -484,6 +597,12 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool(deltaNoteUpdate);
   pi.registerTool(deltaNoteDelete);
   pi.registerTool(deltaNoteGet);
+  // Memory Index
+  pi.registerTool(deltaIndexSearch);
+  pi.registerTool(deltaIndexRebuild);
   // Info
   pi.registerTool(deltaInfo);
+  // Version & Schema
+  pi.registerTool(deltaVersion);
+  pi.registerTool(deltaSchema);
 }

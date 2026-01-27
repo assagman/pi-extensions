@@ -88,7 +88,7 @@ The architecture consists of four main subsystems:
     *   **Error Handling**: If a tool fails (throws or exit code != 0), `mu` forces the `isError` flag and preserves the error message to ensure red-box rendering in the UI.
 *   **Rendering (`renderCall`)**:
     *   Uses `PulsingToolLine` component.
-    *   Generates a compact, one-line summary (e.g., `bash $ npm test`, `read src/index.ts @L1-50`).
+    *   Generates a compact, one-line summary (e.g., `bash $ bun test`, `read src/index.ts @L1-50`).
 *   **Rendering (`renderResult`)**:
     *   **Collapsed (Default)**: Returns an empty `Text` component (effectively hidden).
     *   **Expanded/Error/Partial**: Returns the original tool's full output or a markdown block.

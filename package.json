@@ -5,8 +5,8 @@
   "type": "module",
   "workspaces": ["extensions/*"],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "clean": "npm run clean --workspaces --if-present",
+    "build": "bun run --filter '*' build",
+    "clean": "bun run --filter '*' clean",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",

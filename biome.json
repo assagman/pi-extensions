@@ -10,8 +10,7 @@
     "ignore": ["**/node_modules/**", "**/dist/**", "**/.delta/**", "package-lock.json"]
   },
   "organizeImports": {
-    "enabled": true,
-    "ignore": ["extensions/delta/src/index.ts"]
+    "enabled": true
   },
   "formatter": {
     "enabled": true,
@@ -32,13 +31,13 @@
         "noUnusedVariables": "error"
       },
       "style": {
-        "noNonNullAssertion": "warn",
+        "noNonNullAssertion": "error",
         "useConst": "error",
         "useTemplate": "error"
       },
       "suspicious": {
-        "noExplicitAny": "warn",
-        "noConsole": "off"
+        "noExplicitAny": "error",
+        "noConsole": "error"
       }
     }
   },
