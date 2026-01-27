@@ -10,6 +10,20 @@
         "lint-staged": "^15.3.0",
       },
     },
+    "extensions/ask": {
+      "name": "ask",
+      "version": "1.0.0",
+      "dependencies": {
+        "@mariozechner/pi-coding-agent": "*",
+        "@mariozechner/pi-tui": "*",
+        "@sinclair/typebox": "^0.32.15",
+      },
+      "devDependencies": {
+        "@types/node": "^22",
+        "typescript": "^5",
+        "vitest": "^4.0.18",
+      },
+    },
     "extensions/delta": {
       "name": "delta",
       "version": "1.0.0",
@@ -458,6 +472,8 @@
     "ansi-styles": ["ansi-styles@6.2.3", "", {}, "sha512-4Dj6M28JB+oAH8kFkTLUo+a2jwOFkuqb3yucU0CANcRRUbxS0cP0nZYCGjcc3BNXwRIsUVmDGgzawme7zvJHvg=="],
 
     "any-promise": ["any-promise@1.3.0", "", {}, "sha512-7UvmKalWRt1wgjL1RrGxoSJW/0QZFIegpeGvZG9kjp8vrRu55XTHbwnqq2GpXm9uLbcuhxm3IqX9OB4MZR1b2A=="],
+
+    "ask": ["ask@workspace:extensions/ask"],
 
     "assertion-error": ["assertion-error@2.0.1", "", {}, "sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA=="],
 

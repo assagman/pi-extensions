@@ -1,0 +1,28 @@
+{
+  "name": "ask",
+  "version": "1.0.0",
+  "description": "Better questionnaire tool for Pi with number keys, C-n/C-p nav, proper long text wrapping, and always-present 'Type something' option",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "install": "./install.sh",
+    "uninstall": "./uninstall.sh"
+  },
+  "pi": {
+    "extensions": ["./dist/index.js"]
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "^0.32.15"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5",
+    "vitest": "^4.0.18"
+  }
+}
