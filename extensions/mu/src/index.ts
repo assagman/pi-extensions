@@ -20,7 +20,6 @@ import {
   createWriteTool,
   getMarkdownTheme,
   highlightCode,
-  initTheme,
 } from "@mariozechner/pi-coding-agent";
 import {
   type Component,
@@ -1793,18 +1792,6 @@ function highlightBashLine(line: string, startInSQ = false, startInDQ = false): 
 // =============================================================================
 // PRETTY-PRINT & SYNTAX HIGHLIGHTING FOR TOOL ARGS
 // =============================================================================
-let themeInitialized = false;
-
-function ensureTheme(): void {
-  if (!themeInitialized) {
-    try {
-      initTheme();
-    } catch {
-      /* already initialized */
-    }
-    themeInitialized = true;
-  }
-}
 
 function isComplexValue(v: unknown): boolean {
   if (v === null || v === undefined) return false;
@@ -1824,7 +1811,6 @@ function isComplexValue(v: unknown): boolean {
 }
 
 function highlightValue(v: unknown): string[] {
-  ensureTheme();
   if (v === null) return highlightCode("null", "json");
   if (v === undefined) return [mu("dim", "undefined")];
   if (typeof v === "boolean" || typeof v === "number") {
