@@ -17,6 +17,8 @@ import {
   createReadTool,
   createWriteTool,
   getMarkdownTheme,
+  highlightCode,
+  initTheme,
 } from "@mariozechner/pi-coding-agent";
 import {
   type Component,
@@ -425,18 +427,68 @@ class BoxedToolCard implements Component {
       return this.cachedLines;
     }
 
-    // Default: single-line truncated rendering for other tools
-    const leftMax = innerW - rightLen - 1;
+    // Non-bash tools: multiline rendering with full args, no truncation
     const iconColored = rgb(color, icon);
-    const leftContent = `${iconColored} ${content}`;
-    const leftTrunc = truncateToWidth(leftContent, leftMax);
-    const leftLen = visibleWidth(leftTrunc);
-    const padding = " ".repeat(Math.max(0, innerW - leftLen - rightLen));
+    const toolLabel = this.toolName;
+    const prefix = `${iconColored} ${rgb(color, toolLabel)} `;
+    const prefixLen = visibleWidth(prefix);
+    const indent = " ".repeat(prefixLen);
 
-    const line = `${leftTrunc}${padding}${rightPart}`;
+    const firstLineWidth = innerW - prefixLen - rightLen - 1;
+    const contLineWidth = innerW - prefixLen;
+
+    if (firstLineWidth <= 0 || contLineWidth <= 0) {
+      const fallback = `${prefix}${rgb("dim", truncateToWidth(content, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
+      const fallbackLen = visibleWidth(fallback);
+      const pad = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
+      const line = `${fallback}${pad}${rightPart}`;
+      this.lastWidth = width;
+      this.cachedLines = this.needsLeadingSpace ? ["", line] : [line];
+      return this.cachedLines;
+    }
+
+    const segments = content.split("\n");
+    const allWrapped: string[] = [];
+
+    for (const seg of segments) {
+      if (allWrapped.length === 0) {
+        const wrapped = wrapTextWithAnsi(seg, firstLineWidth);
+        if (wrapped.length === 0) {
+          allWrapped.push("");
+        } else {
+          allWrapped.push(wrapped[0]);
+          if (wrapped.length > 1) {
+            const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contLineWidth);
+            allWrapped.push(...rewrapped);
+          }
+        }
+      } else {
+        const wrapped = wrapTextWithAnsi(seg, contLineWidth);
+        allWrapped.push(...(wrapped.length > 0 ? wrapped : [""]));
+      }
+    }
+
+    const resultLines: string[] = [];
+    for (let i = 0; i < allWrapped.length; i++) {
+      const wl = allWrapped[i];
+      if (i === 0) {
+        const lineContent = `${prefix}${rgb("dim", wl)}`;
+        const lineLen = visibleWidth(lineContent);
+        const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+        resultLines.push(`${lineContent}${pad}${rightPart}`);
+      } else {
+        resultLines.push(`${indent}${rgb("dim", wl)}`);
+      }
+    }
+
+    if (resultLines.length === 0) {
+      resultLines.push(
+        `${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart}`
+      );
+    }
 
     this.lastWidth = width;
-    this.cachedLines = this.needsLeadingSpace ? ["", line] : [line];
+    this.cachedLines = this.needsLeadingSpace ? ["", ...resultLines] : resultLines;
     return this.cachedLines;
   }
 
@@ -1148,10 +1200,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
           return lines;
         }
 
-        // Default: single-line truncated rendering for other tools
-        const leftMax = innerW - rightLen - 1;
-
-        // Apply pulsing effect to icon and name when running
+        // Non-bash tools: pretty-printed with syntax highlighting
         let iconColored: string;
         let nameColored: string;
         if (status === "running") {
@@ -1165,20 +1214,139 @@ const setupUIPatching = (ctx: ExtensionContext) => {
           nameColored = rgb(color, toolName);
         }
 
-        const argsPreview = formatToolArgsPreview(toolName, args);
-        const argsColored = rgb("dim", ` ${argsPreview}`);
-        const leftContent = `${iconColored} ${nameColored}${argsColored}`;
-        const leftTrunc = truncateToWidth(leftContent, leftMax);
-        const leftLen = visibleWidth(leftTrunc);
+        // Special case: ask tool — suppress args, show only user's answer
+        if (toolName === "ask") {
+          const headerContent = `${iconColored} ${nameColored}`;
+          const headerLen = visibleWidth(headerContent);
 
-        const padding = " ".repeat(Math.max(0, innerW - leftLen - rightLen));
-        const line = `${leftTrunc}${padding}${rightPart}`;
+          const resultData = tool.result as { content?: unknown[] } | undefined;
+          let answerText = "";
+          if (resultData?.content && Array.isArray(resultData.content)) {
+            answerText = resultData.content
+              .filter((c: unknown) => isRecord(c) && c.type === "text")
+              .map((c: unknown) => (c as { text?: string }).text ?? "")
+              .join("\n");
+          }
 
-        // Add leading blank line if this tool follows a user message
-        if (tool._mu_leading_space) {
-          return ["", line];
+          if (answerText) {
+            const answerLines = answerText.split("\n").filter((l: string) => l.trim());
+            const pad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
+            const lines: string[] = [`${headerContent}${pad}${rightPart}`];
+            for (const aLine of answerLines) {
+              lines.push(`  ${rgb("white", aLine)}`);
+            }
+            if (tool._mu_leading_space) return ["", ...lines];
+            return lines;
+          }
+
+          // Running or no result yet — just tool name
+          const pad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
+          const line = `${headerContent}${pad}${rightPart}`;
+          if (tool._mu_leading_space) return ["", line];
+          return [line];
         }
-        return [line];
+
+        const hasComplex = Object.values(args).some(isComplexValue);
+
+        if (hasComplex) {
+          // Pretty-print mode: tool name on first line, args below with highlighting
+          const headerContent = `${iconColored} ${nameColored}`;
+          const headerLen = visibleWidth(headerContent);
+          const pad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
+          const resultLines: string[] = [`${headerContent}${pad}${rightPart}`];
+
+          const BLOCK_INDENT = "  ";
+          for (const [k, v] of Object.entries(args)) {
+            const keyStr = `${rgb("teal", k)}${rgb("dim", "=")}`;
+
+            if (isComplexValue(v)) {
+              const highlighted = highlightValue(v);
+              for (let i = 0; i < highlighted.length; i++) {
+                if (i === 0) {
+                  resultLines.push(`${BLOCK_INDENT}${keyStr}${highlighted[i]}`);
+                } else {
+                  resultLines.push(`${BLOCK_INDENT}${highlighted[i]}`);
+                }
+              }
+            } else {
+              const valStr =
+                v === null
+                  ? rgb("violet", "null")
+                  : v === undefined
+                    ? rgb("dim", "undefined")
+                    : typeof v === "boolean"
+                      ? rgb("violet", String(v))
+                      : typeof v === "number"
+                        ? rgb("amber", String(v))
+                        : rgb("white", String(v));
+              resultLines.push(`${BLOCK_INDENT}${keyStr}${valStr}`);
+            }
+          }
+
+          if (tool._mu_leading_space) return ["", ...resultLines];
+          return resultLines;
+        }
+
+        // Simple mode: inline args with multiline wrapping
+        const argsStr = formatToolArgsPreview(toolName, args);
+        const prefix = `${iconColored} ${nameColored} `;
+        const prefixLen = visibleWidth(prefix);
+        const indent = " ".repeat(prefixLen);
+
+        const firstLineWidth = innerW - prefixLen - rightLen - 1;
+        const contLineWidth = innerW - prefixLen;
+
+        if (firstLineWidth <= 0 || contLineWidth <= 0) {
+          const fallback = `${prefix}${rgb("dim", truncateToWidth(argsStr, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
+          const fallbackLen = visibleWidth(fallback);
+          const pad = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
+          const lines = [`${fallback}${pad}${rightPart}`];
+          if (tool._mu_leading_space) return ["", ...lines];
+          return lines;
+        }
+
+        const argsSegments = argsStr.split("\n");
+        const allWrapped: string[] = [];
+
+        for (const seg of argsSegments) {
+          if (allWrapped.length === 0) {
+            const wrapped = wrapTextWithAnsi(seg, firstLineWidth);
+            if (wrapped.length === 0) {
+              allWrapped.push("");
+            } else {
+              allWrapped.push(wrapped[0]);
+              if (wrapped.length > 1) {
+                const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contLineWidth);
+                allWrapped.push(...rewrapped);
+              }
+            }
+          } else {
+            const wrapped = wrapTextWithAnsi(seg, contLineWidth);
+            allWrapped.push(...(wrapped.length > 0 ? wrapped : [""]));
+          }
+        }
+
+        const resultLines: string[] = [];
+        for (let i = 0; i < allWrapped.length; i++) {
+          const wl = allWrapped[i];
+          if (i === 0) {
+            const lineContent = `${prefix}${rgb("dim", wl)}`;
+            const lineLen = visibleWidth(lineContent);
+            const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+            resultLines.push(`${lineContent}${pad}${rightPart}`);
+          } else {
+            resultLines.push(`${indent}${rgb("dim", wl)}`);
+          }
+        }
+
+        if (resultLines.length === 0) {
+          resultLines.push(
+            `${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart}`
+          );
+        }
+
+        if (tool._mu_leading_space) return ["", ...resultLines];
+        return resultLines;
       };
 
       // Cleanup on dispose
@@ -1488,6 +1656,64 @@ function highlightBashLine(line: string): string {
   return result;
 }
 
+// =============================================================================
+// PRETTY-PRINT & SYNTAX HIGHLIGHTING FOR TOOL ARGS
+// =============================================================================
+let themeInitialized = false;
+
+function ensureTheme(): void {
+  if (!themeInitialized) {
+    try {
+      initTheme();
+    } catch {
+      /* already initialized */
+    }
+    themeInitialized = true;
+  }
+}
+
+function isComplexValue(v: unknown): boolean {
+  if (v === null || v === undefined) return false;
+  if (typeof v === "object") return true;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if ((t.startsWith("{") && t.endsWith("}")) || (t.startsWith("[") && t.endsWith("]"))) {
+      try {
+        JSON.parse(t);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+function highlightValue(v: unknown): string[] {
+  ensureTheme();
+  if (v === null) return highlightCode("null", "json");
+  if (v === undefined) return [rgb("dim", "undefined")];
+  if (typeof v === "boolean" || typeof v === "number") {
+    return highlightCode(JSON.stringify(v), "json");
+  }
+  if (typeof v === "object") {
+    return highlightCode(JSON.stringify(v, null, 2), "json");
+  }
+  if (typeof v === "string") {
+    const t = v.trim();
+    if ((t.startsWith("{") && t.endsWith("}")) || (t.startsWith("[") && t.endsWith("]"))) {
+      try {
+        const parsed = JSON.parse(t);
+        return highlightCode(JSON.stringify(parsed, null, 2), "json");
+      } catch {
+        /* not JSON */
+      }
+    }
+    return [v];
+  }
+  return [String(v)];
+}
+
 function formatToolArgsPreview(name: string, args: Record<string, unknown>): string {
   if (!args) return "";
   const p = (args.path ?? args.file_path ?? "") as string;
@@ -1506,8 +1732,7 @@ function formatToolArgsPreview(name: string, args: Record<string, unknown>): str
       return `${args.pattern ?? ""} ${relPath}`;
     default:
       return Object.entries(args)
-        .slice(0, 2)
-        .map(([k, v]) => `${k}=${preview(String(v), 20)}`)
+        .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
         .join(" ");
   }
 }
