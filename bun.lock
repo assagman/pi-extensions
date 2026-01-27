@@ -17,6 +17,23 @@
         "@mariozechner/pi-coding-agent": "*",
         "@sinclair/typebox": "^0.32.15",
         "better-sqlite3": "^11.7.0",
+        "pi-ext-shared": "../shared",
+      },
+      "devDependencies": {
+        "@types/better-sqlite3": "^7.6.12",
+        "@types/node": "^22",
+        "typescript": "^5",
+        "vitest": "^4.0.18",
+      },
+    },
+    "extensions/epsilon": {
+      "name": "epsilon",
+      "version": "1.0.0",
+      "dependencies": {
+        "@mariozechner/pi-coding-agent": "*",
+        "@sinclair/typebox": "^0.32.15",
+        "better-sqlite3": "^11.7.0",
+        "pi-ext-shared": "../shared",
       },
       "devDependencies": {
         "@types/better-sqlite3": "^7.6.12",
@@ -34,6 +51,20 @@
         "@mariozechner/pi-tui": "*",
       },
       "devDependencies": {
+        "@types/node": "^22",
+        "typescript": "^5",
+      },
+    },
+    "extensions/shared": {
+      "name": "pi-ext-shared",
+      "version": "1.0.0",
+      "dependencies": {
+        "@mariozechner/pi-coding-agent": "*",
+        "@sinclair/typebox": "^0.32.15",
+        "better-sqlite3": "^11.7.0",
+      },
+      "devDependencies": {
+        "@types/better-sqlite3": "^7.6.12",
         "@types/node": "^22",
         "typescript": "^5",
       },
@@ -549,6 +580,8 @@
 
     "environment": ["environment@1.1.0", "", {}, "sha512-xUtoPkMggbz0MPyPiIWr1Kp4aeWJjDZ6SMvURhimjdZgsRuDplF5/s9hcgGhyXMhs+6vpnuoiZ2kFiu3FMnS8Q=="],
 
+    "epsilon": ["epsilon@workspace:extensions/epsilon"],
+
     "es-module-lexer": ["es-module-lexer@1.7.0", "", {}, "sha512-jEQoCwk8hyb2AZziIOLhDqpm5+2ww5uIE6lkO/6jcOCusfk6LhMHpXXfBLXTZ7Ydyt0j4VoUQv6uGNYbdW+kBA=="],
 
     "esbuild": ["esbuild@0.27.2", "", { "optionalDependencies": { "@esbuild/aix-ppc64": "0.27.2", "@esbuild/android-arm": "0.27.2", "@esbuild/android-arm64": "0.27.2", "@esbuild/android-x64": "0.27.2", "@esbuild/darwin-arm64": "0.27.2", "@esbuild/darwin-x64": "0.27.2", "@esbuild/freebsd-arm64": "0.27.2", "@esbuild/freebsd-x64": "0.27.2", "@esbuild/linux-arm": "0.27.2", "@esbuild/linux-arm64": "0.27.2", "@esbuild/linux-ia32": "0.27.2", "@esbuild/linux-loong64": "0.27.2", "@esbuild/linux-mips64el": "0.27.2", "@esbuild/linux-ppc64": "0.27.2", "@esbuild/linux-riscv64": "0.27.2", "@esbuild/linux-s390x": "0.27.2", "@esbuild/linux-x64": "0.27.2", "@esbuild/netbsd-arm64": "0.27.2", "@esbuild/netbsd-x64": "0.27.2", "@esbuild/openbsd-arm64": "0.27.2", "@esbuild/openbsd-x64": "0.27.2", "@esbuild/openharmony-arm64": "0.27.2", "@esbuild/sunos-x64": "0.27.2", "@esbuild/win32-arm64": "0.27.2", "@esbuild/win32-ia32": "0.27.2", "@esbuild/win32-x64": "0.27.2" }, "bin": { "esbuild": "bin/esbuild" } }, "sha512-HyNQImnsOC7X9PMNaCIeAm4ISCQXs5a5YasTXVliKv4uuBo1dKrG0A+uQS8M5eXjVMnLg3WgXaKvprHlFJQffw=="],
@@ -771,6 +804,8 @@
 
     "pathe": ["pathe@2.0.3", "", {}, "sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w=="],
 
+    "pi-ext-shared": ["pi-ext-shared@workspace:extensions/shared"],
+
     "picocolors": ["picocolors@1.1.1", "", {}, "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA=="],
 
     "picomatch": ["picomatch@4.0.3", "", {}, "sha512-5gTmgEY/sqK6gFXLIsQNH19lWb4ebPDLA4SdLP7dsWkIXHWlG66oPuVvXSGFPppYZz8ZDZq0dYYrbHfBCVUb1Q=="],
@@ -990,6 +1025,10 @@
     "cliui/strip-ansi": ["strip-ansi@6.0.1", "", { "dependencies": { "ansi-regex": "^5.0.1" } }, "sha512-Y38VPSHcqkFrCpFnQ9vuSXmquuv5oXOKpGeT6aGrr3o3Gc9AlVa6JBfUSOCnbxGGZF+/0ooI7KrPuUSztUdU5A=="],
 
     "cliui/wrap-ansi": ["wrap-ansi@7.0.0", "", { "dependencies": { "ansi-styles": "^4.0.0", "string-width": "^4.1.0", "strip-ansi": "^6.0.0" } }, "sha512-YVGIj2kamLSTxw6NsZjoBxfSwsn0ycdesmc4p+Q21c5zPuZ1pl+NfxVdxPtdHvmNVOQ6XSYG4AUtyt/Fi7D16Q=="],
+
+    "delta/pi-ext-shared": ["pi-ext-shared@file:extensions/shared", { "dependencies": { "@mariozechner/pi-coding-agent": "*", "@sinclair/typebox": "^0.32.15", "better-sqlite3": "^11.7.0" }, "devDependencies": { "@types/better-sqlite3": "^7.6.12", "@types/node": "^22", "typescript": "^5" } }],
+
+    "epsilon/pi-ext-shared": ["pi-ext-shared@file:extensions/shared", { "dependencies": { "@mariozechner/pi-coding-agent": "*", "@sinclair/typebox": "^0.32.15", "better-sqlite3": "^11.7.0" }, "devDependencies": { "@types/better-sqlite3": "^7.6.12", "@types/node": "^22", "typescript": "^5" } }],
 
     "log-update/slice-ansi": ["slice-ansi@7.1.2", "", { "dependencies": { "ansi-styles": "^6.2.1", "is-fullwidth-code-point": "^5.0.0" } }, "sha512-iOBWFgUX7caIZiuutICxVgX1SdxwAVFFKwt1EvMYYec/NWO5meOJ6K5uQxhrYBdQJne4KxiqZc+KptFOWFSI9w=="],
 

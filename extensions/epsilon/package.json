@@ -1,7 +1,7 @@
 {
-  "name": "delta",
+  "name": "epsilon",
   "version": "1.0.0",
-  "description": "Persistent memory for AI agents using SQLite (KV + Episodic)",
+  "description": "Task management extension for Pi coding agent — persistent SQLite-backed tasks with subtasks, priorities, and statuses.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
