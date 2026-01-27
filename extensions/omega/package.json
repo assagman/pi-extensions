@@ -1,0 +1,25 @@
+{
+  "name": "omega",
+  "version": "1.0.0",
+  "description": "Generic step looper — repeat user-defined steps with aggressive compaction",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "install": "./install.sh",
+    "uninstall": "./uninstall.sh"
+  },
+  "pi": {
+    "extensions": ["./dist/index.js"]
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5",
+    "vitest": "^4.0.18"
+  }
+}
