@@ -7,17 +7,17 @@
  *
  * Features:
  *   - Configurable scrim color (RGB)
- *   - Optional subtle star twinkling animation on scrim
+ *   - Optional static star field on scrim (decorative, no animation)
  *   - Optional accent glow halo around the dialog
  *   - Configurable dialog positioning and sizing
  *
  * Usage:
- *   // Quick — static method with defaults
  *   const result = await DimmedOverlay.show(ctx.ui, (tui, theme, done) => myDialog);
  *
- *   // Configured — instance with custom settings
- *   const overlay = new DimmedOverlay({ scrim: { color: [20, 10, 30] } });
- *   const result = await overlay.show(ctx.ui, factory);
+ *   const result = await DimmedOverlay.show(ctx.ui, factory, {
+ *     scrim: { stars: true },
+ *     dialog: { glow: { enabled: true } },
+ *   });
  */
 
 import type { Component, TUI } from "@mariozechner/pi-tui";
@@ -40,10 +40,8 @@ export type HAlign = "center" | "left" | "right";
 export interface ScrimConfig {
   /** Background color [r, g, b]. Default: [10, 10, 15] (near-black). */
   color?: RGB;
-  /** Enable subtle star twinkling animation on the scrim. Default: false. */
-  twinkle?: boolean;
-  /** Twinkle animation interval in ms. Default: 600. */
-  twinkleInterval?: number;
+  /** Show static star field on the scrim. Default: false. */
+  stars?: boolean;
 }
 
 export interface GlowConfig {
@@ -112,8 +110,7 @@ export interface UICustom {
 
 interface ResolvedScrim {
   color: RGB;
-  twinkle: boolean;
-  twinkleInterval: number;
+  stars: boolean;
 }
 
 interface ResolvedGlow {
@@ -138,7 +135,7 @@ interface ResolvedConfig {
   dialog: ResolvedDialog;
 }
 
-// ─── Star animation types ───────────────────────────────────────────────────
+// ─── Star types ─────────────────────────────────────────────────────────────
 
 /** Depth layer determines brightness ceiling and character pool. */
 type StarLayer = "far" | "mid" | "near";
@@ -147,36 +144,25 @@ interface Star {
   row: number;
   col: number;
   char: string;
-  /** Phase in the fade cycle (radians, 0 to 2π). */
-  phase: number;
-  /** Phase increment per tick (radians). Controls fade speed. */
-  speed: number;
-  /** Depth layer — affects max brightness. */
+  /** Fixed brightness value (computed once at creation). */
+  brightness: number;
   layer: StarLayer;
 }
 
-// ─── Defaults ───────────────────────────────────────────────────────────────
+// ─── Defaults & constants ───────────────────────────────────────────────────
 
 const DEFAULT_SCRIM_COLOR: RGB = [10, 10, 15];
 const DEFAULT_DIALOG_WIDTH: SizeValue = "60%";
 const DEFAULT_DIALOG_MIN_WIDTH = 40;
 const DEFAULT_DIALOG_MAX_HEIGHT: SizeValue = "80%";
 const DEFAULT_GLOW_COLOR: RGB = [18, 15, 35];
-const DEFAULT_TWINKLE_INTERVAL = 250;
 
-/** Min brightness (shared across all layers — fade-out floor). */
+/** Min brightness (shared across all layers). */
 const MIN_STAR_B = 12;
-/**
- * Per-layer config: [maxBrightness, minSpeed, maxSpeed, weight]
- *   far  — dim dust, slow breathing (60% of stars)
- *   mid  — moderate stars (30%)
- *   near — bright foreground stars (10%)
- */
-const LAYER_CONFIG: Record<StarLayer, { maxB: number; minSpd: number; maxSpd: number }> = {
-  far: { maxB: 45, minSpd: 0.063, maxSpd: 0.187 },
-  mid: { maxB: 80, minSpd: 0.11, maxSpd: 0.375 },
-  near: { maxB: 115, minSpd: 0.218, maxSpd: 0.532 },
-};
+
+/** Per-layer max brightness: far=dim dust, mid=moderate, near=bright. */
+const LAYER_MAX_B: Record<StarLayer, number> = { far: 45, mid: 80, near: 115 };
+
 /** Weighted layer distribution: 60% far, 30% mid, 10% near. */
 const LAYER_THRESHOLDS: [number, StarLayer][] = [
   [0.6, "far"],
@@ -188,7 +174,6 @@ const LAYER_THRESHOLDS: [number, StarLayer][] = [
 const NEAR_CHARS = ["✦", "✧", "⋆", "∗", "⊹"];
 /** Chars for far/mid layers (tiny dots). */
 const DUST_CHARS = ["·", "·", "·", ".", ".", "˙", "˙", "∘"];
-const TWO_PI = Math.PI * 2;
 const RESET = "\x1b[0m";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -197,8 +182,7 @@ function resolveConfig(cfg?: DimmedOverlayConfig): ResolvedConfig {
   return {
     scrim: {
       color: cfg?.scrim?.color ?? DEFAULT_SCRIM_COLOR,
-      twinkle: cfg?.scrim?.twinkle ?? false,
-      twinkleInterval: cfg?.scrim?.twinkleInterval ?? DEFAULT_TWINKLE_INTERVAL,
+      stars: cfg?.scrim?.stars ?? false,
     },
     dialog: {
       width: cfg?.dialog?.width ?? DEFAULT_DIALOG_WIDTH,
@@ -268,9 +252,12 @@ function randomInt(max: number): number {
 /**
  * Full-screen component that renders:
  *   1. Scrim (dark background) filling every terminal row
- *   2. Optional twinkling stars on the scrim
+ *   2. Optional static star field on the scrim
  *   3. Optional glow halo around the dialog
  *   4. Dialog content centered (or aligned per config) within the scrim
+ *
+ * Stars are placed once and never change — no animation, no timers.
+ * Rendering only occurs when the TUI requests it (user input / resize).
  */
 class DimmedDialogComponent implements Component {
   private readonly tui: TUI;
@@ -279,10 +266,9 @@ class DimmedDialogComponent implements Component {
   private readonly scrimEsc: string;
   private readonly glowEsc: string;
 
-  // ── Star animation state ──────────────────────────────────────────────
   private stars: Star[] = [];
-  private animationTimer: ReturnType<typeof setInterval> | null = null;
-  private disposed = false;
+  /** Exclusion zone (dialog + glow rect). Set on first render. */
+  private exZone: { top: number; bot: number; left: number; right: number } | null = null;
 
   constructor(tui: TUI, dialog: Component, cfg: ResolvedConfig) {
     this.tui = tui;
@@ -294,26 +280,58 @@ class DimmedDialogComponent implements Component {
 
     const [gr, gg, gb] = cfg.dialog.glow.color;
     this.glowEsc = `\x1b[48;2;${gr};${gg};${gb}m`;
-
-    if (cfg.scrim.twinkle) {
-      this.initStars();
-      this.startAnimation();
-    }
   }
 
-  // ── Star management ───────────────────────────────────────────────────
+  // ── Star placement ────────────────────────────────────────────────────
 
-  private initStars(): void {
-    const rows = this.tui.terminal.rows;
-    const cols = this.tui.terminal.columns;
-    const count = clamp(Math.floor((rows * cols) / 46), 40, 156);
-    for (let i = 0; i < count; i++) {
-      this.stars.push(this.createStar(rows, cols));
+  /**
+   * Pick a random (row, col) outside the exclusion zone. Deterministic —
+   * computes valid cell count, picks a random linear index, and maps it
+   * back to 2D coordinates by skipping the excluded rectangle.
+   */
+  private randomValidPosition(rows: number, cols: number): { row: number; col: number } {
+    const ez = this.exZone;
+    if (!ez) {
+      return { row: randomInt(rows), col: randomInt(cols) };
     }
+
+    const ezTop = clamp(ez.top, 0, rows);
+    const ezBot = clamp(ez.bot, 0, rows);
+    const ezLeft = clamp(ez.left, 0, cols);
+    const ezRight = clamp(ez.right, 0, cols);
+    const ezRowSpan = Math.max(0, ezBot - ezTop);
+    const ezColSpan = Math.max(0, ezRight - ezLeft);
+
+    const validCount = rows * cols - ezRowSpan * ezColSpan;
+    if (validCount <= 0) {
+      return { row: randomInt(rows), col: randomInt(cols) };
+    }
+
+    let idx = randomInt(validCount);
+
+    // Band 1: rows above exclusion zone (full width)
+    const aboveCells = ezTop * cols;
+    if (idx < aboveCells) {
+      return { row: Math.floor(idx / cols), col: idx % cols };
+    }
+    idx -= aboveCells;
+
+    // Band 2: rows within exclusion zone (skip excluded columns)
+    const validPerRow = cols - ezColSpan;
+    const midCells = ezRowSpan * validPerRow;
+    if (idx < midCells) {
+      const rowOffset = Math.floor(idx / validPerRow);
+      let col = idx % validPerRow;
+      if (col >= ezLeft) col += ezColSpan;
+      return { row: ezTop + rowOffset, col };
+    }
+    idx -= midCells;
+
+    // Band 3: rows below exclusion zone (full width)
+    return { row: ezBot + Math.floor(idx / cols), col: idx % cols };
   }
 
   private createStar(rows: number, cols: number): Star {
-    // Pick layer by weighted random
     const r = Math.random();
     let layer: StarLayer = "far";
     for (const [threshold, l] of LAYER_THRESHOLDS) {
@@ -322,84 +340,51 @@ class DimmedDialogComponent implements Component {
         break;
       }
     }
-    const cfg = LAYER_CONFIG[layer];
     const chars = layer === "near" ? NEAR_CHARS : DUST_CHARS;
+    const maxB = LAYER_MAX_B[layer];
+    const { row, col } = this.randomValidPosition(rows, cols);
 
     return {
-      row: randomInt(rows),
-      col: randomInt(cols),
+      row,
+      col,
       char: chars[randomInt(chars.length)],
-      phase: Math.random() * TWO_PI,
-      speed: cfg.minSpd + Math.random() * (cfg.maxSpd - cfg.minSpd),
+      brightness: Math.round(MIN_STAR_B + Math.random() * (maxB - MIN_STAR_B)),
       layer,
     };
   }
 
-  private startAnimation(): void {
-    this.animationTimer = setInterval(() => {
-      if (this.disposed) {
-        this.stopAnimation();
-        return;
-      }
-
-      const rows = this.tui.terminal.rows;
-      const cols = this.tui.terminal.columns;
-
-      // Advance all star phases (smooth sinusoidal fade-in/fade-out)
-      for (const star of this.stars) {
-        star.phase = (star.phase + star.speed) % TWO_PI;
-      }
-
-      // Occasionally reposition one star (~7% per tick ≈ every ~3.6s)
-      if (Math.random() < 0.07 && this.stars.length > 0) {
-        const idx = randomInt(this.stars.length);
-        this.stars[idx] = this.createStar(rows, cols);
-      }
-
-      this.tui.requestRender();
-    }, this.cfg.scrim.twinkleInterval);
+  /** Create a dim-only star (far layer, dust chars, brightness 12–45). */
+  private createDimStar(rows: number, cols: number): Star {
+    const { row, col } = this.randomValidPosition(rows, cols);
+    return {
+      row,
+      col,
+      char: DUST_CHARS[randomInt(DUST_CHARS.length)],
+      brightness: Math.round(MIN_STAR_B + Math.random() * (LAYER_MAX_B.far - MIN_STAR_B)),
+      layer: "far",
+    };
   }
 
-  private stopAnimation(): void {
-    if (this.animationTimer !== null) {
-      clearInterval(this.animationTimer);
-      this.animationTimer = null;
+  private generateStars(rows: number, cols: number): void {
+    this.stars = [];
+    const count = clamp(Math.floor((rows * cols) / 46), 40, 156);
+    // Primary stars (layered: far/mid/near)
+    for (let i = 0; i < count; i++) {
+      this.stars.push(this.createStar(rows, cols));
+    }
+    // Extra dim-only background dust (+100% of base count)
+    for (let i = 0; i < count; i++) {
+      this.stars.push(this.createDimStar(rows, cols));
     }
   }
 
-  /** Clean up animation timers. Called after overlay is dismissed. */
-  dispose(): void {
-    this.disposed = true;
-    this.stopAnimation();
-  }
+  // ── Star rendering ────────────────────────────────────────────────────
 
-  // ── Star rendering helpers ────────────────────────────────────────────
-
-  /**
-   * Build a lookup of stars by row, excluding stars that overlap
-   * the dialog or glow area.
-   */
-  private buildStarLookup(
-    termWidth: number,
-    termRows: number,
-    dialogRow: number,
-    dialogHeight: number,
-    dialogCol: number,
-    dialogWidth: number
-  ): Map<number, Star[]> {
-    const glowEnabled = this.cfg.dialog.glow.enabled;
-    const exTop = glowEnabled ? dialogRow - 1 : dialogRow;
-    const exBot = glowEnabled ? dialogRow + dialogHeight + 1 : dialogRow + dialogHeight;
-    const exLeft = glowEnabled ? dialogCol - 1 : dialogCol;
-    const exRight = glowEnabled ? dialogCol + dialogWidth + 1 : dialogCol + dialogWidth;
-
+  private buildStarLookup(termWidth: number, termRows: number): Map<number, Star[]> {
     const lookup = new Map<number, Star[]>();
     for (const star of this.stars) {
       if (star.row < 0 || star.row >= termRows) continue;
       if (star.col < 0 || star.col >= termWidth) continue;
-      if (star.row >= exTop && star.row < exBot && star.col >= exLeft && star.col < exRight) {
-        continue;
-      }
       let arr = lookup.get(star.row);
       if (!arr) {
         arr = [];
@@ -410,7 +395,6 @@ class DimmedDialogComponent implements Component {
     return lookup;
   }
 
-  /** Render a scrim row with star characters at their positions. */
   private renderScrimRowWithStars(width: number, rowStars: Star[]): string {
     const sorted = rowStars.slice().sort((a, b) => a.col - b.col);
     const SCRIM = this.scrimEsc;
@@ -422,9 +406,7 @@ class DimmedDialogComponent implements Component {
       if (star.col > pos) {
         result += " ".repeat(star.col - pos);
       }
-      // Sinusoidal brightness per depth layer
-      const maxB = LAYER_CONFIG[star.layer].maxB;
-      const b = Math.round(MIN_STAR_B + ((Math.sin(star.phase) + 1) / 2) * (maxB - MIN_STAR_B));
+      const b = star.brightness;
       // Blue-purple tint for deep-space feel
       const sr = Math.max(0, b - 10);
       const sg = Math.max(0, b - 5);
@@ -456,14 +438,14 @@ class DimmedDialogComponent implements Component {
     );
     const dialogMaxHeight = resolveSize(this.cfg.dialog.maxHeight, rows);
 
-    // ── Render dialog component ───────────────────────────────────────
+    // ── Render dialog ─────────────────────────────────────────────────
     let dialogLines = this.dialog.render(dialogWidth);
     if (dialogLines.length > dialogMaxHeight) {
       dialogLines = dialogLines.slice(0, dialogMaxHeight);
     }
     const dh = dialogLines.length;
 
-    // ── Position (ensure room for glow if enabled) ────────────────────
+    // ── Position ──────────────────────────────────────────────────────
     let startRow = resolveRow(
       this.cfg.dialog.verticalAlign,
       this.cfg.dialog.verticalOffset,
@@ -482,11 +464,20 @@ class DimmedDialogComponent implements Component {
       startCol = clamp(startCol, 1, Math.max(1, width - dialogWidth - 1));
     }
 
+    // ── Generate stars once (on first render, after we know the dialog rect) ─
+    if (this.exZone === null && this.cfg.scrim.stars) {
+      this.exZone = {
+        top: glowEnabled ? startRow - 1 : startRow,
+        bot: glowEnabled ? startRow + dh + 1 : startRow + dh,
+        left: glowEnabled ? startCol - 1 : startCol,
+        right: glowEnabled ? startCol + dialogWidth + 1 : startCol + dialogWidth,
+      };
+      this.generateStars(rows, width);
+    }
+
     // ── Star lookup ───────────────────────────────────────────────────
     const starLookup =
-      this.cfg.scrim.twinkle && this.stars.length > 0
-        ? this.buildStarLookup(width, rows, startRow, dh, startCol, dialogWidth)
-        : null;
+      this.cfg.scrim.stars && this.stars.length > 0 ? this.buildStarLookup(width, rows) : null;
 
     // ── Precompute scrim fill ─────────────────────────────────────────
     const scrimFull = `${SCRIM}${" ".repeat(width)}${RESET}`;
@@ -501,7 +492,7 @@ class DimmedDialogComponent implements Component {
     const result: string[] = [];
 
     for (let r = 0; r < rows; r++) {
-      // ── Glow-only rows (top/bottom halo) ────────────────────────────
+      // ── Glow rows (top/bottom halo) ─────────────────────────────────
       if (r === glowRowAbove || r === glowRowBelow) {
         const leftW = glowColStart;
         const rightW = Math.max(0, width - glowColStart - glowWidth);
@@ -555,18 +546,17 @@ class DimmedDialogComponent implements Component {
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /**
- * Dimmed overlay — shows a dialog component on a dark scrim backdrop.
+ * Dimmed overlay — shows a dialog on a dark scrim backdrop with optional
+ * static star field and glow halo.
  *
  * @example
  * ```ts
- * // Static convenience (default config)
  * const answer = await DimmedOverlay.show(ctx.ui, (tui, theme, done) => {
  *   return createMyDialog(tui, theme, done);
  * });
  *
- * // With twinkling scrim + glow
  * const answer = await DimmedOverlay.show(ctx.ui, factory, {
- *   scrim: { twinkle: true },
+ *   scrim: { stars: true },
  *   dialog: { glow: { enabled: true } },
  * });
  * ```
@@ -578,25 +568,21 @@ export class DimmedOverlay {
     this.cfg = config ?? {};
   }
 
-  /** Show the dimmed overlay with a dialog factory. Returns the dialog result. */
   async show<T>(ui: UICustom, factory: DialogFactory<T>): Promise<T> {
     return DimmedOverlay.show(ui, factory, this.cfg);
   }
 
-  /** Static convenience — show with optional config, no instance needed. */
   static async show<T>(
     ui: UICustom,
     factory: DialogFactory<T>,
     config?: DimmedOverlayConfig
   ): Promise<T> {
     const resolved = resolveConfig(config);
-    let overlayComponent: DimmedDialogComponent | undefined;
 
-    const result = await ui.custom<T>(
+    return ui.custom<T>(
       (tui, theme, _kb, done) => {
         const dialog = factory(tui, theme, done);
-        overlayComponent = new DimmedDialogComponent(tui, dialog, resolved);
-        return overlayComponent;
+        return new DimmedDialogComponent(tui, dialog, resolved);
       },
       {
         overlay: true,
@@ -606,8 +592,5 @@ export class DimmedOverlay {
         },
       }
     );
-
-    overlayComponent?.dispose();
-    return result;
   }
 }

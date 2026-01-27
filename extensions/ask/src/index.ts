@@ -93,7 +93,7 @@ const askExtension: ExtensionFactory = (pi: ExtensionAPI) => {
         ctx.ui,
         (tui, theme, done) => createAskUI(tui, theme, done, questions),
         {
-          scrim: { twinkle: true },
+          scrim: { stars: true },
           dialog: { width: "72%", glow: { enabled: true } },
         }
       );
