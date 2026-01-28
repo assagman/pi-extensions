@@ -1,0 +1,27 @@
+# Gamma Extension
+
+Context window token analyzer & visualizer for Pi coding agent.
+
+## Purpose
+Analyzes and visualizes all token sources in the current context window.
+Triggered via `/gamma` command, renders full-screen TUI dashboard.
+
+## Token Categories
+- system: Base system prompt, AGENTS.md, project context
+- skills: Loaded SKILL.md files
+- memory: Delta notes, episodic events, epsilon tasks
+- tools: Tool schemas and descriptions
+- user: User messages
+- assistant: Assistant responses
+- tool_io: Tool call arguments and results
+- images: Image tokens
+
+## Key Components
+- Analyzer: Extracts token sources from SessionManager
+- Tokenizer: js-tiktoken (cl100k_base) wrapper
+- Dashboard: Full-screen TUI with charts
+
+## Dependencies
+- js-tiktoken: Pure JS tokenizer (no native deps)
+- @mariozechner/pi-coding-agent: Pi extension API
+- @mariozechner/pi-tui: Terminal UI components
