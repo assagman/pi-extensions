@@ -1,11 +1,11 @@
-# Ask — Better Questionnaire Extension
+# Sigma — Better Questionnaire Extension
 
 Replaces the built-in `questionnaire` tool with an improved version.
 
 ## Improvements
 
-| Feature | Original | Ask |
-|---------|----------|-----|
+| Feature | Original | Sigma |
+|---------|----------|-------|
 | Number keys (1-9) | ✗ | ✓ Direct selection |
 | C-n / C-p | ✗ | ✓ Emacs-style nav |
 | Long question wrap | Buggy | ✓ `wrapTextWithAnsi` |
@@ -26,13 +26,13 @@ Replaces the built-in `questionnaire` tool with an improved version.
 ## Install
 
 ```bash
-cd extensions/ask
+cd extensions/sigma
 ./install.sh
 ```
 
 ## Uninstall
 
 ```bash
-cd extensions/ask
+cd extensions/sigma
 ./uninstall.sh
 ```

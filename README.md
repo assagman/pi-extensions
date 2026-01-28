@@ -18,7 +18,7 @@ echo "shipping fun..."
 
 | Extension | Description |
 |-----------|-------------|
-| **ask** | Better questionnaire tool — number keys, C-n/C-p nav, proper long text wrapping, always-present "Type something" option |
+| **sigma** | Better questionnaire tool — number keys, C-n/C-p nav, proper long text wrapping, always-present "Type something" option |
 | **delta** | Persistent memory: SQLite-backed KV, episodic events, project notes, memory index |
 | **epsilon** | Task management: SQLite-backed tasks with subtasks, priorities, statuses, tags |
 | **mu** | Condenses tool call/result output in transcript while preserving full outputs for LLM |
@@ -30,7 +30,7 @@ echo "shipping fun..."
 ```
 pi-extensions/
 ├── extensions/
-│   ├── ask/            # Better questionnaire tool
+│   ├── sigma/          # Better questionnaire tool
 │   ├── delta/          # Persistent memory (KV, episodic, notes)
 │   ├── epsilon/        # Task management
 │   ├── mu/             # Output condensation
@@ -95,7 +95,7 @@ The install script:
 
 See each extension's `docs/` directory:
 
-- [ask/docs/](extensions/ask/docs/) - Better questionnaire tool
+- [sigma/docs/](extensions/sigma/docs/) - Better questionnaire tool
 - [delta/docs/](extensions/delta/docs/) - Persistent memory architecture
 - [epsilon/docs/](extensions/epsilon/docs/) - Task management
 - [mu/docs/](extensions/mu/docs/) - Output condensation details

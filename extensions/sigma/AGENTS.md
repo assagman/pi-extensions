@@ -1,4 +1,4 @@
-# Ask — Agent Instructions
+# Sigma — Agent Instructions
 
 ## What This Is
 
@@ -7,13 +7,13 @@ Pi extension that replaces the built-in `questionnaire` tool with improved keybo
 ## Structure
 
 ```
-ask/
+sigma/
 ├── src/
 │   ├── index.ts        # Extension factory, tool registration, system prompt injection
-│   ├── types.ts        # Question, Answer, AskResult, RenderOption interfaces
+│   ├── types.ts        # Question, Answer, SigmaResult, RenderOption interfaces
 │   ├── helpers.ts      # Pure functions: normalize, build options, format answers
 │   ├── helpers.test.ts # Unit tests for helpers
-│   └── ask-ui.ts       # createAskUI() — TUI component with state + input handling
+│   └── sigma-ui.ts     # createSigmaUI() — TUI component with state + input handling
 ├── docs/
 │   ├── README.md       # User docs
 │   └── ARCHITECTURE.md # Technical details
@@ -29,9 +29,9 @@ ask/
 
 | Item | Detail |
 |------|--------|
-| Tool registered | `ask` (replaces built-in `questionnaire`) |
+| Tool registered | `sigma` (replaces built-in `questionnaire`) |
 | Build | esbuild bundle (not plain tsc) — see `package.json` scripts |
-| System prompt | Injects "Ask Tool — Mandatory Usage Rules" |
+| System prompt | Injects "Sigma Tool — Usage Guidelines" |
 | TUI pattern | `ctx.ui.custom()` with closure-based state |
 | Dependencies | `@mariozechner/pi-tui`, `@sinclair/typebox`, `shared-tui` |
 | Tests | `vitest` — `bun run test` |

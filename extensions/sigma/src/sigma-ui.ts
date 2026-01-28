@@ -1,5 +1,5 @@
 /**
- * Ask UI — Premium floating card component for the Ask extension.
+ * Sigma UI — Premium floating card component for the Sigma extension.
  *
  * Renders inside DimmedOverlay as a visually rich card with:
  *   - Rounded box border with top→bottom gradient (muted→dim)
@@ -76,12 +76,12 @@ function padRight(text: string, targetWidth: number): string {
 // ── Factory ─────────────────────────────────────────────────────────────────
 
 /**
- * Create the Ask TUI component with premium card design.
+ * Create the Sigma TUI component with premium card design.
  *
  * This is the factory passed through DimmedOverlay.show() to ctx.ui.custom().
  * It encapsulates all mutable state, rendering, and input handling.
  */
-export function createAskUI<
+export function createSigmaUI<
   T extends {
     // biome-ignore lint/suspicious/noExplicitAny: Theme methods accept varying argument types
     fg: (...a: any[]) => string;

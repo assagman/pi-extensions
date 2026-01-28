@@ -1,10 +1,10 @@
-# Ask — Better Questionnaire Extension
+# Sigma — Better Questionnaire Extension
 
 Pi extension replacing the built-in `questionnaire` tool with improved UX: number keys (1-9) for quick select, C-n/C-p navigation, proper long text wrapping, and always-present "Type something" option.
 
 ## Architecture
 
-Single tool (`ask`) with TUI component. Injects mandatory usage rules into system prompt. Supports single-question (auto-submit) and multi-question (tab navigation + submit) modes.
+Single tool (`sigma`) with TUI component. Injects usage guidelines into system prompt. Supports single-question (auto-submit) and multi-question (tab navigation + submit) modes.
 
 ## Files
 
@@ -15,6 +15,6 @@ Single tool (`ask`) with TUI component. Injects mandatory usage rules into syste
 ## Key Modules
 
 - `src/index.ts`: Extension factory, tool registration, system prompt injection
-- `src/types.ts`: Question, Answer, AskResult interfaces
+- `src/types.ts`: Question, Answer, SigmaResult interfaces
 - `src/helpers.ts`: Pure functions for normalizing questions and formatting answers
-- `src/ask-ui.ts`: TUI component factory with state, rendering, input handling
+- `src/sigma-ui.ts`: TUI component factory with state, rendering, input handling

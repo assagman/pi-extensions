@@ -1,5 +1,5 @@
 /**
- * Ask — Better questionnaire tool for Pi
+ * Sigma — Better questionnaire tool for Pi
  *
  * Improvements over the built-in questionnaire:
  *   1. Number keys (0–9) for direct option selection
@@ -18,13 +18,13 @@ import type { ExtensionAPI, ExtensionFactory } from "@mariozechner/pi-coding-age
 import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { DimmedOverlay } from "shared-tui";
-import { createAskUI } from "./ask-ui.js";
 import {
   errorResult,
   extractLastAssistantMessages,
   formatAnswerLines,
   normalizeQuestions,
 } from "./helpers.js";
+import { createSigmaUI } from "./sigma-ui.js";
 import type { AskResult, Question } from "./types.js";
 
 // ─── Schema ─────────────────────────────────────────────────────────────────
@@ -57,32 +57,30 @@ const AskParams = Type.Object({
 
 // ─── System Prompt ──────────────────────────────────────────────────────────
 
-const ASK_SYSTEM_PROMPT = `
-## Ask Tool — Mandatory Usage Rules
+const SIGMA_SYSTEM_PROMPT = `
+## Sigma Tool — Usage Guidelines
 
-You have access to the \`ask\` tool for interactive user questions.
+You have access to the \`sigma\` tool for interactive user questions.
 
-**MANDATORY — follow these rules without exception:**
+**When to use sigma:**
 
-1. **ALWAYS use the \`ask\` tool** for every decision point, ambiguity, unclear requirement, or confirmation. Never assume — ask.
-2. **ONE question at a time.** Always send exactly 1 question per \`ask\` call. The user's answer to question N informs what question N+1 should be. This prevents stale or conflicting questions.
-3. **Provide concrete options.** Every question must have relevant, actionable options. Don't give vague choices.
-4. **"Type something" is always available.** The user can always type a custom answer — you don't need to add it as an option.
-5. **ALWAYS ask next actions on completion.** When all tasks, findings, or items in a request are completed, ALWAYS use \`ask\` to ask the user what to do next. Never assume the next step.
+1. **Use \`sigma\`** in case of unclarity/ambiguity, decision points, and when confident enough that there are better alternatives/recommendations/suggestions and out-of-the-box ideas.
+2. **Ask category by category.** Group related questions together, don't overwhelm with too many at once.
+3. **"Type something" is always available.** The user can always type a custom answer — you don't need to add it as an option.
 `.trim();
 
 // ─── Extension ──────────────────────────────────────────────────────────────
 
-const askExtension: ExtensionFactory = (pi: ExtensionAPI) => {
+const sigmaExtension: ExtensionFactory = (pi: ExtensionAPI) => {
   pi.on("before_agent_start", async (event) => {
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${ASK_SYSTEM_PROMPT}`,
+      systemPrompt: `${event.systemPrompt}\n\n${SIGMA_SYSTEM_PROMPT}`,
     };
   });
 
   pi.registerTool({
-    name: "ask",
-    label: "Ask",
+    name: "sigma",
+    label: "Sigma",
     description:
       "Ask the user one or more questions. Use for clarifying requirements, getting preferences, or confirming decisions. For single questions, shows a simple option list. For multiple questions, shows a tab-based interface.",
     parameters: AskParams,
@@ -103,7 +101,7 @@ const askExtension: ExtensionFactory = (pi: ExtensionAPI) => {
 
       const result = await DimmedOverlay.show<AskResult>(
         ctx.ui,
-        (tui, theme, done) => createAskUI(tui, theme, done, questions, contextMessages),
+        (tui, theme, done) => createSigmaUI(tui, theme, done, questions, contextMessages),
         {
           scrim: { stars: true },
           dialog: { width: "72%", maxHeight: "95%", glow: { enabled: true } },
@@ -128,7 +126,7 @@ const askExtension: ExtensionFactory = (pi: ExtensionAPI) => {
       const qs = (args.questions as Question[]) || [];
       const count = qs.length;
       const labels = qs.map((q) => q.label || q.id).join(", ");
-      let text = theme.fg("toolTitle", theme.bold("ask "));
+      let text = theme.fg("toolTitle", theme.bold("sigma "));
       text += theme.fg("muted", `${count} question${count !== 1 ? "s" : ""}`);
       if (labels) {
         text += theme.fg("dim", ` (${truncateToWidth(labels, 40)})`);
@@ -157,4 +155,4 @@ const askExtension: ExtensionFactory = (pi: ExtensionAPI) => {
   });
 };
 
-export default askExtension;
+export default sigmaExtension;

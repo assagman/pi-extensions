@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXT_NAME="ask"
+EXT_NAME="sigma"
 TARGET_PATH="$HOME/.pi/agent/extensions/$EXT_NAME"
 
 if [ -L "$TARGET_PATH" ]; then

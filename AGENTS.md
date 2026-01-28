@@ -9,7 +9,7 @@ This is a **monorepo** containing extensions for the [Pi coding agent](https://g
 ```
 pi-extensions/
 ├── extensions/
-│   ├── ask/            # Better questionnaire tool
+│   ├── sigma/          # Better questionnaire tool
 │   ├── delta/          # Persistent memory (KV, episodic, notes)
 │   ├── epsilon/        # Task management
 │   ├── mu/             # Output condensation
@@ -185,7 +185,7 @@ pi  # Start Pi agent, test extension features
 
 ```
 ~/.pi/agent/extensions/
-├── ask -> /path/to/extensions/ask/dist
+├── sigma -> /path/to/extensions/sigma/dist
 ├── delta -> /path/to/extensions/delta/dist
 ├── epsilon -> /path/to/extensions/epsilon/dist
 ├── mu -> /path/to/extensions/mu/dist
