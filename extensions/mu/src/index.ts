@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { appendFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import {
   type AgentEndEvent,
@@ -6,6 +8,7 @@ import {
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
+  type SessionShutdownEvent,
   type SessionStartEvent,
   type Theme,
   type ThemeColor,
@@ -32,7 +35,34 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
-import { DimmedOverlay } from "shared-tui";
+import {
+  type ToolResultOption,
+  cleanupOldSessions,
+  closeMuDb,
+  loadToolResults,
+  persistToolResult,
+} from "./db.js";
+import { DimmedOverlay } from "./overlay.js";
+
+// =============================================================================
+// DEBUG LOGGING
+// =============================================================================
+const MU_DEBUG = process.env.MU_DEBUG === "1";
+let debugLogPath: string | null = null;
+
+function debugLog(msg: string): void {
+  if (!MU_DEBUG) return;
+  try {
+    if (!debugLogPath) {
+      const baseDir = join(process.env.HOME ?? "/tmp", ".local", "share", "pi-ext-mu");
+      debugLogPath = join(baseDir, "debug.log");
+    }
+    const ts = new Date().toISOString();
+    appendFileSync(debugLogPath, `[${ts}] ${msg}\n`);
+  } catch {
+    // Debug logging must never break anything
+  }
+}
 
 // =============================================================================
 // THEME INTEGRATION
@@ -145,6 +175,8 @@ const MU_CONFIG = {
 } as const;
 
 const MU_TOOL_VIEWER_SHORTCUT = "ctrl+alt+o";
+
+let currentSessionId: string | null = null;
 
 // =============================================================================
 // UTILITIES
@@ -634,18 +666,6 @@ class BoxedToolCard implements Component {
 // =============================================================================
 // TOOL RESULT DETAIL VIEWER
 // =============================================================================
-interface ToolResultOption {
-  key: string;
-  toolName: string;
-  sig: string;
-  label: string;
-  args: Record<string, unknown>;
-  result: unknown;
-  startTime: number;
-  duration?: number;
-  isError: boolean;
-}
-
 const toolResultOptions: ToolResultOption[] = [];
 
 const GRAPHEME_SEGMENTER =
@@ -2011,6 +2031,32 @@ export default function (pi: ExtensionAPI) {
   // Setup UI patching on session start
   pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext) => {
     workingTimer.stop(); // defensive cleanup from any prior session
+
+    // Persistence: set session identity and load prior results
+    currentSessionId = ctx.sessionManager.getSessionId();
+    debugLog(`session_start: sessionId=${currentSessionId}`);
+
+    const persisted = loadToolResults(currentSessionId);
+    debugLog(`session_start: loaded ${persisted.length} persisted results`);
+
+    if (persisted.length > 0) {
+      // Deduplicate: only load results not already in memory (by toolCallId)
+      const existingKeys = new Set(toolResultOptions.map((o) => o.key));
+      for (const opt of persisted) {
+        if (!existingKeys.has(opt.key)) {
+          toolResultOptions.push(opt);
+        }
+      }
+      // Re-cap after merge
+      while (toolResultOptions.length > MU_CONFIG.MAX_TOOL_RESULTS) {
+        toolResultOptions.shift();
+      }
+      debugLog(`session_start: merged → ${toolResultOptions.length} total in memory`);
+    }
+
+    // Clean up old sessions (fire-and-forget, non-blocking)
+    cleanupOldSessions();
+
     setupUIPatching(ctx);
 
     // Enable enhanced model display footer
@@ -2018,6 +2064,32 @@ export default function (pi: ExtensionAPI) {
       enableModelDisplayFooter(ctx);
     }
   });
+
+  // Handle session switch (e.g., /resume command within same Pi process)
+  pi.on(
+    "session_switch",
+    (
+      event: { type: "session_switch"; reason: string; previousSessionFile?: string },
+      ctx: ExtensionContext
+    ) => {
+      const prevSessionId = currentSessionId;
+      currentSessionId = ctx.sessionManager.getSessionId();
+      debugLog(
+        `session_switch: reason=${event.reason} prev=${prevSessionId} new=${currentSessionId}`
+      );
+
+      // Clear in-memory state and reload from new session
+      toolResultOptions.length = 0;
+      const persisted = loadToolResults(currentSessionId);
+      toolResultOptions.push(...persisted);
+
+      // Cap to max
+      while (toolResultOptions.length > MU_CONFIG.MAX_TOOL_RESULTS) {
+        toolResultOptions.shift();
+      }
+      debugLog(`session_switch: loaded ${persisted.length} results from new session`);
+    }
+  );
 
   // Working timer: start on agent_start, stop on agent_end
   pi.on("agent_start", (_event: AgentStartEvent, ctx: ExtensionContext) => {
@@ -2038,6 +2110,13 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // Close DB on session shutdown
+  pi.on("session_shutdown", (_event: SessionShutdownEvent) => {
+    debugLog(`session_shutdown: sessionId=${currentSessionId}`);
+    closeMuDb();
+    currentSessionId = null;
+  });
+
   // When a turn starts (user message sent), set flag for next tool to add leading space
   pi.on("turn_start", () => {
     nextToolNeedsLeadingSpace = true;
@@ -2048,6 +2127,8 @@ export default function (pi: ExtensionAPI) {
     const { toolCallId, toolName, input } = event;
     const args = input as Record<string, unknown>;
     const sig = computeSignature(toolName, args);
+
+    debugLog(`tool_call: toolCallId=${toolCallId} toolName=${toolName}`);
 
     const state: ToolState = {
       toolCallId,
@@ -2066,8 +2147,15 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_result", (event: ToolResultEvent, _ctx: ExtensionContext) => {
     const { toolCallId, isError, content } = event;
+    debugLog(`tool_result: toolCallId=${toolCallId} isError=${isError ?? false}`);
+
     const state = activeToolsById.get(toolCallId);
-    if (!state) return;
+    if (!state) {
+      debugLog(
+        `tool_result: WARNING - no state for toolCallId=${toolCallId}, result not persisted`
+      );
+      return;
+    }
 
     const duration = Date.now() - state.startTime;
     state.duration = duration;
@@ -2075,7 +2163,7 @@ export default function (pi: ExtensionAPI) {
     activeToolsById.delete(toolCallId);
 
     const label = `${state.toolName} ${formatToolArgsPreview(state.toolName, state.args)}`;
-    toolResultOptions.push({
+    const resultOption: ToolResultOption = {
       key: toolCallId,
       toolName: state.toolName,
       sig: state.sig,
@@ -2085,7 +2173,17 @@ export default function (pi: ExtensionAPI) {
       startTime: state.startTime,
       duration,
       isError: isError ?? false,
-    });
+    };
+
+    toolResultOptions.push(resultOption);
+
+    // Persist to disk
+    if (currentSessionId) {
+      debugLog(`tool_result: persisting to session=${currentSessionId}`);
+      persistToolResult(currentSessionId, resultOption);
+    } else {
+      debugLog("tool_result: WARNING - currentSessionId is null, result not persisted");
+    }
 
     if (toolResultOptions.length > MU_CONFIG.MAX_TOOL_RESULTS) {
       toolResultOptions.shift();
