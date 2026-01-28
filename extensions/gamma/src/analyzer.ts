@@ -186,15 +186,7 @@ function parseSystemPrompt(systemPrompt: string): TokenSource[] {
     SECTION_MARKERS.AVAILABLE_SKILLS_END
   );
   if (skillsMatch) {
-    sources.push({
-      id: "skills_available",
-      category: "skills",
-      label: "Available Skills",
-      tokens: countTokens(skillsMatch.content),
-      percent: 0,
-      preview: truncate(skillsMatch.content, 100),
-      content: skillsMatch.content,
-    });
+    sources.push(buildSkillsSource(skillsMatch.content));
     remaining = skillsMatch.remaining;
   }
 
@@ -219,17 +211,9 @@ function parseSystemPrompt(systemPrompt: string): TokenSource[] {
     remaining = functionsMatch.remaining;
   }
 
-  // Remaining is base system prompt
+  // Remaining is base system prompt — decompose into sub-sections
   if (remaining.trim()) {
-    sources.push({
-      id: "system_base",
-      category: "system",
-      label: "Base System Prompt",
-      tokens: countTokens(remaining),
-      percent: 0,
-      preview: truncate(remaining, 100),
-      content: remaining,
-    });
+    sources.push(buildSystemPromptSource(remaining));
   }
 
   return sources;
@@ -250,6 +234,173 @@ function extractSection(
   const remaining = text.slice(0, startIdx) + text.slice(endIdx + endMarker.length);
 
   return { content, remaining };
+}
+
+// =============================================================================
+// SKILLS DECOMPOSITION
+// =============================================================================
+
+/**
+ * Regex to match individual `<skill>` blocks and extract name + description.
+ */
+const SKILL_BLOCK_RE =
+  /<skill>\s*<name>(.*?)<\/name>\s*<description>(.*?)<\/description>[\s\S]*?<\/skill>/g;
+
+/**
+ * Build a skills token source, decomposing into individual skill children.
+ *
+ * If no `<skill>` blocks are parseable, returns a flat source.
+ * Otherwise, returns a parent with per-skill children.
+ */
+function buildSkillsSource(content: string): TokenSource {
+  const totalTokens = countTokens(content);
+
+  const children: TokenSource[] = [];
+
+  // Reset regex state
+  SKILL_BLOCK_RE.lastIndex = 0;
+
+  for (
+    let match = SKILL_BLOCK_RE.exec(content);
+    match !== null;
+    match = SKILL_BLOCK_RE.exec(content)
+  ) {
+    const fullBlock = match[0];
+    const name = match[1].trim();
+    const description = match[2].trim();
+    const tokens = countTokens(fullBlock);
+
+    children.push({
+      id: `skill_${name}`,
+      category: "skills",
+      label: name,
+      tokens,
+      percent: 0,
+      preview: description ? truncate(description, 80) : undefined,
+      content: fullBlock,
+    });
+  }
+
+  // No parseable skills → flat source
+  if (children.length === 0) {
+    return {
+      id: "skills_available",
+      category: "skills",
+      label: "Available Skills",
+      tokens: totalTokens,
+      percent: 0,
+      preview: truncate(content, 100),
+      content,
+    };
+  }
+
+  // Sort children by token count descending
+  children.sort((a, b) => b.tokens - a.tokens);
+
+  return {
+    id: "skills_available",
+    category: "skills",
+    label: `Available Skills (${children.length} skills)`,
+    tokens: totalTokens,
+    percent: 0,
+    preview: truncate(content, 100),
+    children,
+  };
+}
+
+// =============================================================================
+// SYSTEM PROMPT DECOMPOSITION
+// =============================================================================
+
+/**
+ * Regex matching Pi-injected file section headers: `## /absolute/path/to/file`
+ * Used to split the base system prompt into sub-sections.
+ */
+const FILE_SECTION_RE = /^## \//m;
+
+/**
+ * Build a system prompt token source, decomposing into sub-sections
+ * based on Pi-injected `## /path/to/file` boundaries.
+ *
+ * If only one section exists, returns a flat source (no children).
+ * If multiple sections exist, returns a parent with children.
+ */
+function buildSystemPromptSource(text: string): TokenSource {
+  const totalTokens = countTokens(text);
+
+  // Split on lines starting with "## /" (Pi-injected file sections)
+  const chunks = text.split(/\n(?=## \/)/);
+
+  // If no split points (single chunk), return flat source
+  if (chunks.length <= 1) {
+    return {
+      id: "system_base",
+      category: "system",
+      label: "Base System Prompt",
+      tokens: totalTokens,
+      percent: 0,
+      preview: truncate(text, 100),
+      content: text,
+    };
+  }
+
+  // Multiple sections — build parent with children
+  const children: TokenSource[] = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    if (!chunk.trim()) continue;
+
+    const tokens = countTokens(chunk);
+    let label: string;
+    let id: string;
+
+    if (i === 0 && !FILE_SECTION_RE.test(chunk)) {
+      // First chunk before any ## /path — core Pi instructions
+      label = "Core Instructions";
+      id = "system_core";
+    } else {
+      // File section: extract label from "## /path/to/file" header line
+      const firstLine = chunk.split("\n")[0];
+      label = extractFileLabel(firstLine);
+      id = `system_file_${i}`;
+    }
+
+    children.push({
+      id,
+      category: "system",
+      label,
+      tokens,
+      percent: 0,
+      preview: truncate(chunk, 100),
+      content: chunk,
+    });
+  }
+
+  // Sort children by token count descending
+  children.sort((a, b) => b.tokens - a.tokens);
+
+  return {
+    id: "system_base",
+    category: "system",
+    label: `Base System Prompt (${children.length} sections)`,
+    tokens: totalTokens,
+    percent: 0,
+    preview: truncate(text, 100),
+    children,
+  };
+}
+
+/**
+ * Extract a short display label from a Pi-injected file header line.
+ * Input:  "## /Users/sercans/.pi/agent/AGENTS.md"
+ * Output: "agent/AGENTS.md"
+ */
+function extractFileLabel(headerLine: string): string {
+  const path = headerLine.replace(/^## /, "").trim();
+  const parts = path.split("/").filter(Boolean);
+  // Take last 2 meaningful segments for readability
+  return parts.slice(-2).join("/");
 }
 
 // =============================================================================
