@@ -184,6 +184,53 @@ let currentSessionId: string | null = null;
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);
 
+/** Detect language from file extension for syntax highlighting. */
+const detectLanguageFromPath = (filePath: string): string | null => {
+  if (!filePath) return null;
+  const ext = filePath.split(".").pop()?.toLowerCase();
+  if (!ext) return null;
+
+  const extToLang: Record<string, string> = {
+    ts: "typescript",
+    tsx: "tsx",
+    js: "javascript",
+    jsx: "jsx",
+    py: "python",
+    rb: "ruby",
+    rs: "rust",
+    go: "go",
+    java: "java",
+    kt: "kotlin",
+    scala: "scala",
+    c: "c",
+    cpp: "cpp",
+    h: "c",
+    hpp: "cpp",
+    cs: "csharp",
+    fs: "fsharp",
+    swift: "swift",
+    m: "objectivec",
+    sh: "bash",
+    bash: "bash",
+    zsh: "bash",
+    json: "json",
+    yaml: "yaml",
+    yml: "yaml",
+    toml: "toml",
+    xml: "xml",
+    html: "html",
+    css: "css",
+    scss: "scss",
+    md: "markdown",
+    sql: "sql",
+    graphql: "graphql",
+    dockerfile: "dockerfile",
+    makefile: "makefile",
+  };
+
+  return extToLang[ext] ?? null;
+};
+
 /** Safety clamp: ensure every line in array fits within maxWidth. */
 const clampLines = (lines: string[], maxWidth: number): string[] =>
   lines.map((l) => (visibleWidth(l) > maxWidth ? truncateToWidth(l, maxWidth) : l));
@@ -700,6 +747,10 @@ class ToolResultDetailViewer implements Component {
   private allLines: string[] = [];
   private tui: TUI;
   private lastWidth = 0;
+  // Render cache
+  private renderCache: string[] = [];
+  private renderCacheScroll = -1;
+  private renderCacheWidth = -1;
 
   constructor(option: ToolResultOption, tui: TUI) {
     this.option = option;
@@ -709,26 +760,67 @@ class ToolResultDetailViewer implements Component {
   /** Available viewport height (lines for scrollable content). */
   private viewportHeight(): number {
     // Reserve: scroll-up indicator (1) + scroll-down indicator (1) + help line (1) + blank (1) = 4
-    return Math.max(5, Math.floor(this.tui.terminal.rows * 0.85) - 4);
+    return Math.max(8, Math.floor(this.tui.terminal.rows * 0.9) - 4);
   }
 
   private buildLines(width: number): void {
     const { toolName, args, result, duration, isError } = this.option;
     const out: string[] = [];
+    const innerW = width - 4; // Indent for content
 
-    const header = `${mu("warning", "─")} ${mu("warning", toolName)} ${mu("dim", "─".repeat(Math.max(0, width - toolName.length - 4)))}`;
-    out.push(header);
+    // ═══ HEADER ═══
+    const icon = TOOL_ICONS[toolName] ?? "⚙";
+    const dur = duration !== undefined ? ` ${mu("dim", `(${(duration / 1000).toFixed(2)}s)`)}` : "";
+    const statusIcon = isError ? mu("error", "✗") : mu("success", "✓");
+    out.push(`${statusIcon} ${mu("info", icon)} ${mu("warning", toolName)}${dur}`);
+    out.push(mu("dim", "─".repeat(width)));
 
-    for (const [k, v] of Object.entries(args)) {
-      const val = typeof v === "string" ? preview(v, 80) : JSON.stringify(v);
-      out.push(truncateToWidth(`  ${mu("info", k)}: ${mu("text", val)}`, width));
-    }
-
-    if (duration !== undefined) {
-      out.push(`  ${mu("dim", `duration: ${(duration / 1000).toFixed(2)}s`)}`);
+    // ═══ ARGUMENTS ═══
+    out.push(mu("info", "▸ Arguments"));
+    const argEntries = Object.entries(args);
+    if (argEntries.length === 0) {
+      out.push(mu("dim", "  (none)"));
+    } else {
+      for (const [k, v] of argEntries) {
+        const keyLabel = mu("accent", k);
+        if (typeof v === "string") {
+          const lines = v.split("\n");
+          if (lines.length === 1 && v.length <= innerW - k.length - 4) {
+            // Single short line
+            out.push(`  ${keyLabel}: ${mu("text", v)}`);
+          } else {
+            // Multi-line or long: show key, then indented content
+            out.push(`  ${keyLabel}:`);
+            for (const line of lines) {
+              const wrapped = wrapTextWithAnsi(line, innerW);
+              for (const w of wrapped) {
+                out.push(`    ${mu("text", w)}`);
+              }
+            }
+          }
+        } else {
+          // JSON value - pretty print
+          const json = JSON.stringify(v, null, 2);
+          const jsonLines = json.split("\n");
+          if (jsonLines.length === 1) {
+            out.push(`  ${keyLabel}: ${mu("text", json)}`);
+          } else {
+            out.push(`  ${keyLabel}:`);
+            for (const jl of jsonLines) {
+              out.push(`    ${mu("text", jl)}`);
+            }
+          }
+        }
+      }
     }
 
     out.push("");
+
+    // ═══ RESULT ═══
+    const resultColor: MuColor = isError ? "error" : "success";
+    const resultLabel = isError ? "▸ Error" : "▸ Result";
+    out.push(mu(resultColor, resultLabel));
+    out.push(mu("dim", "─".repeat(width)));
 
     const content = Array.isArray((result as { content?: unknown[] })?.content)
       ? (result as { content: unknown[] }).content
@@ -738,13 +830,34 @@ class ToolResultDetailViewer implements Component {
       .map((c) => (c as { text?: string }).text ?? "")
       .join("\n");
 
-    const resultColor: MuColor = isError ? "error" : "success";
-    out.push(mu(resultColor, isError ? "─ Error ─" : "─ Result ─"));
+    if (!text.trim()) {
+      out.push(mu("dim", "  (empty)"));
+    } else {
+      // Detect language from file path for syntax highlighting
+      const filePath = typeof args.path === "string" ? args.path : "";
+      const lang = detectLanguageFromPath(filePath);
 
-    for (const line of text.split("\n")) {
-      const wrapped = wrapTextWithAnsi(line, width - 2);
-      for (const w of wrapped) {
-        out.push(`  ${w}`);
+      if (lang) {
+        // Syntax highlighted
+        const highlighted = highlightCode(text, lang);
+        for (const hl of highlighted) {
+          const wrapped = wrapTextWithAnsi(hl, innerW);
+          for (const w of wrapped) {
+            out.push(`  ${w}`);
+          }
+        }
+      } else {
+        // Plain text
+        for (const line of text.split("\n")) {
+          const wrapped = wrapTextWithAnsi(line, innerW);
+          if (wrapped.length === 0) {
+            out.push("");
+          } else {
+            for (const w of wrapped) {
+              out.push(`  ${w}`);
+            }
+          }
+        }
       }
     }
 
@@ -756,11 +869,17 @@ class ToolResultDetailViewer implements Component {
     if (width !== this.lastWidth) {
       this.buildLines(width);
       this.lastWidth = width;
+      this.renderCacheScroll = -1; // Invalidate render cache
     }
 
     const vh = this.viewportHeight();
     const maxScroll = Math.max(0, this.allLines.length - vh);
     this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
+
+    // Return cached render if scroll/width unchanged
+    if (this.scrollOffset === this.renderCacheScroll && width === this.renderCacheWidth) {
+      return this.renderCache;
+    }
 
     const visible = this.allLines.slice(this.scrollOffset, this.scrollOffset + vh);
     const out: string[] = [];
@@ -786,8 +905,16 @@ class ToolResultDetailViewer implements Component {
 
     // Help
     out.push(
-      applyCardBg(mu("dim", "↑↓/jk C-n/C-p scroll  pgup/pgdn page  g/G top/end  h back"), width)
+      applyCardBg(
+        mu("dim", "  ↑↓/jk/C-n/C-p scroll • pgup/pgdn page • g/G top/end • h back"),
+        width
+      )
     );
+
+    // Cache the result
+    this.renderCache = out;
+    this.renderCacheScroll = this.scrollOffset;
+    this.renderCacheWidth = width;
 
     return out;
   }
@@ -827,7 +954,7 @@ class ToolResultDetailViewer implements Component {
 }
 
 // =============================================================================
-// MU TOOLS OVERLAY (Unified List + Preview)
+// MU TOOLS OVERLAY (Two-Pane: List + Preview)
 // =============================================================================
 class MuToolsOverlay implements Component {
   private options: ToolResultOption[];
@@ -835,7 +962,14 @@ class MuToolsOverlay implements Component {
   private tui: TUI;
   private onSelect: (opt: ToolResultOption) => void;
   private onClose: () => void;
-  private scrollOffset = 0;
+  private listScrollOffset = 0;
+  private previewScrollOffset = 0;
+  private previewLines: string[] = [];
+  private previewCacheKey: string | null = null;
+  private previewCacheWidth = 0;
+  // Render cache
+  private renderCache: string[] = [];
+  private renderCacheState = "";
 
   constructor(
     options: ToolResultOption[],
@@ -849,103 +983,286 @@ class MuToolsOverlay implements Component {
     this.onClose = onClose;
   }
 
-  /** Max visible list items — scales with terminal height. */
-  private listHeight(): number {
-    // Chrome: title (1) + divider (1) + preview pane (~6) + divider (1) + help (1) = 10
-    return Math.max(3, Math.floor(this.tui.terminal.rows * 0.85) - 10);
+  /** Available height for list content (excluding title and help). */
+  private contentHeight(): number {
+    // Height: title (1) + divider (1) + content + divider (1) + help (1) = 4 overhead
+    return Math.max(8, Math.floor(this.tui.terminal.rows * 0.9) - 4);
+  }
+
+  /** Build preview content for selected tool. */
+  private buildPreview(selected: ToolResultOption, width: number): string[] {
+    const lines: string[] = [];
+    const innerW = width - 4;
+
+    // ═══ HEADER ═══
+    const icon = TOOL_ICONS[selected.toolName] ?? "⚙";
+    const dur =
+      selected.duration !== undefined
+        ? ` ${mu("dim", `(${(selected.duration / 1000).toFixed(2)}s)`)}`
+        : "";
+    const statusIcon = selected.isError ? mu("error", "✗") : mu("success", "✓");
+    lines.push(`${statusIcon} ${mu("info", icon)} ${mu("warning", selected.toolName)}${dur}`);
+    lines.push(mu("dim", "─".repeat(width)));
+
+    // ═══ ARGUMENTS ═══
+    const argEntries = Object.entries(selected.args);
+    if (argEntries.length > 0) {
+      for (const [k, v] of argEntries) {
+        const keyLabel = mu("accent", k);
+        if (typeof v === "string") {
+          const valLines = v.split("\n");
+          const firstLineMaxW = innerW - k.length - 2;
+          if (valLines.length === 1 && v.length <= firstLineMaxW) {
+            // Short single line - inline
+            lines.push(`${keyLabel}: ${mu("text", v)}`);
+          } else {
+            // Multi-line or long - wrap with indent
+            lines.push(`${keyLabel}:`);
+            for (const vl of valLines) {
+              const wrapped = wrapTextWithAnsi(vl, innerW);
+              for (const w of wrapped) {
+                lines.push(`  ${mu("text", w)}`);
+              }
+            }
+          }
+        } else {
+          const json = JSON.stringify(v, null, 2);
+          const jsonLines = json.split("\n");
+          if (jsonLines.length === 1) {
+            lines.push(`${keyLabel}: ${mu("text", json)}`);
+          } else {
+            lines.push(`${keyLabel}:`);
+            for (const jl of jsonLines) {
+              lines.push(`  ${mu("text", jl)}`);
+            }
+          }
+        }
+      }
+    } else {
+      lines.push(mu("dim", "(no args)"));
+    }
+
+    lines.push("");
+
+    // ═══ RESULT ═══
+    const resultColor: MuColor = selected.isError ? "error" : "success";
+    const resultLabel = selected.isError ? "▸ Error" : "▸ Result";
+    lines.push(mu(resultColor, resultLabel));
+
+    const resultText = extractResultText(selected.result);
+    if (resultText) {
+      // Detect language from file path in args (for Read, Write, Edit, Grep)
+      const filePath = typeof selected.args.path === "string" ? selected.args.path : "";
+      const lang = detectLanguageFromPath(filePath);
+
+      if (lang) {
+        // Use syntax highlighting for recognized file types
+        const highlighted = highlightCode(resultText, lang);
+        for (const hl of highlighted) {
+          // Wrap long lines
+          const wrapped = wrapTextWithAnsi(hl, width - 2);
+          for (const w of wrapped) {
+            lines.push(`  ${w}`);
+          }
+        }
+      } else {
+        // Plain text wrapping for unknown types
+        const resultLines = resultText.split("\n");
+        for (const rl of resultLines) {
+          const wrapped = wrapTextWithAnsi(rl, width - 2);
+          if (wrapped.length === 0) {
+            lines.push("");
+          } else {
+            for (const w of wrapped) {
+              lines.push(`  ${w}`);
+            }
+          }
+        }
+      }
+    } else {
+      lines.push(mu("dim", "(empty)"));
+    }
+
+    // Duration footer
+    if (selected.duration !== undefined) {
+      lines.push("");
+      lines.push(mu("dim", `⏱ ${(selected.duration / 1000).toFixed(2)}s`));
+    }
+
+    return lines;
   }
 
   render(width: number): string[] {
-    const raw: string[] = [];
     const innerW = width - 2;
-
-    // Title with count
     const count = this.options.length;
+    const contentH = this.contentHeight();
+
+    // Check render cache - key is combination of all state that affects output
+    const cacheState = `${width}:${this.selectedIndex}:${this.listScrollOffset}:${this.previewScrollOffset}:${this.previewCacheKey}`;
+    if (cacheState === this.renderCacheState && this.renderCache.length > 0) {
+      return this.renderCache;
+    }
+
+    // Column layout: 45% left (list), 2 chars separator, 53% right (preview)
+    const leftW = Math.floor(innerW * 0.45);
+    const rightW = innerW - leftW - 2; // -2 for separator
+    const separator = mu("dim", "│");
+
+    const result: string[] = [];
+
+    // ─── Title Row ───
     const titleText = `μ Tools (${count})`;
-    const titleLine = `${mu("warning", titleText)} ${mu("info", "─".repeat(Math.max(0, innerW - titleText.length - 1)))}`;
-    raw.push(titleLine);
+    const titlePad = "─".repeat(Math.max(0, innerW - visibleWidth(titleText) - 1));
+    result.push(applyCardBg(`${mu("warning", titleText)} ${mu("info", titlePad)}`, width));
+
+    // ─── Divider ───
+    const leftDivider = "─".repeat(leftW);
+    const rightDivider = "─".repeat(rightW);
+    result.push(
+      applyCardBg(`${mu("dim", leftDivider)}${separator}${mu("dim", rightDivider)}`, width)
+    );
 
     if (count === 0) {
-      raw.push(mu("dim", "No tool results yet"));
-    } else {
-      const visibleCount = Math.min(this.listHeight(), count);
-      const maxScroll = Math.max(0, count - visibleCount);
-      this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
-      if (this.selectedIndex < this.scrollOffset) {
-        this.scrollOffset = this.selectedIndex;
-      } else if (this.selectedIndex >= this.scrollOffset + visibleCount) {
-        this.scrollOffset = this.selectedIndex - visibleCount + 1;
+      // Empty state: show message only once, then empty rows
+      const emptyMsg = mu("dim", "No tool results yet");
+      const emptyLine = `${emptyMsg}${" ".repeat(Math.max(0, leftW - visibleWidth(emptyMsg)))}${separator}${" ".repeat(rightW)}`;
+      const blankLine = `${" ".repeat(leftW)}${separator}${" ".repeat(rightW)}`;
+      for (let i = 0; i < contentH; i++) {
+        result.push(applyCardBg(i === 0 ? emptyLine : blankLine, width));
       }
+    } else {
+      // Build left pane (list) with scroll management
+      const leftLines: string[] = [];
+      const visibleCount = contentH;
+      const maxScroll = Math.max(0, count - visibleCount);
+      this.listScrollOffset = Math.min(this.listScrollOffset, maxScroll);
 
-      // Scroll-up indicator
-      if (this.scrollOffset > 0) {
-        raw.push(mu("dim", `  ↑ ${this.scrollOffset} more`));
+      if (this.selectedIndex < this.listScrollOffset) {
+        this.listScrollOffset = this.selectedIndex;
+      } else if (this.selectedIndex >= this.listScrollOffset + visibleCount) {
+        this.listScrollOffset = this.selectedIndex - visibleCount + 1;
       }
 
       for (let i = 0; i < visibleCount; i++) {
-        const idx = this.scrollOffset + i;
-        const opt = this.options[idx];
-        if (!opt) continue;
+        const idx = this.listScrollOffset + i;
+        if (idx >= count) {
+          leftLines.push("");
+          continue;
+        }
 
+        const opt = this.options[idx];
         const isSelected = idx === this.selectedIndex;
         const pointer = isSelected ? mu("accent", "▸") : " ";
         const status = opt.isError ? STATUS.failed : STATUS.success;
         const statusSym = mu(status.color, status.sym);
         const icon = TOOL_ICONS[opt.toolName] ?? "⚙";
 
+        // Format: "▸ icon toolName args... 2.3s"
         const dur = opt.duration !== undefined ? `${(opt.duration / 1000).toFixed(1)}s` : "";
-        const durStr = mu("dim", dur.padStart(6));
+        const durStr = mu("dim", dur.padStart(5));
+        const durLen = visibleWidth(durStr);
 
-        const label = truncateToWidth(opt.label, innerW - 14);
-        const line = `${pointer}${statusSym} ${mu("info", icon)} ${label}${" ".repeat(Math.max(0, innerW - visibleWidth(label) - 12))}${durStr}`;
-        raw.push(line);
+        // Tool name + args, truncated to fit
+        const maxLabelW = leftW - 3 - durLen - 2; // pointer(1) + statusSym(1) + icon(1) + space(2) + dur
+        const toolNameStr = mu("text", opt.toolName);
+        const toolNameLen = visibleWidth(opt.toolName);
+
+        // Extract args snippet
+        const argsStr = formatToolArgsPreview(opt.toolName, opt.args);
+        const maxArgsW = maxLabelW - toolNameLen - 1;
+        const argsTrunc = maxArgsW > 0 ? truncateToWidth(mu("dim", argsStr), maxArgsW) : "";
+
+        const content = `${pointer}${statusSym} ${mu("info", icon)} ${toolNameStr} ${argsTrunc}`;
+        const contentLen = visibleWidth(content);
+        const pad = " ".repeat(Math.max(0, leftW - contentLen - durLen - 1));
+        let line = `${content}${pad}${durStr}`;
+
+        // Highlight selected row
+        if (isSelected) {
+          const SELECTED_BG = "\x1b[48;2;30;35;45m";
+          const RESET = "\x1b[0m";
+          const vis = visibleWidth(line);
+          const padded = vis < leftW ? line + " ".repeat(leftW - vis) : line;
+          line = SELECTED_BG + padded.replaceAll("\x1b[0m", `\x1b[0m${SELECTED_BG}`) + RESET;
+        } else {
+          // Pad to full width
+          const vis = visibleWidth(line);
+          if (vis < leftW) line += " ".repeat(leftW - vis);
+        }
+
+        leftLines.push(line);
       }
 
-      // Scroll-down indicator
-      const remaining = count - this.scrollOffset - visibleCount;
-      if (remaining > 0) {
-        raw.push(mu("dim", `  ↓ ${remaining} more`));
+      // Build right pane (preview) with scroll management and caching
+      const selected = this.options[this.selectedIndex];
+      if (selected) {
+        const cacheKey = selected.key;
+        if (cacheKey !== this.previewCacheKey || rightW !== this.previewCacheWidth) {
+          this.previewLines = this.buildPreview(selected, rightW);
+          this.previewCacheKey = cacheKey;
+          this.previewCacheWidth = rightW;
+        }
+      } else {
+        this.previewLines = [];
+        this.previewCacheKey = null;
+      }
+
+      const previewMaxScroll = Math.max(0, this.previewLines.length - contentH);
+      this.previewScrollOffset = Math.min(this.previewScrollOffset, previewMaxScroll);
+
+      const visiblePreview = this.previewLines.slice(
+        this.previewScrollOffset,
+        this.previewScrollOffset + contentH
+      );
+
+      // Add scroll indicators to preview
+      const hasPreviewScrollUp = this.previewScrollOffset > 0;
+      const hasPreviewScrollDown = this.previewScrollOffset < previewMaxScroll;
+
+      // Combine left + right for each row
+      for (let i = 0; i < contentH; i++) {
+        const leftLine = leftLines[i] ?? " ".repeat(leftW);
+        let rightLine = visiblePreview[i] ?? "";
+
+        // Add scroll indicators to preview
+        if (i === 0 && hasPreviewScrollUp) {
+          const indicator = mu("dim", ` ↑ ${this.previewScrollOffset} more`);
+          rightLine = indicator;
+        } else if (i === contentH - 1 && hasPreviewScrollDown) {
+          const remaining = this.previewLines.length - this.previewScrollOffset - contentH;
+          const indicator = mu("dim", ` ↓ ${remaining} more`);
+          rightLine = indicator;
+        }
+
+        // Pad right line to full width
+        const rightVis = visibleWidth(rightLine);
+        const rightPadded =
+          rightVis < rightW
+            ? rightLine + " ".repeat(rightW - rightVis)
+            : truncateToWidth(rightLine, rightW);
+
+        const combined = `${leftLine}${separator}${rightPadded}`;
+        result.push(applyCardBg(combined, width));
       }
     }
 
-    raw.push(mu("info", "─".repeat(innerW)));
+    // ─── Bottom Divider ───
+    result.push(applyCardBg(mu("dim", "─".repeat(innerW)), width));
 
-    // Preview pane: args + result snippet
-    const selected = this.options[this.selectedIndex];
-    if (selected) {
-      const args = Object.entries(selected.args).slice(0, 3);
-      for (const [k, v] of args) {
-        const val = typeof v === "string" ? preview(v, innerW - k.length - 4) : JSON.stringify(v);
-        raw.push(truncateToWidth(`${mu("dim", k)}: ${mu("text", val)}`, innerW));
-      }
-      if (args.length === 0) {
-        raw.push(mu("dim", "(no args)"));
-      }
+    // ─── Help Line ───
+    const hasListScroll = count > contentH;
+    const hasPreviewScroll = this.previewLines.length > contentH;
+    let help = "  ";
+    if (hasListScroll) help += "↑↓/jk list • ";
+    if (hasPreviewScroll) help += "J/K preview • ";
+    help += "l/enter detail • g/G top/end • h/esc close";
+    result.push(applyCardBg(mu("dim", help), width));
 
-      // Result snippet
-      const resultText = extractResultText(selected.result);
-      if (resultText) {
-        raw.push("");
-        const snippetLines = resultText
-          .split("\n")
-          .filter((l: string) => l.trim())
-          .slice(0, 3);
-        for (const sl of snippetLines) {
-          raw.push(truncateToWidth(`  ${mu("dim", sl)}`, innerW));
-        }
-        const totalLines = resultText.split("\n").length;
-        if (totalLines > 3) {
-          raw.push(mu("dim", `  … ${totalLines - 3} more lines`));
-        }
-      }
-    } else {
-      raw.push("");
-    }
+    // Cache the result
+    this.renderCache = result;
+    this.renderCacheState = cacheState;
 
-    raw.push(mu("info", "─".repeat(innerW)));
-    raw.push(mu("dim", "↑↓/jk/C-n/C-p nav  l view  pgup/pgdn page  g/G top/end  h/esc close"));
-
-    return raw.map((line) => applyCardBg(line, width));
+    return result;
   }
 
   handleInput(key: KeyId): boolean {
@@ -953,38 +1270,72 @@ class MuToolsOverlay implements Component {
       this.onClose();
       return true;
     }
+
+    // List navigation (left pane)
     if (matchesKey(key, "down") || matchesKey(key, "j") || matchesKey(key, "ctrl+n")) {
+      const prevIndex = this.selectedIndex;
       this.selectedIndex = Math.min(this.selectedIndex + 1, this.options.length - 1);
+      if (prevIndex !== this.selectedIndex) {
+        this.previewScrollOffset = 0; // Reset preview scroll on selection change
+      }
       return true;
     }
     if (matchesKey(key, "up") || matchesKey(key, "k") || matchesKey(key, "ctrl+p")) {
+      const prevIndex = this.selectedIndex;
       this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+      if (prevIndex !== this.selectedIndex) {
+        this.previewScrollOffset = 0; // Reset preview scroll on selection change
+      }
       return true;
     }
     if (matchesKey(key, "pageDown") || matchesKey(key, "ctrl+d")) {
-      const page = this.listHeight();
+      const prevIndex = this.selectedIndex;
+      const page = this.contentHeight();
       this.selectedIndex = Math.min(this.selectedIndex + page, this.options.length - 1);
+      if (prevIndex !== this.selectedIndex) {
+        this.previewScrollOffset = 0;
+      }
       return true;
     }
     if (matchesKey(key, "pageUp") || matchesKey(key, "ctrl+u")) {
-      const page = this.listHeight();
+      const prevIndex = this.selectedIndex;
+      const page = this.contentHeight();
       this.selectedIndex = Math.max(0, this.selectedIndex - page);
+      if (prevIndex !== this.selectedIndex) {
+        this.previewScrollOffset = 0;
+      }
       return true;
     }
     if (matchesKey(key, "g")) {
       this.selectedIndex = 0;
-      this.scrollOffset = 0;
+      this.listScrollOffset = 0;
+      this.previewScrollOffset = 0;
       return true;
     }
     if (matchesKey(key, "shift+g")) {
       this.selectedIndex = this.options.length - 1;
+      this.previewScrollOffset = 0;
       return true;
     }
+
+    // Preview navigation (right pane) - use Shift+J/K for preview scroll
+    if (matchesKey(key, "shift+j")) {
+      const maxScroll = Math.max(0, this.previewLines.length - this.contentHeight());
+      this.previewScrollOffset = Math.min(this.previewScrollOffset + 1, maxScroll);
+      return true;
+    }
+    if (matchesKey(key, "shift+k")) {
+      this.previewScrollOffset = Math.max(0, this.previewScrollOffset - 1);
+      return true;
+    }
+
+    // Open detail view
     if (matchesKey(key, "enter") || matchesKey(key, "l")) {
       const opt = this.options[this.selectedIndex];
       if (opt) this.onSelect(opt);
       return true;
     }
+
     return false;
   }
 
