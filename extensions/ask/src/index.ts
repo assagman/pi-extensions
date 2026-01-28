@@ -16,7 +16,12 @@ import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { DimmedOverlay } from "shared-tui";
 import { createAskUI } from "./ask-ui.js";
-import { errorResult, formatAnswerLines, normalizeQuestions } from "./helpers.js";
+import {
+  errorResult,
+  extractLastAssistantMessage,
+  formatAnswerLines,
+  normalizeQuestions,
+} from "./helpers.js";
 import type { AskResult, Question } from "./types.js";
 
 // ─── Schema ─────────────────────────────────────────────────────────────────
@@ -89,9 +94,13 @@ const askExtension: ExtensionFactory = (pi: ExtensionAPI) => {
 
       const questions = normalizeQuestions(params.questions);
 
+      // Extract last assistant message for context
+      const branch = ctx.sessionManager.getBranch();
+      const contextText = extractLastAssistantMessage(branch);
+
       const result = await DimmedOverlay.show<AskResult>(
         ctx.ui,
-        (tui, theme, done) => createAskUI(tui, theme, done, questions),
+        (tui, theme, done) => createAskUI(tui, theme, done, questions, contextText),
         {
           scrim: { stars: true },
           dialog: { width: "72%", maxHeight: "88%", glow: { enabled: true } },

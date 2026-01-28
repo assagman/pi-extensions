@@ -80,11 +80,19 @@ export function createAskUI<
     bg: (...a: any[]) => string;
     bold: (s: string) => string;
   },
->(tui: TUI, theme: T, done: (result: AskResult) => void, questions: Question[]) {
+>(
+  tui: TUI,
+  theme: T,
+  done: (result: AskResult) => void,
+  questions: Question[],
+  contextText?: string
+) {
   const isMulti = questions.length > 1;
   const totalTabs = questions.length + 1; // questions + Submit
+  const hasContext = !!contextText;
 
   // ── State ────────────────────────────────────────────────────────────
+  let viewMode: "question" | "context" = "question";
   let currentTab = 0;
   let optionIndex = 0;
   let inputMode = false;
@@ -227,9 +235,26 @@ export function createAskUI<
     return false;
   }
 
+  function handleContextFlip(data: string): boolean {
+    if (!hasContext) return false;
+    if (matchesKey(data, Key.tab)) {
+      if (viewMode === "question") {
+        viewMode = "context";
+      } else {
+        viewMode = "question";
+      }
+      scrollOffset = 0;
+      manualScroll = false;
+      refresh();
+      return true;
+    }
+    return false;
+  }
+
   function handleTabNavigation(data: string): boolean {
     if (!isMulti) return false;
-    if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
+    // Use arrow keys only for multi-question tab navigation (Tab is for context flip)
+    if (matchesKey(data, Key.right)) {
       currentTab = (currentTab + 1) % totalTabs;
       optionIndex = 0;
       scrollOffset = 0;
@@ -237,7 +262,7 @@ export function createAskUI<
       refresh();
       return true;
     }
-    if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+    if (matchesKey(data, Key.left)) {
       currentTab = (currentTab - 1 + totalTabs) % totalTabs;
       optionIndex = 0;
       scrollOffset = 0;
@@ -315,6 +340,17 @@ export function createAskUI<
   }
 
   function handleInput(data: string) {
+    // Context flip (Tab) has highest priority
+    if (handleContextFlip(data)) return;
+
+    // In context view, only allow scroll and escape
+    if (viewMode === "context") {
+      if (handleScrollKeys(data)) return;
+      handleEscapeKey(data);
+      return;
+    }
+
+    // Question view: normal input handling
     if (handleEditorInput(data)) return;
     if (handleScrollKeys(data)) return;
     if (handleTabNavigation(data)) return;
@@ -379,9 +415,9 @@ export function createAskUI<
     );
   }
 
-  /** Banner line: │ ？ Label │ with accent-tinted bg. */
-  function bannerCardLine(label: string, innerW: number, bcName: string): string {
-    const text = ` ？ ${theme.bold(label)}`;
+  /** Banner line: │ icon Label │ with accent-tinted bg. */
+  function bannerCardLine(label: string, icon: string, innerW: number, bcName: string): string {
+    const text = ` ${icon} ${theme.bold(label)}`;
     const padded = padRight(text, innerW);
     const leftBorder = applyBg(theme.fg(bcName, "│"), CARD_BG);
     const rightBorder = applyBg(theme.fg(bcName, "│"), CARD_BG);
@@ -587,34 +623,71 @@ export function createAskUI<
 
     let help: string;
 
-    if (inputMode) {
+    if (viewMode === "context") {
+      // Context view: scroll + tab back + escape
+      help = [
+        `${cap("j/k")} ${lbl("scroll")}`,
+        `${cap("Tab")} ${lbl("back to question")}`,
+        `${cap("Esc")} ${lbl("cancel")}`,
+      ].join("  ");
+    } else if (inputMode) {
       help = `${cap("⏎")} ${lbl("submit")}  ${cap("Esc")} ${lbl("cancel")}`;
     } else if (currentTab === questions.length) {
-      help = [
+      const parts = [
         `${cap("⏎")} ${lbl("submit")}`,
         `${cap("j/k")} ${lbl("scroll")}`,
-        `${cap("Tab")} ${lbl("switch")}`,
+        `${cap("←/→")} ${lbl("switch")}`,
         `${cap("Esc")} ${lbl("cancel")}`,
-      ].join("  ");
+      ];
+      if (hasContext) parts.splice(3, 0, `${cap("Tab")} ${lbl("context")}`);
+      help = parts.join("  ");
     } else if (isMulti) {
-      help = [
+      const parts = [
         `${cap("C-n/p")} ${lbl("navigate")}`,
         `${cap("j/k")} ${lbl("scroll")}`,
         `${cap("0-9")} ${lbl("pick")}`,
         `${cap("⏎")} ${lbl("select")}`,
-        `${cap("Tab")} ${lbl("switch")}`,
-      ].join("  ");
+        `${cap("←/→")} ${lbl("switch")}`,
+      ];
+      if (hasContext) parts.push(`${cap("Tab")} ${lbl("context")}`);
+      help = parts.join("  ");
     } else {
-      help = [
+      const parts = [
         `${cap("C-n/p")} ${lbl("navigate")}`,
         `${cap("j/k")} ${lbl("scroll")}`,
         `${cap("0-9")} ${lbl("pick")}`,
         `${cap("⏎")} ${lbl("select")}`,
         `${cap("Esc")} ${lbl("cancel")}`,
-      ].join("  ");
+      ];
+      if (hasContext) parts.splice(4, 0, `${cap("Tab")} ${lbl("context")}`);
+      help = parts.join("  ");
     }
 
     return [" ".repeat(PAD) + help];
+  }
+
+  /** Render context view: full scrollable assistant message */
+  function renderContextView(innerW: number): { lines: string[]; focusLine: number } {
+    const lines: string[] = [];
+
+    if (!contextText) {
+      lines.push(" ".repeat(PAD) + theme.fg("dim", "(No context available)"));
+      return { lines, focusLine: 0 };
+    }
+
+    // Word-wrap context text
+    const usable = innerW - PAD * 2;
+    if (usable <= 10) {
+      lines.push(" ".repeat(PAD) + theme.fg("text", contextText));
+      return { lines, focusLine: 0 };
+    }
+
+    const wrapped = wrapTextWithAnsi(contextText, usable);
+    for (const line of wrapped) {
+      lines.push(" ".repeat(PAD) + theme.fg("text", line));
+    }
+
+    return { lines, focusLine: 0 };
   }
 
   // ── Main render ──────────────────────────────────────────────────────
@@ -630,36 +703,46 @@ export function createAskUI<
     const body: string[] = [];
     let focusLine = 0;
 
-    // Tab bar (multi-question only)
-    if (isMulti) {
+    // Context view: render assistant message
+    if (viewMode === "context") {
       body.push(""); // spacer
-      body.push(...renderTabBar(innerW));
+      const { lines: contextLines, focusLine: ctxFocus } = renderContextView(innerW);
+      body.push(...contextLines);
+      focusLine = ctxFocus;
+      body.push(""); // spacer before footer
+    } else {
+      // Question view: normal rendering
+      // Tab bar (multi-question only)
+      if (isMulti) {
+        body.push(""); // spacer
+        body.push(...renderTabBar(innerW));
+      }
+
+      body.push(""); // spacer after banner / tabs
+
+      // Main content area
+      if (inputMode && q) {
+        body.push(...renderPrompt(q, innerW));
+        body.push("");
+        const { lines: optLines } = renderOptionsList(opts, innerW);
+        body.push(...optLines);
+        // Focus on editor area (bottom of content)
+        body.push(...renderEditorSection(innerW));
+        focusLine = body.length - 2;
+      } else if (currentTab === questions.length) {
+        body.push(...renderSubmitView(innerW));
+        focusLine = body.length - 1;
+      } else if (q) {
+        body.push(...renderPrompt(q, innerW));
+        body.push("");
+        const optStart = body.length;
+        const { lines: optLines, focusIdx } = renderOptionsList(opts, innerW);
+        body.push(...optLines);
+        focusLine = optStart + focusIdx;
+      }
+
+      body.push(""); // spacer before footer
     }
-
-    body.push(""); // spacer after banner / tabs
-
-    // Main content area
-    if (inputMode && q) {
-      body.push(...renderPrompt(q, innerW));
-      body.push("");
-      const { lines: optLines } = renderOptionsList(opts, innerW);
-      body.push(...optLines);
-      // Focus on editor area (bottom of content)
-      body.push(...renderEditorSection(innerW));
-      focusLine = body.length - 2;
-    } else if (currentTab === questions.length) {
-      body.push(...renderSubmitView(innerW));
-      focusLine = body.length - 1;
-    } else if (q) {
-      body.push(...renderPrompt(q, innerW));
-      body.push("");
-      const optStart = body.length;
-      const { lines: optLines, focusIdx } = renderOptionsList(opts, innerW);
-      body.push(...optLines);
-      focusLine = optStart + focusIdx;
-    }
-
-    body.push(""); // spacer before footer
 
     // ── Compute fixed body viewport height (once) ────────────────────
     if (fixedBodyHeight === null) {
@@ -712,10 +795,23 @@ export function createAskUI<
     lines.push(topBorderLine(width));
     row++;
 
-    // Banner │ ？ Label │
-    const bannerLabel =
-      q != null ? q.label : currentTab === questions.length ? "Submit" : "Question";
-    lines.push(bannerCardLine(bannerLabel, innerW, borderColorName(row, totalRows)));
+    // Banner │ icon Label │
+    let bannerLabel: string;
+    let bannerIcon: string;
+    if (viewMode === "context") {
+      bannerLabel = "Context";
+      bannerIcon = "📜";
+    } else if (q != null) {
+      bannerLabel = q.label;
+      bannerIcon = "？";
+    } else if (currentTab === questions.length) {
+      bannerLabel = "Submit";
+      bannerIcon = "✓";
+    } else {
+      bannerLabel = "Question";
+      bannerIcon = "？";
+    }
+    lines.push(bannerCardLine(bannerLabel, bannerIcon, innerW, borderColorName(row, totalRows)));
     row++;
 
     // Separator ├┄┄┄┤ (with ▲ scroll hint if content above)

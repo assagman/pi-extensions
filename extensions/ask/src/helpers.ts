@@ -56,3 +56,47 @@ export function formatAnswerLines(answers: Answer[], questions: Question[]): str
     return `${qLabel}: user selected: ${a.index}. ${a.label}`;
   });
 }
+
+/**
+ * Extract text content from AgentMessage content.
+ * Handles both string and array content types.
+ */
+export function extractTextContent(
+  // biome-ignore lint/suspicious/noExplicitAny: AgentMessage content is complex union type
+  content: any
+): string {
+  // Handle string content
+  if (typeof content === "string") {
+    return content;
+  }
+  // Handle array content
+  if (Array.isArray(content)) {
+    return (
+      content
+        // biome-ignore lint/suspicious/noExplicitAny: Content items are untyped from session
+        .filter((c: any) => c.type === "text" && !!c.text)
+        // biome-ignore lint/suspicious/noExplicitAny: Content items are untyped from session
+        .map((c: any) => c.text)
+        .join("\n")
+    );
+  }
+  return "";
+}
+
+/**
+ * Extract the last assistant message from session branch.
+ * Returns the full text content or undefined if no assistant message found.
+ */
+export function extractLastAssistantMessage(
+  // biome-ignore lint/suspicious/noExplicitAny: SessionEntry is complex union type
+  branch: readonly any[]
+): string | undefined {
+  // Walk backwards to find last assistant message
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry.type === "message" && entry.message?.role === "assistant") {
+      return extractTextContent(entry.message.content);
+    }
+  }
+  return undefined;
+}
