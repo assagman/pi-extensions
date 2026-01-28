@@ -360,7 +360,11 @@ export function createSigmaUI<
   }
 
   function handleInput(data: string) {
-    // Context flip (h/l) has highest priority
+    // INPUT MODE MUST BE CHECKED FIRST — all keys go to editor except Escape
+    // This prevents h/l/j/k/q from triggering navigation while typing
+    if (handleEditorInput(data)) return;
+
+    // Context flip (h/l) — only when NOT in input mode
     if (handleContextFlip(data)) return;
 
     // In context view: scroll, Esc/q returns to question view
@@ -383,7 +387,6 @@ export function createSigmaUI<
     }
 
     // Question view: normal input handling
-    if (handleEditorInput(data)) return;
     if (handleScrollKeys(data)) return;
     if (handleTabNavigation(data)) return;
     if (handleSubmitTab(data)) return;
