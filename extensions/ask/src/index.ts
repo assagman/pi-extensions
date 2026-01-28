@@ -2,10 +2,13 @@
  * Ask — Better questionnaire tool for Pi
  *
  * Improvements over the built-in questionnaire:
- *   1. Number keys (1–9) for direct option selection
- *   2. Ctrl-N / Ctrl-P for down/up navigation (emacs-style)
- *   3. Long question text properly word-wrapped via wrapTextWithAnsi
- *   4. "Type something" option is ALWAYS present — not agent-controlled
+ *   1. Number keys (0–9) for direct option selection
+ *   2. C-n/C-p for option navigation, j/k for scrolling
+ *   3. C-y as alternative to Enter for selection
+ *   4. h/l for context view toggle (vim-style)
+ *   5. Tab/Shift+Tab for multi-question tab navigation
+ *   6. Long question text properly word-wrapped via wrapTextWithAnsi
+ *   7. "Type something" option is ALWAYS present — not agent-controlled
  *
  * Single question  → simple options list, auto-submits on selection
  * Multiple questions → tab bar navigation between questions + Submit tab
@@ -16,7 +19,12 @@ import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { DimmedOverlay } from "shared-tui";
 import { createAskUI } from "./ask-ui.js";
-import { errorResult, formatAnswerLines, normalizeQuestions } from "./helpers.js";
+import {
+  errorResult,
+  extractLastAssistantMessages,
+  formatAnswerLines,
+  normalizeQuestions,
+} from "./helpers.js";
 import type { AskResult, Question } from "./types.js";
 
 // ─── Schema ─────────────────────────────────────────────────────────────────
@@ -89,12 +97,17 @@ const askExtension: ExtensionFactory = (pi: ExtensionAPI) => {
 
       const questions = normalizeQuestions(params.questions);
 
+      // Extract last 2 assistant messages for context (newest first)
+      const branch = ctx.sessionManager.getBranch();
+      const contextMessages = extractLastAssistantMessages(branch, 2);
+
       const result = await DimmedOverlay.show<AskResult>(
         ctx.ui,
-        (tui, theme, done) => createAskUI(tui, theme, done, questions),
+        (tui, theme, done) => createAskUI(tui, theme, done, questions, contextMessages),
         {
           scrim: { stars: true },
-          dialog: { width: "72%", glow: { enabled: true } },
+          dialog: { width: "72%", maxHeight: "95%", glow: { enabled: true } },
+          altScreen: true, // Use alternate screen buffer for smoother scrolling
         }
       );
 

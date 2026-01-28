@@ -13,12 +13,21 @@
  *   - [keycap] help badges in footer
  *   - Dotted (┄) separators between sections
  *   - Scrollable body viewport with ▲/▼ indicators
+ *
+ * Keybindings:
+ *   Navigation:    C-n/C-p (option up/down), j/k (scroll)
+ *   Selection:     0-9 (quick pick), Enter/C-y (select)
+ *   Context view:  l (→ context), h/q/Esc (→ question)
+ *   Multi-question: Tab/Shift+Tab (switch tabs)
+ *   Cancel:        q/Esc (in question view)
  */
 
+import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import {
   Editor,
   type EditorTheme,
   Key,
+  Markdown,
   matchesKey,
   truncateToWidth,
   visibleWidth,
@@ -80,11 +89,19 @@ export function createAskUI<
     bg: (...a: any[]) => string;
     bold: (s: string) => string;
   },
->(tui: TUI, theme: T, done: (result: AskResult) => void, questions: Question[]) {
+>(
+  tui: TUI,
+  theme: T,
+  done: (result: AskResult) => void,
+  questions: Question[],
+  contextMessages?: string[]
+) {
   const isMulti = questions.length > 1;
   const totalTabs = questions.length + 1; // questions + Submit
+  const hasContext = contextMessages && contextMessages.length > 0;
 
   // ── State ────────────────────────────────────────────────────────────
+  let viewMode: "question" | "context" = "question";
   let currentTab = 0;
   let optionIndex = 0;
   let inputMode = false;
@@ -95,6 +112,11 @@ export function createAskUI<
   // Scroll state
   let scrollOffset = 0;
   let fixedBodyHeight: number | null = null;
+  let manualScroll = false;
+
+  // Context body cache — survives scroll operations, only rebuilds on width/view change
+  // This is the key to 60fps scrolling: markdown is pre-rendered once
+  let contextBodyCache: { lines: string[]; width: number } | undefined;
 
   // Memoised options per question
   const optionsCache = new Map<string, RenderOption[]>();
@@ -210,17 +232,61 @@ export function createAskUI<
     return true;
   }
 
-  function handleTabNavigation(data: string): boolean {
-    if (!isMulti) return false;
-    if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
-      currentTab = (currentTab + 1) % totalTabs;
-      optionIndex = 0;
+  function handleScrollKeys(data: string): boolean {
+    if (data === "j") {
+      scrollOffset++;
+      manualScroll = true;
       refresh();
       return true;
     }
-    if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+    if (data === "k") {
+      scrollOffset = Math.max(0, scrollOffset - 1);
+      manualScroll = true;
+      refresh();
+      return true;
+    }
+    return false;
+  }
+
+  function handleContextFlip(data: string): boolean {
+    if (!hasContext) return false;
+    // l: question → context
+    if (viewMode === "question" && data === "l") {
+      viewMode = "context";
+      scrollOffset = 0;
+      manualScroll = false;
+      fixedBodyHeight = null;
+      refresh();
+      return true;
+    }
+    // h: context → question
+    if (viewMode === "context" && data === "h") {
+      viewMode = "question";
+      scrollOffset = 0;
+      manualScroll = false;
+      fixedBodyHeight = null;
+      refresh();
+      return true;
+    }
+    return false;
+  }
+
+  function handleTabNavigation(data: string): boolean {
+    if (!isMulti) return false;
+    // Tab: next question tab, Shift+Tab: previous question tab
+    if (matchesKey(data, Key.tab)) {
+      currentTab = (currentTab + 1) % totalTabs;
+      optionIndex = 0;
+      scrollOffset = 0;
+      manualScroll = false;
+      refresh();
+      return true;
+    }
+    if (matchesKey(data, Key.shift("tab"))) {
       currentTab = (currentTab - 1 + totalTabs) % totalTabs;
       optionIndex = 0;
+      scrollOffset = 0;
+      manualScroll = false;
       refresh();
       return true;
     }
@@ -229,7 +295,7 @@ export function createAskUI<
 
   function handleSubmitTab(data: string): boolean {
     if (currentTab !== questions.length) return false;
-    if (matchesKey(data, Key.enter) && allAnswered()) {
+    if ((matchesKey(data, Key.enter) || matchesKey(data, Key.ctrl("y"))) && allAnswered()) {
       submit(false);
       return true;
     }
@@ -242,13 +308,15 @@ export function createAskUI<
 
   function handleOptionNavigation(data: string): boolean {
     const opts = currentOptions();
-    if (matchesKey(data, Key.up) || matchesKey(data, Key.ctrl("p"))) {
+    if (matchesKey(data, Key.ctrl("p"))) {
       optionIndex = Math.max(0, optionIndex - 1);
+      manualScroll = false;
       refresh();
       return true;
     }
-    if (matchesKey(data, Key.down) || matchesKey(data, Key.ctrl("n"))) {
+    if (matchesKey(data, Key.ctrl("n"))) {
       optionIndex = Math.min(opts.length - 1, optionIndex + 1);
+      manualScroll = false;
       refresh();
       return true;
     }
@@ -277,7 +345,7 @@ export function createAskUI<
   }
 
   function handleEnterKey(data: string): boolean {
-    if (!matchesKey(data, Key.enter)) return false;
+    if (!matchesKey(data, Key.enter) && !matchesKey(data, Key.ctrl("y"))) return false;
     if (currentQuestion()) {
       selectOptionAtIndex(optionIndex);
       return true;
@@ -292,7 +360,31 @@ export function createAskUI<
   }
 
   function handleInput(data: string) {
+    // Context flip (h/l) has highest priority
+    if (handleContextFlip(data)) return;
+
+    // In context view: scroll, Esc/q returns to question view
+    if (viewMode === "context") {
+      if (handleScrollKeys(data)) return;
+      if (matchesKey(data, Key.escape) || data === "q") {
+        viewMode = "question";
+        scrollOffset = 0;
+        manualScroll = false;
+        fixedBodyHeight = null;
+        refresh();
+      }
+      return;
+    }
+
+    // Question view: q cancels (like Esc)
+    if (data === "q") {
+      submit(true);
+      return;
+    }
+
+    // Question view: normal input handling
     if (handleEditorInput(data)) return;
+    if (handleScrollKeys(data)) return;
     if (handleTabNavigation(data)) return;
     if (handleSubmitTab(data)) return;
     if (handleOptionNavigation(data)) return;
@@ -355,9 +447,9 @@ export function createAskUI<
     );
   }
 
-  /** Banner line: │ ？ Label │ with accent-tinted bg. */
-  function bannerCardLine(label: string, innerW: number, bcName: string): string {
-    const text = ` ？ ${theme.bold(label)}`;
+  /** Banner line: │ icon Label │ with accent-tinted bg. */
+  function bannerCardLine(label: string, icon: string, innerW: number, bcName: string): string {
+    const text = ` ${icon} ${theme.bold(label)}`;
     const padded = padRight(text, innerW);
     const leftBorder = applyBg(theme.fg(bcName, "│"), CARD_BG);
     const rightBorder = applyBg(theme.fg(bcName, "│"), CARD_BG);
@@ -563,31 +655,100 @@ export function createAskUI<
 
     let help: string;
 
-    if (inputMode) {
-      help = `${cap("⏎")} ${lbl("submit")}  ${cap("Esc")} ${lbl("cancel")}`;
+    if (viewMode === "context") {
+      // Context view: scroll + back (h/q/Esc)
+      help = [`${cap("j/k")} ${lbl("scroll")}`, `${cap("h/q")} ${lbl("back")}`].join("  ");
+    } else if (inputMode) {
+      help = `${cap("⏎/C-y")} ${lbl("submit")}  ${cap("Esc")} ${lbl("cancel")}`;
     } else if (currentTab === questions.length) {
-      help = [
-        `${cap("⏎")} ${lbl("submit")}`,
-        `${cap("Tab")} ${lbl("switch")}`,
-        `${cap("Esc")} ${lbl("cancel")}`,
-      ].join("  ");
+      const parts = [
+        `${cap("⏎/C-y")} ${lbl("submit")}`,
+        `${cap("j/k")} ${lbl("scroll")}`,
+        `${cap("⇥/⇧⇥")} ${lbl("switch")}`,
+        `${cap("q")} ${lbl("cancel")}`,
+      ];
+      if (hasContext) parts.splice(3, 0, `${cap("l")} ${lbl("context")}`);
+      help = parts.join("  ");
     } else if (isMulti) {
-      help = [
-        `${cap("↑↓")} ${lbl("navigate")}`,
+      const parts = [
+        `${cap("C-n/p")} ${lbl("nav")}`,
+        `${cap("j/k")} ${lbl("scroll")}`,
         `${cap("0-9")} ${lbl("pick")}`,
-        `${cap("⏎")} ${lbl("select")}`,
-        `${cap("Tab")} ${lbl("switch")}`,
-      ].join("  ");
+        `${cap("⏎/C-y")} ${lbl("select")}`,
+        `${cap("⇥/⇧⇥")} ${lbl("switch")}`,
+      ];
+      if (hasContext) parts.push(`${cap("l")} ${lbl("context")}`);
+      help = parts.join("  ");
     } else {
-      help = [
-        `${cap("↑↓")} ${lbl("navigate")}`,
+      const parts = [
+        `${cap("C-n/p")} ${lbl("nav")}`,
+        `${cap("j/k")} ${lbl("scroll")}`,
         `${cap("0-9")} ${lbl("pick")}`,
-        `${cap("⏎")} ${lbl("select")}`,
-        `${cap("Esc")} ${lbl("cancel")}`,
-      ].join("  ");
+        `${cap("⏎/C-y")} ${lbl("select")}`,
+        `${cap("q")} ${lbl("cancel")}`,
+      ];
+      if (hasContext) parts.splice(4, 0, `${cap("l")} ${lbl("context")}`);
+      help = parts.join("  ");
     }
 
     return [" ".repeat(PAD) + help];
+  }
+
+  /**
+   * Render context view: full scrollable assistant messages with markdown formatting.
+   *
+   * Performance optimization: Markdown rendering is expensive (syntax highlighting, wrapping).
+   * We cache the rendered lines and only rebuild when width changes. This enables 60fps
+   * scrolling since scroll operations only slice the cached content, never re-render markdown.
+   */
+  function renderContextView(innerW: number): { lines: string[]; focusLine: number } {
+    if (!contextMessages || contextMessages.length === 0) {
+      return { lines: [" ".repeat(PAD) + theme.fg("dim", "(No context available)")], focusLine: 0 };
+    }
+
+    // Calculate usable width for markdown rendering
+    const usable = innerW - PAD * 2;
+
+    // Return cached result if width matches (fast path for scrolling)
+    if (contextBodyCache && contextBodyCache.width === usable) {
+      return { lines: contextBodyCache.lines, focusLine: 0 };
+    }
+
+    // Fallback for narrow terminals: show all messages as plain text
+    if (usable <= 10) {
+      const lines: string[] = [];
+      for (const msg of contextMessages) {
+        lines.push(" ".repeat(PAD) + theme.fg("text", msg));
+      }
+      contextBodyCache = { lines, width: usable };
+      return { lines, focusLine: 0 };
+    }
+
+    // Render each assistant message with markdown formatting
+    const lines: string[] = [];
+    const mdTheme = getMarkdownTheme();
+
+    for (let i = 0; i < contextMessages.length; i++) {
+      const msg = contextMessages[i];
+      const markdown = new Markdown(msg, 0, 0, mdTheme);
+      const rendered = markdown.render(usable);
+
+      // Add left padding to each line
+      for (const line of rendered) {
+        lines.push(" ".repeat(PAD) + line);
+      }
+
+      // Add visual separator between messages (not after the last one)
+      if (i < contextMessages.length - 1) {
+        lines.push(""); // blank line
+        lines.push(" ".repeat(PAD) + theme.fg("dim", "─".repeat(usable)));
+        lines.push(""); // blank line
+      }
+    }
+
+    // Cache for subsequent scroll operations
+    contextBodyCache = { lines, width: usable };
+    return { lines, focusLine: 0 };
   }
 
   // ── Main render ──────────────────────────────────────────────────────
@@ -603,44 +764,59 @@ export function createAskUI<
     const body: string[] = [];
     let focusLine = 0;
 
-    // Tab bar (multi-question only)
-    if (isMulti) {
+    // Context view: render assistant message
+    if (viewMode === "context") {
       body.push(""); // spacer
-      body.push(...renderTabBar(innerW));
+      const { lines: contextLines, focusLine: ctxFocus } = renderContextView(innerW);
+      body.push(...contextLines);
+      focusLine = ctxFocus;
+      body.push(""); // spacer before footer
+    } else {
+      // Question view: normal rendering
+      // Tab bar (multi-question only)
+      if (isMulti) {
+        body.push(""); // spacer
+        body.push(...renderTabBar(innerW));
+      }
+
+      body.push(""); // spacer after banner / tabs
+
+      // Main content area
+      if (inputMode && q) {
+        body.push(...renderPrompt(q, innerW));
+        body.push("");
+        const { lines: optLines } = renderOptionsList(opts, innerW);
+        body.push(...optLines);
+        // Focus on editor area (bottom of content)
+        body.push(...renderEditorSection(innerW));
+        focusLine = body.length - 2;
+      } else if (currentTab === questions.length) {
+        body.push(...renderSubmitView(innerW));
+        focusLine = body.length - 1;
+      } else if (q) {
+        body.push(...renderPrompt(q, innerW));
+        body.push("");
+        const optStart = body.length;
+        const { lines: optLines, focusIdx } = renderOptionsList(opts, innerW);
+        body.push(...optLines);
+        focusLine = optStart + focusIdx;
+      }
+
+      body.push(""); // spacer before footer
     }
 
-    body.push(""); // spacer after banner / tabs
-
-    // Main content area
-    if (inputMode && q) {
-      body.push(...renderPrompt(q, innerW));
-      body.push("");
-      const { lines: optLines } = renderOptionsList(opts, innerW);
-      body.push(...optLines);
-      // Focus on editor area (bottom of content)
-      body.push(...renderEditorSection(innerW));
-      focusLine = body.length - 2;
-    } else if (currentTab === questions.length) {
-      body.push(...renderSubmitView(innerW));
-      focusLine = body.length - 1;
-    } else if (q) {
-      body.push(...renderPrompt(q, innerW));
-      body.push("");
-      const optStart = body.length;
-      const { lines: optLines, focusIdx } = renderOptionsList(opts, innerW);
-      body.push(...optLines);
-      focusLine = optStart + focusIdx;
-    }
-
-    body.push(""); // spacer before footer
-
-    // ── Compute fixed body viewport height (once) ────────────────────
+    // ── Compute fixed body viewport height (per-view) ─────────────────
+    // Context view uses larger multiplier (88% ≈ 80% screen) for better readability
+    // Question view uses smaller multiplier (72%) for focused interaction
     if (fixedBodyHeight === null) {
       const chromeRows = 6 + (isMulti ? 2 : 0);
-      const maxBody = Math.max(10, Math.floor(tui.terminal.rows * 0.55) - chromeRows);
-      // For multi-question: use full max (tabs may have different content)
-      // For single: fit to content (capped)
-      fixedBodyHeight = isMulti ? maxBody : Math.min(body.length, maxBody);
+      const heightMultiplier = viewMode === "context" ? 0.88 : 0.72;
+      const maxBody = Math.max(10, Math.floor(tui.terminal.rows * heightMultiplier) - chromeRows);
+      // Context view: always use full max for reading space
+      // Multi-question: use full max (tabs may have different content)
+      // Single question: fit to content (capped)
+      fixedBodyHeight =
+        viewMode === "context" || isMulti ? maxBody : Math.min(body.length, maxBody);
     }
 
     // ── Scroll viewport ──────────────────────────────────────────────
@@ -649,11 +825,13 @@ export function createAskUI<
     let canScrollDown = false;
 
     if (body.length > vh) {
-      // Keep focused line visible with 2 lines of context
-      if (focusLine < scrollOffset + 2) {
-        scrollOffset = Math.max(0, focusLine - 2);
-      } else if (focusLine >= scrollOffset + vh - 2) {
-        scrollOffset = focusLine - vh + 3;
+      if (!manualScroll) {
+        // Auto-follow: keep focused line visible with 2 lines of context
+        if (focusLine < scrollOffset + 2) {
+          scrollOffset = Math.max(0, focusLine - 2);
+        } else if (focusLine >= scrollOffset + vh - 2) {
+          scrollOffset = focusLine - vh + 3;
+        }
       }
       scrollOffset = Math.max(0, Math.min(scrollOffset, body.length - vh));
       canScrollUp = scrollOffset > 0;
@@ -683,10 +861,23 @@ export function createAskUI<
     lines.push(topBorderLine(width));
     row++;
 
-    // Banner │ ？ Label │
-    const bannerLabel =
-      q != null ? q.label : currentTab === questions.length ? "Submit" : "Question";
-    lines.push(bannerCardLine(bannerLabel, innerW, borderColorName(row, totalRows)));
+    // Banner │ icon Label │
+    let bannerLabel: string;
+    let bannerIcon: string;
+    if (viewMode === "context") {
+      bannerLabel = "Context";
+      bannerIcon = "📜";
+    } else if (q != null) {
+      bannerLabel = q.label;
+      bannerIcon = "？";
+    } else if (currentTab === questions.length) {
+      bannerLabel = "Submit";
+      bannerIcon = "✓";
+    } else {
+      bannerLabel = "Question";
+      bannerIcon = "？";
+    }
+    lines.push(bannerCardLine(bannerLabel, bannerIcon, innerW, borderColorName(row, totalRows)));
     row++;
 
     // Separator ├┄┄┄┤ (with ▲ scroll hint if content above)
