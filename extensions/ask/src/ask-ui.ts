@@ -95,6 +95,7 @@ export function createAskUI<
   // Scroll state
   let scrollOffset = 0;
   let fixedBodyHeight: number | null = null;
+  let manualScroll = false;
 
   // Memoised options per question
   const optionsCache = new Map<string, RenderOption[]>();
@@ -210,17 +211,37 @@ export function createAskUI<
     return true;
   }
 
+  function handleScrollKeys(data: string): boolean {
+    if (data === "j") {
+      scrollOffset++;
+      manualScroll = true;
+      refresh();
+      return true;
+    }
+    if (data === "k") {
+      scrollOffset = Math.max(0, scrollOffset - 1);
+      manualScroll = true;
+      refresh();
+      return true;
+    }
+    return false;
+  }
+
   function handleTabNavigation(data: string): boolean {
     if (!isMulti) return false;
     if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
       currentTab = (currentTab + 1) % totalTabs;
       optionIndex = 0;
+      scrollOffset = 0;
+      manualScroll = false;
       refresh();
       return true;
     }
     if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
       currentTab = (currentTab - 1 + totalTabs) % totalTabs;
       optionIndex = 0;
+      scrollOffset = 0;
+      manualScroll = false;
       refresh();
       return true;
     }
@@ -244,11 +265,13 @@ export function createAskUI<
     const opts = currentOptions();
     if (matchesKey(data, Key.up) || matchesKey(data, Key.ctrl("p"))) {
       optionIndex = Math.max(0, optionIndex - 1);
+      manualScroll = false;
       refresh();
       return true;
     }
     if (matchesKey(data, Key.down) || matchesKey(data, Key.ctrl("n"))) {
       optionIndex = Math.min(opts.length - 1, optionIndex + 1);
+      manualScroll = false;
       refresh();
       return true;
     }
@@ -293,6 +316,7 @@ export function createAskUI<
 
   function handleInput(data: string) {
     if (handleEditorInput(data)) return;
+    if (handleScrollKeys(data)) return;
     if (handleTabNavigation(data)) return;
     if (handleSubmitTab(data)) return;
     if (handleOptionNavigation(data)) return;
@@ -568,19 +592,22 @@ export function createAskUI<
     } else if (currentTab === questions.length) {
       help = [
         `${cap("⏎")} ${lbl("submit")}`,
+        `${cap("j/k")} ${lbl("scroll")}`,
         `${cap("Tab")} ${lbl("switch")}`,
         `${cap("Esc")} ${lbl("cancel")}`,
       ].join("  ");
     } else if (isMulti) {
       help = [
-        `${cap("↑↓")} ${lbl("navigate")}`,
+        `${cap("C-n/p")} ${lbl("navigate")}`,
+        `${cap("j/k")} ${lbl("scroll")}`,
         `${cap("0-9")} ${lbl("pick")}`,
         `${cap("⏎")} ${lbl("select")}`,
         `${cap("Tab")} ${lbl("switch")}`,
       ].join("  ");
     } else {
       help = [
-        `${cap("↑↓")} ${lbl("navigate")}`,
+        `${cap("C-n/p")} ${lbl("navigate")}`,
+        `${cap("j/k")} ${lbl("scroll")}`,
         `${cap("0-9")} ${lbl("pick")}`,
         `${cap("⏎")} ${lbl("select")}`,
         `${cap("Esc")} ${lbl("cancel")}`,
@@ -637,7 +664,7 @@ export function createAskUI<
     // ── Compute fixed body viewport height (once) ────────────────────
     if (fixedBodyHeight === null) {
       const chromeRows = 6 + (isMulti ? 2 : 0);
-      const maxBody = Math.max(10, Math.floor(tui.terminal.rows * 0.55) - chromeRows);
+      const maxBody = Math.max(10, Math.floor(tui.terminal.rows * 0.72) - chromeRows);
       // For multi-question: use full max (tabs may have different content)
       // For single: fit to content (capped)
       fixedBodyHeight = isMulti ? maxBody : Math.min(body.length, maxBody);
@@ -649,11 +676,13 @@ export function createAskUI<
     let canScrollDown = false;
 
     if (body.length > vh) {
-      // Keep focused line visible with 2 lines of context
-      if (focusLine < scrollOffset + 2) {
-        scrollOffset = Math.max(0, focusLine - 2);
-      } else if (focusLine >= scrollOffset + vh - 2) {
-        scrollOffset = focusLine - vh + 3;
+      if (!manualScroll) {
+        // Auto-follow: keep focused line visible with 2 lines of context
+        if (focusLine < scrollOffset + 2) {
+          scrollOffset = Math.max(0, focusLine - 2);
+        } else if (focusLine >= scrollOffset + vh - 2) {
+          scrollOffset = focusLine - vh + 3;
+        }
       }
       scrollOffset = Math.max(0, Math.min(scrollOffset, body.length - vh));
       canScrollUp = scrollOffset > 0;
