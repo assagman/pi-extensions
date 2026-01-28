@@ -107,6 +107,10 @@ export function createAskUI<
   let fixedBodyHeight: number | null = null;
   let manualScroll = false;
 
+  // Context body cache — survives scroll operations, only rebuilds on width/view change
+  // This is the key to 60fps scrolling: markdown is pre-rendered once
+  let contextBodyCache: { lines: string[]; width: number } | undefined;
+
   // Memoised options per question
   const optionsCache = new Map<string, RenderOption[]>();
 
@@ -669,26 +673,38 @@ export function createAskUI<
     return [" ".repeat(PAD) + help];
   }
 
-  /** Render context view: full scrollable assistant messages with markdown formatting */
+  /**
+   * Render context view: full scrollable assistant messages with markdown formatting.
+   *
+   * Performance optimization: Markdown rendering is expensive (syntax highlighting, wrapping).
+   * We cache the rendered lines and only rebuild when width changes. This enables 60fps
+   * scrolling since scroll operations only slice the cached content, never re-render markdown.
+   */
   function renderContextView(innerW: number): { lines: string[]; focusLine: number } {
-    const lines: string[] = [];
-
     if (!contextMessages || contextMessages.length === 0) {
-      lines.push(" ".repeat(PAD) + theme.fg("dim", "(No context available)"));
-      return { lines, focusLine: 0 };
+      return { lines: [" ".repeat(PAD) + theme.fg("dim", "(No context available)")], focusLine: 0 };
     }
 
     // Calculate usable width for markdown rendering
     const usable = innerW - PAD * 2;
+
+    // Return cached result if width matches (fast path for scrolling)
+    if (contextBodyCache && contextBodyCache.width === usable) {
+      return { lines: contextBodyCache.lines, focusLine: 0 };
+    }
+
+    // Fallback for narrow terminals: show all messages as plain text
     if (usable <= 10) {
-      // Fallback for narrow terminals: show all messages as plain text
+      const lines: string[] = [];
       for (const msg of contextMessages) {
         lines.push(" ".repeat(PAD) + theme.fg("text", msg));
       }
+      contextBodyCache = { lines, width: usable };
       return { lines, focusLine: 0 };
     }
 
     // Render each assistant message with markdown formatting
+    const lines: string[] = [];
     const mdTheme = getMarkdownTheme();
 
     for (let i = 0; i < contextMessages.length; i++) {
@@ -709,6 +725,8 @@ export function createAskUI<
       }
     }
 
+    // Cache for subsequent scroll operations
+    contextBodyCache = { lines, width: usable };
     return { lines, focusLine: 0 };
   }
 
