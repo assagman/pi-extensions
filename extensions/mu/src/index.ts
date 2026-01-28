@@ -1,6 +1,3 @@
-import { createHash } from "node:crypto";
-import { appendFileSync } from "node:fs";
-import { join } from "node:path";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import {
   type AgentEndEvent,
@@ -10,7 +7,6 @@ import {
   type ExtensionContext,
   type SessionShutdownEvent,
   type SessionStartEvent,
-  type Theme,
   type ThemeColor,
   type ToolCallEvent,
   type ToolResultEvent,
@@ -35,6 +31,9 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
+
+// Internal modules
+import { MU_CONFIG, MU_TOOL_VIEWER_SHORTCUT, STATUS, TOOL_ICONS } from "./config.js";
 import {
   type ToolResultOption,
   cleanupOldSessions,
@@ -42,259 +41,32 @@ import {
   loadToolResults,
   persistToolResult,
 } from "./db.js";
+import { debugLog } from "./debug.js";
+import { bashLineIsChained, bashUpdateQuoteState, highlightBashLine } from "./highlighting/bash.js";
 import { DimmedOverlay } from "./overlay.js";
-
-// =============================================================================
-// DEBUG LOGGING
-// =============================================================================
-const MU_DEBUG = process.env.MU_DEBUG === "1";
-let debugLogPath: string | null = null;
-
-function debugLog(msg: string): void {
-  if (!MU_DEBUG) return;
-  try {
-    if (!debugLogPath) {
-      const baseDir = join(process.env.HOME ?? "/tmp", ".local", "share", "pi-ext-mu");
-      debugLogPath = join(baseDir, "debug.log");
-    }
-    const ts = new Date().toISOString();
-    appendFileSync(debugLogPath, `[${ts}] ${msg}\n`);
-  } catch {
-    // Debug logging must never break anything
-  }
-}
-
-// =============================================================================
-// THEME INTEGRATION
-// =============================================================================
-// Access pi's Theme singleton via globalThis Symbol (not directly exported).
-// All mu colors map to ThemeColor semantic names for theme-awareness.
-
-const PI_THEME_KEY = Symbol.for("@mariozechner/pi-coding-agent:theme");
-
-const getTheme = (): Theme => {
-  const t = (globalThis as Record<symbol, Theme | undefined>)[PI_THEME_KEY];
-  if (!t) throw new Error("Theme not initialized — mu requires pi theme.");
-  return t;
-};
-
-// Mu semantic color → ThemeColor mapping
-type MuColor =
-  | "accent" // brand, running state (was orange)
-  | "success" // success status (was green)
-  | "error" // error status (was red)
-  | "warning" // highlights, numbers (was amber/yellow)
-  | "dim" // muted text, operators
-  | "muted" // canceled, secondary (was gray)
-  | "text" // normal text (was white)
-  | "info" // info, key names, dividers (was teal)
-  | "keyword" // keywords (was violet)
-  | "variable"; // flags, variables (was cyan)
-
-const MU_THEME_MAP: Record<MuColor, ThemeColor> = {
-  accent: "accent",
-  success: "success",
-  error: "error",
-  warning: "warning",
-  dim: "dim",
-  muted: "muted",
-  text: "text",
-  info: "syntaxType",
-  keyword: "syntaxKeyword",
-  variable: "syntaxVariable",
-};
-
-/** Apply mu semantic color via pi theme. */
-const mu = (c: MuColor, text: string): string => getTheme().fg(MU_THEME_MAP[c], text);
-
-/** Pulse animation: scale theme color brightness for running indicators. */
-const rgbCache = new Map<ThemeColor, { r: number; g: number; b: number }>();
-
-/** Parse RGB values from theme ANSI escape. Cached, auto-clears on theme switch. */
-const parseThemeRgb = (tc: ThemeColor): { r: number; g: number; b: number } => {
-  const cached = rgbCache.get(tc);
-  if (cached) return cached;
-  const ansi = getTheme().getFgAnsi(tc);
-  const m = ansi.match(/38;2;(\d+);(\d+);(\d+)/);
-  const result = m
-    ? { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]) }
-    : { r: 200, g: 200, b: 200 }; // fallback
-  rgbCache.set(tc, result);
-  return result;
-};
-
-/** Call when theme changes to refresh cached RGB values.
- *  Not connected yet — onThemeChange() is not exported from pi. */
-const _clearThemeCache = (): void => {
-  rgbCache.clear();
-};
-
-const muPulse = (c: MuColor, text: string, brightness: number): string => {
-  const { r, g, b } = parseThemeRgb(MU_THEME_MAP[c]);
-  const f = Math.max(0.3, Math.min(1, brightness));
-  return `\x1b[38;2;${Math.round(r * f)};${Math.round(g * f)};${Math.round(b * f)}m${text}\x1b[0m`;
-};
-
-// =============================================================================
-// STATUS CONFIGURATION
-// =============================================================================
-type ToolStatus = "pending" | "running" | "success" | "failed" | "canceled";
-
-const STATUS: Record<ToolStatus, { sym: string; color: MuColor }> = {
-  pending: { sym: "◌", color: "dim" },
-  running: { sym: "●", color: "accent" },
-  success: { sym: "", color: "success" },
-  failed: { sym: "", color: "error" },
-  canceled: { sym: "", color: "muted" },
-};
-
-const TOOL_ICONS: Record<string, string> = {
-  bash: "󰆍",
-  read: "󰈙",
-  write: "󰷈",
-  edit: "󰏫",
-  grep: "󰍉",
-  find: "󰍉",
-  ls: "󰉋",
-};
-
-// =============================================================================
-// MU CONFIG
-// =============================================================================
-const MU_CONFIG = {
-  MAX_TOOL_RESULTS: 200,
-  MAX_COMPLETED_DURATIONS: 500,
-  PREVIEW_LENGTH: 140,
-  VIEWER_OPTION_MAX_LENGTH: 200,
-  SIGNATURE_HASH_LENGTH: 16,
-  PULSE_INTERVAL_MS: 50,
-  PULSE_SPEED: 0.2,
-  PULSE_MIN_BRIGHTNESS: 0.4,
-  MAX_ERROR_LINES: 10,
-  MAX_BASH_LINES: 10,
-} as const;
-
-const MU_TOOL_VIEWER_SHORTCUT = "ctrl+alt+o";
-
-let currentSessionId: string | null = null;
-
-// =============================================================================
-// UTILITIES
-// =============================================================================
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  v !== null && typeof v === "object" && !Array.isArray(v);
-
-/** Detect language from file extension for syntax highlighting. */
-const detectLanguageFromPath = (filePath: string): string | null => {
-  if (!filePath) return null;
-  const ext = filePath.split(".").pop()?.toLowerCase();
-  if (!ext) return null;
-
-  const extToLang: Record<string, string> = {
-    ts: "typescript",
-    tsx: "tsx",
-    js: "javascript",
-    jsx: "jsx",
-    py: "python",
-    rb: "ruby",
-    rs: "rust",
-    go: "go",
-    java: "java",
-    kt: "kotlin",
-    scala: "scala",
-    c: "c",
-    cpp: "cpp",
-    h: "c",
-    hpp: "cpp",
-    cs: "csharp",
-    fs: "fsharp",
-    swift: "swift",
-    m: "objectivec",
-    sh: "bash",
-    bash: "bash",
-    zsh: "bash",
-    json: "json",
-    yaml: "yaml",
-    yml: "yaml",
-    toml: "toml",
-    xml: "xml",
-    html: "html",
-    css: "css",
-    scss: "scss",
-    md: "markdown",
-    sql: "sql",
-    graphql: "graphql",
-    dockerfile: "dockerfile",
-    makefile: "makefile",
-  };
-
-  return extToLang[ext] ?? null;
-};
-
-/** Safety clamp: ensure every line in array fits within maxWidth. */
-const clampLines = (lines: string[], maxWidth: number): string[] =>
-  lines.map((l) => (visibleWidth(l) > maxWidth ? truncateToWidth(l, maxWidth) : l));
-
-/** Extract text content from a tool result object. */
-const extractResultText = (result: unknown): string => {
-  if (!isRecord(result)) return "";
-  const content = Array.isArray(result.content) ? result.content : [];
-  return content
-    .filter((c: unknown) => isRecord(c) && c.type === "text")
-    .map((c: unknown) => (isRecord(c) && typeof c.text === "string" ? c.text : ""))
-    .join("\n");
-};
-
-const preview = (text: string, max = 140): string => {
-  const s = (text ?? "").replace(/\s+/g, " ").trim();
-  return s.length <= max ? s : `${s.slice(0, max - 3)}...`;
-};
-
-const formatReadLoc = (offset?: number, limit?: number): string => {
-  if (offset === undefined && limit === undefined) return "";
-  const start = offset ?? 1;
-  const end = limit === undefined ? "end" : start + Math.max(0, Number(limit) - 1);
-  return `@L${start}-${end}`;
-};
-
-const computeSignature = (name: string, args: Record<string, unknown>): string => {
-  const hash = createHash("sha256");
-  hash.update(name);
-  hash.update(JSON.stringify(args));
-  return hash.digest("hex").slice(0, MU_CONFIG.SIGNATURE_HASH_LENGTH);
-};
-
-// =============================================================================
-// TOOL STATE TRACKING
-// =============================================================================
-interface ToolState {
-  toolCallId: string;
-  sig: string;
-  toolName: string;
-  args: Record<string, unknown>;
-  startTime: number;
-  status: ToolStatus;
-  exitCode?: number;
-  duration?: number;
-}
-
-const activeToolsById = new Map<string, ToolState>();
-const toolStatesBySig = new Map<string, ToolState[]>();
-const cardInstanceCountBySig = new Map<string, number>();
-
-const getToolStateByIndex = (sig: string, index: number): ToolState | undefined => {
-  const states = toolStatesBySig.get(sig);
-  return states?.[index];
-};
-
-const getToolState = (sig: string): ToolState | undefined => {
-  const states = toolStatesBySig.get(sig);
-  return states?.[states.length - 1];
-};
-
-// Track if next tool card should have leading space (after user message)
-let nextToolNeedsLeadingSpace = false;
-const _toolLeadingSpaceByToolCallId = new Map<string, boolean>();
+import {
+  activeToolsById,
+  cardInstanceCountBySig,
+  currentSessionId,
+  getToolState,
+  getToolStateByIndex,
+  nextToolNeedsLeadingSpace,
+  setCurrentSessionId,
+  setNextToolNeedsLeadingSpace,
+  toolStatesBySig,
+} from "./state.js";
+import { getTheme, mu, muPulse } from "./theme.js";
+import type { MuColor, ToolState, ToolStatus } from "./types.js";
+import {
+  clampLines,
+  computeSignature,
+  detectLanguageFromPath,
+  extractResultText,
+  formatReadLoc,
+  formatWorkingElapsed,
+  isRecord,
+  preview,
+} from "./utils.js";
 
 // =============================================================================
 // WORKING TIMER
@@ -306,7 +78,7 @@ const MIN_ELAPSED_FOR_NOTIFICATION_MS = 1000;
  * Returns empty string for durations < 1 second (intentional — avoids
  * flickering UI updates during the first second of operation).
  */
-const formatWorkingElapsed = (ms: number): string => {
+const formatWorkingElapsedFractional = (ms: number): string => {
   const s = ms / 1000;
   if (s < 1) return "";
   return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m${Math.floor(s % 60)}s`;
@@ -340,7 +112,7 @@ class WorkingTimer {
     this.interval = setInterval(() => {
       if (!this.ctx?.hasUI) return;
       const ms = Date.now() - this.startMs;
-      const elapsed = formatWorkingElapsed(ms);
+      const elapsed = formatWorkingElapsedFractional(ms);
       if (elapsed) {
         this.ctx.ui.setWorkingMessage(`Working... ⏱ ${elapsed}`);
       }
@@ -486,7 +258,7 @@ class BoxedToolCard implements Component {
     this.instanceIndex = cardInstanceCountBySig.get(this.sig) ?? 0;
     cardInstanceCountBySig.set(this.sig, this.instanceIndex + 1);
     this.needsLeadingSpace = nextToolNeedsLeadingSpace;
-    nextToolNeedsLeadingSpace = false;
+    setNextToolNeedsLeadingSpace(false);
   }
 
   private getStatus(): ToolStatus {
@@ -1988,326 +1760,6 @@ const setupUIPatching = (ctx: ExtensionContext) => {
 };
 
 // =============================================================================
-// BASH SYNTAX HIGHLIGHTING (Custom Tokenizer)
-// =============================================================================
-// Full custom tokenizer — colors commands, keywords, builtins, strings,
-// variables, flags, pipes, redirections, and arguments.
-
-const BASH_KEYWORDS = new Set([
-  "if",
-  "then",
-  "else",
-  "elif",
-  "fi",
-  "for",
-  "while",
-  "until",
-  "do",
-  "done",
-  "case",
-  "esac",
-  "in",
-  "function",
-  "select",
-  "time",
-  "coproc",
-]);
-const BASH_FLOW_RESUME = new Set(["do", "then", "else", "elif"]);
-const BASH_BUILTINS = new Set([
-  "cd",
-  "echo",
-  "printf",
-  "read",
-  "export",
-  "source",
-  "alias",
-  "unalias",
-  "set",
-  "unset",
-  "shift",
-  "return",
-  "exit",
-  "exec",
-  "eval",
-  "trap",
-  "wait",
-  "kill",
-  "jobs",
-  "fg",
-  "bg",
-  "declare",
-  "local",
-  "readonly",
-  "typeset",
-  "let",
-  "test",
-  "true",
-  "false",
-  "pwd",
-  "pushd",
-  "popd",
-  "dirs",
-  "getopts",
-  "hash",
-  "type",
-  "command",
-  "builtin",
-  "enable",
-  "help",
-  "logout",
-  "mapfile",
-  "readarray",
-  "shopt",
-  "bind",
-  "ulimit",
-  "umask",
-]);
-
-/** Apply a pi syntax theme color directly. */
-const syn = (c: ThemeColor, text: string): string => getTheme().fg(c, text);
-
-/** Check if a bash line ends with a chain operator (&&, ||, |, \) */
-function bashLineIsChained(line: string): boolean {
-  const trimmed = line.trimEnd();
-  return (
-    trimmed.endsWith("&&") ||
-    trimmed.endsWith("||") ||
-    trimmed.endsWith("|") ||
-    trimmed.endsWith("\\")
-  );
-}
-
-/**
- * Track quote state across a bash line.
- * Returns updated [inSingle, inDouble] state after processing the line.
- */
-function bashUpdateQuoteState(
-  line: string,
-  inSingle: boolean,
-  inDouble: boolean
-): [boolean, boolean] {
-  let sq = inSingle;
-  let dq = inDouble;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    // Backslash escapes next char inside double quotes (not single quotes)
-    if (ch === "\\" && dq && !sq) {
-      i++;
-      continue;
-    }
-    if (ch === "'" && !dq) sq = !sq;
-    if (ch === '"' && !sq) dq = !dq;
-  }
-  return [sq, dq];
-}
-
-function highlightBashLine(line: string, startInSQ = false, startInDQ = false): string {
-  let result = "";
-  let i = 0;
-  let cmdPos = !startInSQ && !startInDQ; // inside a quote = not command position
-
-  // If continuing inside a single-quoted string from a previous line
-  if (startInSQ) {
-    const end = line.indexOf("'", i);
-    if (end === -1) {
-      return syn("syntaxString", line);
-    }
-    result += syn("syntaxString", line.slice(0, end + 1));
-    i = end + 1;
-    cmdPos = false;
-  } else if (startInDQ) {
-    // Continuing inside a double-quoted string from a previous line
-    let closed = false;
-    let j = 0;
-    while (j < line.length) {
-      if (line[j] === "\\" && j + 1 < line.length) {
-        j += 2;
-        continue;
-      }
-      if (line[j] === '"') {
-        result += syn("syntaxString", line.slice(0, j + 1));
-        i = j + 1;
-        cmdPos = false;
-        closed = true;
-        break;
-      }
-      j++;
-    }
-    if (!closed) {
-      return syn("syntaxString", line);
-    }
-  }
-
-  while (i < line.length) {
-    // Whitespace
-    if (line[i] === " " || line[i] === "\t") {
-      result += line[i];
-      i++;
-      continue;
-    }
-
-    // Comment
-    if (line[i] === "#" && (i === 0 || line[i - 1] === " ")) {
-      result += syn("syntaxComment", line.slice(i));
-      break;
-    }
-
-    // Single-quoted string
-    if (line[i] === "'") {
-      const end = line.indexOf("'", i + 1);
-      const s = end === -1 ? line.slice(i) : line.slice(i, end + 1);
-      result += syn("syntaxString", s);
-      i += s.length;
-      cmdPos = false;
-      continue;
-    }
-
-    // Double-quoted string
-    if (line[i] === '"') {
-      let j = i + 1;
-      while (j < line.length && line[j] !== '"') {
-        if (line[j] === "\\") j++;
-        j++;
-      }
-      const s = line.slice(i, j + 1);
-      result += syn("syntaxString", s);
-      i = j + 1;
-      cmdPos = false;
-      continue;
-    }
-
-    // Variable
-    if (line[i] === "$") {
-      const m = line.slice(i).match(/^\$(\{[^}]*\}|[A-Za-z_]\w*|\(.*?\)|\d|[?!#$@*-])/);
-      if (m) {
-        result += syn("syntaxVariable", m[0]);
-        i += m[0].length;
-      } else {
-        result += line[i];
-        i++;
-      }
-      cmdPos = false;
-      continue;
-    }
-
-    // Backtick command substitution
-    if (line[i] === "`") {
-      const end = line.indexOf("`", i + 1);
-      const s = end === -1 ? line.slice(i) : line.slice(i, end + 1);
-      result += syn("syntaxVariable", s);
-      i += s.length;
-      cmdPos = false;
-      continue;
-    }
-
-    // Operators: &&, ||
-    if (line[i] === "&" && line[i + 1] === "&") {
-      result += syn("syntaxOperator", "&&");
-      i += 2;
-      cmdPos = true;
-      continue;
-    }
-    if (line[i] === "|" && line[i + 1] === "|") {
-      result += syn("syntaxOperator", "||");
-      i += 2;
-      cmdPos = true;
-      continue;
-    }
-
-    // Pipe
-    if (line[i] === "|") {
-      result += syn("syntaxOperator", "|");
-      i++;
-      cmdPos = true;
-      continue;
-    }
-
-    // Semicolon
-    if (line[i] === ";") {
-      result += syn("syntaxPunctuation", ";");
-      i++;
-      cmdPos = true;
-      continue;
-    }
-
-    // Heredoc <<
-    if (line[i] === "<" && line[i + 1] === "<") {
-      result += syn("syntaxOperator", "<<");
-      i += 2;
-      if (i < line.length && line[i] === "-") {
-        result += syn("syntaxOperator", "-");
-        i++;
-      }
-      cmdPos = false;
-      continue;
-    }
-
-    // Redirections: 2>&1, &>>, &>, >>, 2>, <, >
-    const redir = line.slice(i).match(/^(2>&1|&>>|&>|>>|2>|[<>])/);
-    if (redir) {
-      result += syn("syntaxOperator", redir[0]);
-      i += redir[0].length;
-      cmdPos = false;
-      continue;
-    }
-
-    // Background &
-    if (line[i] === "&") {
-      result += syn("syntaxOperator", "&");
-      i++;
-      cmdPos = true;
-      continue;
-    }
-
-    // Parentheses / braces
-    if (line[i] === "(" || line[i] === ")" || line[i] === "{" || line[i] === "}") {
-      result += syn("syntaxPunctuation", line[i]);
-      i++;
-      if (line[i - 1] === "(" || line[i - 1] === "{") cmdPos = true;
-      continue;
-    }
-
-    // Word token
-    let word = "";
-    while (i < line.length && " \t|&;<>\"'`$#(){}".indexOf(line[i]) === -1) {
-      // Break before redirection: digit followed by > or <
-      if ((line[i] === ">" || line[i] === "<") && word.length > 0 && /^\d+$/.test(word)) {
-        break;
-      }
-      word += line[i];
-      i++;
-    }
-
-    if (!word) {
-      // Safety: consume one char to avoid infinite loop
-      result += line[i] ?? "";
-      i++;
-      continue;
-    }
-
-    // Classify word
-    if (cmdPos) {
-      if (BASH_KEYWORDS.has(word)) {
-        result += syn("syntaxKeyword", word);
-      } else if (BASH_BUILTINS.has(word)) {
-        result += syn("syntaxFunction", word);
-      } else {
-        result += syn("syntaxType", word);
-      }
-      cmdPos = BASH_FLOW_RESUME.has(word);
-    } else if (word.startsWith("--") || (word.startsWith("-") && word.length > 1)) {
-      result += syn("syntaxVariable", word);
-    } else if (/^\d+(\.\d+)?$/.test(word)) {
-      result += syn("syntaxNumber", word);
-    } else {
-      result += syn("syntaxOperator", word);
-    }
-  }
-
-  return result;
-}
-
-// =============================================================================
 // PRETTY-PRINT & SYNTAX HIGHLIGHTING FOR TOOL ARGS
 // =============================================================================
 
@@ -2384,7 +1836,7 @@ export default function (pi: ExtensionAPI) {
     workingTimer.stop(); // defensive cleanup from any prior session
 
     // Persistence: set session identity and load prior results
-    currentSessionId = ctx.sessionManager.getSessionId();
+    setCurrentSessionId(ctx.sessionManager.getSessionId());
     debugLog(`session_start: sessionId=${currentSessionId}`);
 
     const persisted = loadToolResults(currentSessionId);
@@ -2424,7 +1876,7 @@ export default function (pi: ExtensionAPI) {
       ctx: ExtensionContext
     ) => {
       const prevSessionId = currentSessionId;
-      currentSessionId = ctx.sessionManager.getSessionId();
+      setCurrentSessionId(ctx.sessionManager.getSessionId());
       debugLog(
         `session_switch: reason=${event.reason} prev=${prevSessionId} new=${currentSessionId}`
       );
@@ -2465,12 +1917,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", (_event: SessionShutdownEvent) => {
     debugLog(`session_shutdown: sessionId=${currentSessionId}`);
     closeMuDb();
-    currentSessionId = null;
+    setCurrentSessionId(null);
   });
 
   // When a turn starts (user message sent), set flag for next tool to add leading space
   pi.on("turn_start", () => {
-    nextToolNeedsLeadingSpace = true;
+    setNextToolNeedsLeadingSpace(true);
   });
 
   // Track tool execution state

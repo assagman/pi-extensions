@@ -22,7 +22,36 @@ The rendering layer is **completely separated** from the data layer. `mu` only c
 
 ---
 
-## 2. Core Components
+## 2. Module Structure
+
+```
+mu/src/
+├── index.ts              # Main extension entry + event handlers + components
+├── config.ts             # MU_CONFIG, STATUS, TOOL_ICONS constants
+├── types.ts              # ToolStatus, MuColor, ToolState interfaces
+├── theme.ts              # Theme integration: mu(), muPulse(), getTheme()
+├── utils.ts              # isRecord, preview, computeSignature, etc.
+├── state.ts              # Shared state: activeToolsById, toolStatesBySig, etc.
+├── debug.ts              # Centralized debug logging (MU_DEBUG=1)
+├── db.ts                 # SQLite persistence for tool results
+├── overlay.ts            # Re-export of DimmedOverlay from shared-tui
+└── highlighting/
+    └── bash.ts           # Bash syntax highlighting tokenizer
+```
+
+| Module | Purpose | LOC |
+|--------|---------|-----|
+| `index.ts` | Extension entry, components, UI patching | ~2,400 |
+| `highlighting/bash.ts` | Bash command tokenizer | ~320 |
+| `db.ts` | SQLite persistence layer | ~190 |
+| `utils.ts` | Utility functions | ~100 |
+| `theme.ts` | Theme integration | ~70 |
+| `state.ts` | Shared state management | ~40 |
+| `config.ts` | Configuration constants | ~40 |
+| `types.ts` | Type definitions | ~30 |
+| `debug.ts` | Debug logging | ~25 |
+
+## 3. Core Components
 
 The architecture consists of four main subsystems:
 
@@ -108,15 +137,32 @@ For **all** TUI components (including non-builtin tools like `agentsbox_*`, `ask
 *   **Future components**: Hooks `container.addChild()` to automatically patch newly added components.
 *   **Idempotency**: Each component is marked with `_mu_patched` flag to prevent double-patching.
 
-### 3.3 In-Memory State Management
+### 3.3 State Management
 
-All state is in-memory only. No session persistence or cross-session rehydration.
+State is managed in two layers: in-memory for active session rendering, and SQLite for persistence across restarts.
+
+#### In-Memory State (`state.ts`)
 
 *   **`activeToolsById`**: `Map<toolCallId, ToolState>` — tracks running tools.
 *   **`toolStatesBySig`**: `Map<signature, ToolState[]>` — maps tool signature (hash of name + args) to state array. Used by `BoxedToolCard` to look up status and elapsed time for the correct instance.
-*   **`fullToolResultContentById`**: `Map<toolCallId, Content[]>` — stores full result content for all tools. Used by the `/mu-tools` viewer.
-*   **`toolResultOptions`**: `ToolResultOption[]` — ordered list of tool results backing the viewer list. FIFO eviction at 200 entries.
 *   **`cardInstanceCountBySig`**: `Map<signature, number>` — disambiguates multiple calls with identical name+args.
+*   **`currentSessionId`**: Current session identifier for persistence.
+*   **`nextToolNeedsLeadingSpace`**: Flag for visual spacing after user messages.
+
+#### Persistent State (`db.ts`)
+
+*   **Storage**: SQLite database at `~/.local/share/pi-ext-mu/mu.db`
+*   **Schema**: `tool_results` table stores serialized tool results per session
+*   **Lifecycle**: Tool results persisted on completion, loaded on session start/switch
+*   **Cleanup**: Sessions older than 30 days are automatically purged
+*   **Capacity**: Max 200 results per session (FIFO eviction)
+
+| Function | Purpose |
+|----------|---------|
+| `persistToolResult()` | Save tool result to DB |
+| `loadToolResults()` | Load results for session |
+| `cleanupOldSessions()` | Purge expired sessions |
+| `closeMuDb()` | Close DB connection |
 
 ### 3.4 LLM Data Fidelity
 

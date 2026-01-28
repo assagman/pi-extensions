@@ -1,10 +1,9 @@
 /**
  * Mu persistence layer — SQLite storage for tool results across restarts.
  */
-import { appendFileSync } from "node:fs";
-import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { ensureSchemaVersion, getExtensionDbPath, openDatabase } from "pi-ext-shared";
+import { debugLog } from "./debug.js";
 
 // =============================================================================
 // TYPES
@@ -19,26 +18,6 @@ export interface ToolResultOption {
   startTime: number;
   duration?: number;
   isError: boolean;
-}
-
-// =============================================================================
-// DEBUG LOGGING
-// =============================================================================
-const MU_DEBUG = process.env.MU_DEBUG === "1";
-let debugLogPath: string | null = null;
-
-function debugLog(msg: string): void {
-  if (!MU_DEBUG) return;
-  try {
-    if (!debugLogPath) {
-      const baseDir = join(process.env.HOME ?? "/tmp", ".local", "share", "pi-ext-mu");
-      debugLogPath = join(baseDir, "debug.log");
-    }
-    const ts = new Date().toISOString();
-    appendFileSync(debugLogPath, `[${ts}] ${msg}\n`);
-  } catch {
-    // Debug logging must never break anything
-  }
 }
 
 // =============================================================================
