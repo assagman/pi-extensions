@@ -146,18 +146,17 @@ build_shared_dep() {
   local dep_dir="$1"
   local dep_name
   dep_name=$(basename "$dep_dir")
-  if [[ ! -d "$dep_dir/dist" ]]; then
-    echo ""
-    echo "[shared/$dep_name] (dependency)"
-    echo "  bun install..."
-    (cd "$dep_dir" && bun install --silent "${BUN_INSTALL_FLAGS[@]}")
-    echo "  bun run build..."
-    if ! (cd "$dep_dir" && bun run build 2>&1); then
-      echo -e "  ${RED}✗ shared/$dep_name build failed${NC}"
-      return 1
-    fi
-    echo -e "  ${GREEN}✓ built${NC}"
+  
+  echo ""
+  echo "[shared/$dep_name] (dependency)"
+  echo "  bun install..."
+  (cd "$dep_dir" && bun install --silent "${BUN_INSTALL_FLAGS[@]}")
+  echo "  bun run build..."
+  if ! (cd "$dep_dir" && bun run build 2>&1); then
+    echo -e "  ${RED}✗ shared/$dep_name build failed${NC}"
+    return 1
   fi
+  echo -e "  ${GREEN}✓ built${NC}"
 }
 
 ensure_shared_deps() {
