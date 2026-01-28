@@ -76,12 +76,25 @@ export const preview = (text: string, max: number = MU_CONFIG.PREVIEW_LENGTH): s
   return s.length <= max ? s : `${s.slice(0, max - 3)}...`;
 };
 
-/** Format read tool location range (e.g., @L1-50). */
+/** Format read tool location range (e.g., @100-150 or "full"). */
 export const formatReadLoc = (offset?: number, limit?: number): string => {
-  if (offset === undefined && limit === undefined) return "";
+  if (offset === undefined && limit === undefined) return "full";
   const start = offset ?? 1;
   const end = limit === undefined ? "end" : start + Math.max(0, Number(limit) - 1);
-  return `@L${start}-${end}`;
+  return `@${start}-${end}`;
+};
+
+/** Compute edit diff stats from oldText/newText. */
+export const computeEditStats = (
+  oldText: string,
+  newText: string
+): { added: number; modified: number; deleted: number } => {
+  const oldLines = oldText ? oldText.split("\n").length : 0;
+  const newLines = newText ? newText.split("\n").length : 0;
+  const modified = Math.min(oldLines, newLines);
+  const added = Math.max(0, newLines - oldLines);
+  const deleted = Math.max(0, oldLines - newLines);
+  return { added, modified, deleted };
 };
 
 /** Compute a signature hash for tool name + args (for deduplication). */

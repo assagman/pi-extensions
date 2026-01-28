@@ -67,6 +67,7 @@ import { clearThemeCache, getTheme, mu, muPulse } from "./theme.js";
 import type { MuColor, ToolState, ToolStatus } from "./types.js";
 import {
   clampLines,
+  computeEditStats,
   computeSignature,
   detectLanguageFromPath,
   extractResultText,
@@ -1725,15 +1726,19 @@ const setupUIPatching = (ctx: ExtensionContext) => {
 
         // Simple mode: inline args with multiline wrapping
         const argsStr = formatToolArgsPreview(toolName, args);
+        const annotation = formatToolAnnotation(toolName, args);
+        const annotationSuffix = annotation ? ` ${annotation}` : "";
+        const annotationLen = annotation ? 1 + visibleWidth(annotation) : 0;
+
         const prefix = `${iconColored} ${nameColored} `;
         const prefixLen = visibleWidth(prefix);
         const indent = " ".repeat(prefixLen);
 
-        const firstLineWidth = innerW - prefixLen - rightLen - 1;
+        const firstLineWidth = innerW - prefixLen - rightLen - 1 - annotationLen;
         const contLineWidth = innerW - prefixLen;
 
         if (firstLineWidth <= 0 || contLineWidth <= 0) {
-          const fallback = `${prefix}${mu("dim", truncateToWidth(argsStr, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
+          const fallback = `${prefix}${mu("dim", truncateToWidth(argsStr, Math.max(1, innerW - prefixLen - rightLen - 1 - annotationLen)))}${annotationSuffix}`;
           const fallbackLen = visibleWidth(fallback);
           const pad = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
           const lines = [`${fallback}${pad}${rightPart}`];
@@ -1766,7 +1771,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         for (let i = 0; i < allWrapped.length; i++) {
           const wl = allWrapped[i];
           if (i === 0) {
-            const lineContent = `${prefix}${mu("dim", wl)}`;
+            const lineContent = `${prefix}${mu("dim", wl)}${annotationSuffix}`;
             const lineLen = visibleWidth(lineContent);
             const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
             resultLines.push(`${lineContent}${pad}${rightPart}`);
@@ -1777,7 +1782,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
 
         if (resultLines.length === 0) {
           resultLines.push(
-            `${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart}`
+            `${prefix}${annotationSuffix}${" ".repeat(Math.max(0, innerW - prefixLen - annotationLen - rightLen))}${rightPart}`
           );
         }
 
@@ -2066,6 +2071,41 @@ function formatToolArgsPreview(name: string, args: Record<string, unknown>): str
       return Object.entries(args)
         .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
         .join(" ");
+  }
+}
+
+/**
+ * Generate a colored annotation string for read/write/edit tools.
+ * Shown inline after the tool args in the condensed patchTool view.
+ *
+ * - read:  "@100-150" (dim) or "full" (dim)
+ * - write: "+124" (success/green)
+ * - edit:  "+4 ~30 -50" (green/yellow/red, only non-zero parts)
+ */
+function formatToolAnnotation(toolName: string, args: Record<string, unknown>): string {
+  switch (toolName) {
+    case "read": {
+      const offset = typeof args.offset === "number" ? args.offset : undefined;
+      const limit = typeof args.limit === "number" ? args.limit : undefined;
+      return mu("dim", formatReadLoc(offset, limit));
+    }
+    case "write": {
+      const content = typeof args.content === "string" ? args.content : "";
+      const lines = content ? content.split("\n").length : 0;
+      return lines > 0 ? mu("success", `+${lines}`) : "";
+    }
+    case "edit": {
+      const oldText = typeof args.oldText === "string" ? args.oldText : "";
+      const newText = typeof args.newText === "string" ? args.newText : "";
+      const { added, modified, deleted } = computeEditStats(oldText, newText);
+      const parts: string[] = [];
+      if (added > 0) parts.push(mu("success", `+${added}`));
+      if (modified > 0) parts.push(mu("warning", `~${modified}`));
+      if (deleted > 0) parts.push(mu("error", `-${deleted}`));
+      return parts.join(" ");
+    }
+    default:
+      return "";
   }
 }
 
@@ -2425,7 +2465,7 @@ export default function (pi: ExtensionAPI) {
         const path = toRelativePath(rawPath); // CWD-relative
         const content = typeof args.content === "string" ? args.content : "";
         const lines = content ? content.split("\n").length : 0;
-        return `${t.fg("accent", "write")} ${t.fg("text", path)} ${lines > 0 ? t.fg("dim", `(${lines} lines)`) : ""}`.trimEnd();
+        return `${t.fg("accent", "write")} ${t.fg("text", path)} ${lines > 0 ? t.fg("success", `+${lines}`) : ""}`.trimEnd();
       },
     ],
     [
@@ -2436,11 +2476,13 @@ export default function (pi: ExtensionAPI) {
         const path = toRelativePath(rawPath); // CWD-relative
         const oldText = typeof args.oldText === "string" ? args.oldText : "";
         const newText = typeof args.newText === "string" ? args.newText : "";
-        const oldLines = oldText ? oldText.split("\n").length : 0;
-        const newLines = newText ? newText.split("\n").length : 0;
-        const delta = newLines - oldLines;
-        const deltaStr = delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : "±0";
-        return `${t.fg("accent", "edit")} ${t.fg("text", path)} ${t.fg("dim", `(${oldLines}→${newLines}, ${deltaStr})`)}`;
+        const { added, modified, deleted } = computeEditStats(oldText, newText);
+        const parts: string[] = [];
+        if (added > 0) parts.push(t.fg("success", `+${added}`));
+        if (modified > 0) parts.push(t.fg("warning", `~${modified}`));
+        if (deleted > 0) parts.push(t.fg("error", `-${deleted}`));
+        const statsStr = parts.join(" ");
+        return `${t.fg("accent", "edit")} ${t.fg("text", path)} ${statsStr}`.trimEnd();
       },
     ],
   ];
