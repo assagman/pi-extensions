@@ -100,3 +100,135 @@ export const formatWorkingElapsed = (ms: number): string => {
   const remSec = sec % 60;
   return remSec > 0 ? `${min}m ${remSec}s` : `${min}m`;
 };
+
+// =============================================================================
+// PATH UTILITIES — CWD-relative paths and bash cd-stripping
+// =============================================================================
+// Thread-safety note: Module-level state is safe because Node.js is single-threaded.
+// The cache is explicitly refreshed on session_start to ensure consistency.
+// =============================================================================
+
+/**
+ * Cached CWD for consistent path resolution.
+ * Refresh via refreshCwdCache() on session start.
+ * @internal Module-global — safe in single-threaded Node.js runtime.
+ */
+let cachedCwd: string | null = null;
+let cachedHome: string | null = null;
+
+/** Refresh CWD cache. Call on session start. */
+export const refreshCwdCache = (): void => {
+  cachedCwd = process.cwd();
+  cachedHome = process.env.HOME ?? process.env.USERPROFILE ?? null;
+};
+
+/** Get cached CWD (auto-initializes if needed). */
+const getCwd = (): string => {
+  if (!cachedCwd) refreshCwdCache();
+  return cachedCwd as string;
+};
+
+/** Get cached HOME directory. */
+const getHome = (): string | null => {
+  if (!cachedHome) refreshCwdCache();
+  return cachedHome;
+};
+
+/**
+ * Convert absolute path to CWD-relative path.
+ * - If path starts with CWD, strip CWD prefix.
+ * - Otherwise return as-is.
+ */
+export const toRelativePath = (path: string): string => {
+  if (!path) return path;
+
+  const cwd = getCwd();
+  const cwdSlash = cwd.endsWith("/") ? cwd : `${cwd}/`;
+  const cwdNoSlash = cwd.endsWith("/") ? cwd.slice(0, -1) : cwd;
+
+  // Exact match (path is CWD itself, with or without trailing slash)
+  if (path === cwdNoSlash || path === cwdSlash) {
+    return ".";
+  }
+
+  // Path starts with CWD prefix
+  if (path.startsWith(cwdSlash)) {
+    return path.slice(cwdSlash.length);
+  }
+
+  // Handle ~ prefix: expand and check
+  const home = getHome();
+  if (home && path.startsWith("~/")) {
+    const expanded = home + path.slice(1);
+    const expandedNoSlash = expanded.endsWith("/") ? expanded.slice(0, -1) : expanded;
+    if (expandedNoSlash === cwdNoSlash || expanded === cwdSlash) {
+      return ".";
+    }
+    if (expanded.startsWith(cwdSlash)) {
+      return expanded.slice(cwdSlash.length);
+    }
+  }
+
+  return path;
+};
+
+/**
+ * Strip redundant `cd <cwd> && ` prefix from bash commands.
+ * Only strips when cd target matches the current working directory.
+ * Handles variations: with/without trailing slash, ~ prefix.
+ */
+export const stripCdPrefix = (cmd: string): string => {
+  if (!cmd) return cmd;
+
+  const cwd = getCwd();
+  const home = getHome();
+
+  // Build regex-safe CWD variants
+  const cwdVariants: string[] = [escapeRegex(cwd), escapeRegex(`${cwd}/`)];
+
+  // Add ~ variant if CWD is under HOME
+  if (home && cwd.startsWith(home)) {
+    const tildeRelative = `~${cwd.slice(home.length)}`;
+    cwdVariants.push(escapeRegex(tildeRelative));
+    cwdVariants.push(escapeRegex(`${tildeRelative}/`));
+  }
+
+  // Build pattern: cd <any CWD variant> && (with optional spaces and quotes)
+  // Handles: cd /path && cmd, cd '/path' && cmd, cd "/path" && cmd
+  const cdPattern = new RegExp(`^cd\\s+['"]?(${cwdVariants.join("|")})['"]?\\s*&&\\s*`, "i");
+
+  return cmd.replace(cdPattern, "");
+};
+
+/** Escape string for use in RegExp */
+const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// =============================================================================
+// SKILL FILE DETECTION
+// =============================================================================
+
+/**
+ * Check if a path points to a SKILL.md file (skill loading).
+ */
+export const isSkillRead = (path: string): boolean => {
+  if (!path) return false;
+  return path.endsWith("/SKILL.md") || path === "SKILL.md";
+};
+
+/**
+ * Extract skill name from a SKILL.md path.
+ * Returns the directory name containing SKILL.md.
+ * Example: "/Users/.../skills/ascii-diagram/SKILL.md" → "ascii-diagram"
+ */
+export const extractSkillName = (path: string): string => {
+  if (!path) return "unknown";
+
+  // Handle paths ending with /SKILL.md
+  const cleanPath = path.endsWith("/SKILL.md") ? path.slice(0, -"/SKILL.md".length) : path;
+
+  // Extract last directory component
+  const lastSlash = cleanPath.lastIndexOf("/");
+  if (lastSlash === -1) return "unknown";
+
+  return cleanPath.slice(lastSlash + 1) || "unknown";
+};

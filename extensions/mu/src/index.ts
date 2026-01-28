@@ -33,7 +33,14 @@ import {
 } from "@mariozechner/pi-tui";
 
 // Internal modules
-import { MU_CONFIG, MU_TOOL_VIEWER_SHORTCUT, STATUS, TOOL_ICONS } from "./config.js";
+import {
+  MU_CONFIG,
+  MU_TOOL_VIEWER_SHORTCUT,
+  SKILL_COLOR,
+  SKILL_ICON,
+  STATUS,
+  TOOL_ICONS,
+} from "./config.js";
 import {
   type ToolResultOption,
   cleanupOldSessions,
@@ -62,10 +69,15 @@ import {
   computeSignature,
   detectLanguageFromPath,
   extractResultText,
+  extractSkillName,
   formatReadLoc,
   formatWorkingElapsed,
   isRecord,
+  isSkillRead,
   preview,
+  refreshCwdCache,
+  stripCdPrefix,
+  toRelativePath,
 } from "./utils.js";
 
 // =============================================================================
@@ -417,6 +429,9 @@ class BoxedToolCard implements Component {
   ): string[] {
     const iconColored = mu(color, icon);
 
+    // Strip redundant cd <cwd> && prefix for cleaner display
+    const cmd = stripCdPrefix(rawCmd);
+
     // Line 1: header with $ prompt — no command text on this line
     const header = `${iconColored} ${mu(color, "bash")} ${mu("dim", "$")}`;
     const headerLen = visibleWidth(header);
@@ -430,11 +445,11 @@ class BoxedToolCard implements Component {
     const contWidth = innerW - 4;
 
     if (stmtWidth <= 0) {
-      resultLines.push(`${stmtIndent}${mu("text", rawCmd)}`);
+      resultLines.push(`${stmtIndent}${mu("text", cmd)}`);
       return resultLines;
     }
 
-    const cmdLines = rawCmd.split("\n");
+    const cmdLines = cmd.split("\n");
     let prevChained = false;
     let inSQ = false;
     let inDQ = false;
@@ -1355,6 +1370,9 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       status: ToolStatus,
       pulsePhase: number
     ): string[] => {
+      // Strip redundant cd <cwd> && prefix for cleaner display
+      const cmd = stripCdPrefix(rawCmd);
+
       let iconColored: string;
       let bashColored: string;
       if (status === "running") {
@@ -1381,11 +1399,11 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       const contWidth = innerW - 4;
 
       if (stmtWidth <= 0) {
-        resultLines.push(`${stmtIndent}${mu("text", rawCmd)}`);
+        resultLines.push(`${stmtIndent}${mu("text", cmd)}`);
         return resultLines;
       }
 
-      const srcLines = rawCmd.split("\n");
+      const srcLines = cmd.split("\n");
       let prevChained = false;
       let inSQ = false;
       let inDQ = false;
@@ -1712,6 +1730,126 @@ const setupUIPatching = (ctx: ExtensionContext) => {
 
     // biome-ignore lint/suspicious/noExplicitAny: Accessing TUI internals
     const tuiAny = tui as any;
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Steering/Follow-up Message Patching
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Patches TruncatedText components to show multiline (up to 3 lines) with
+    // distinct colors: teal for steering, purple for follow-up.
+
+    const MAX_QUEUED_LINES = 3;
+
+    // Note: Uses constructor.name which would break under minification.
+    // Safe here because Pi runs unminified extension code.
+    const isTruncatedText = (c: unknown): boolean => {
+      const x = c as { constructor?: { name?: string }; text?: unknown };
+      return x.constructor?.name === "TruncatedText" && typeof x.text === "string";
+    };
+
+    // Strip ANSI codes to get raw text for parsing
+    // Handles: SGR (\x1b[...m), 256-color (\x1b[38;5;Nm), RGB (\x1b[38;2;R;G;Bm)
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape sequence matching requires control chars
+    const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+    // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
+    const patchQueuedMessage = (comp: any) => {
+      if (comp._mu_patched) return;
+      comp._mu_patched = true;
+
+      const rawText: string = comp.text ?? "";
+      const stripped = stripAnsi(rawText);
+
+      // Detect message type from prefix
+      const isSteering = stripped.startsWith("Steering:");
+      const isFollowUp = stripped.startsWith("Follow-up:");
+      const isHint = stripped.startsWith("↳");
+
+      if (!isSteering && !isFollowUp && !isHint) return;
+
+      // Extract the actual message content (after prefix)
+      let prefix: string;
+      let content: string;
+      let color: MuColor;
+
+      if (isSteering) {
+        prefix = "󰍻 Steering"; // nf-md-arrow_right_bold — teal, interrupts current work
+        content = stripped.slice("Steering:".length).trim();
+        color = "info";
+      } else if (isFollowUp) {
+        prefix = "󰁔 Follow-up"; // nf-md-arrow_down_bold — cyan, queued for after completion
+        content = stripped.slice("Follow-up:".length).trim();
+        color = "variable";
+      } else {
+        // Hint line - keep as-is but style it
+        comp.render = (width: number): string[] => {
+          const hint = mu("dim", stripped);
+          const padded = hint + " ".repeat(Math.max(0, width - visibleWidth(hint)));
+          return [padded];
+        };
+        return;
+      }
+
+      // Override render to show up to MAX_QUEUED_LINES with truncation indicator
+      comp.render = (width: number): string[] => {
+        const result: string[] = [];
+        const availW = Math.max(1, width - 2); // 2 chars for left indent
+
+        // Header line: prefix with icon
+        const header = `${mu(color, prefix)}${mu("dim", ":")}`;
+        result.push(header + " ".repeat(Math.max(0, width - visibleWidth(header))));
+
+        // Content lines: split by newline, wrap, cap at MAX_QUEUED_LINES-1
+        const contentLines = content.split("\n");
+        const wrappedLines: string[] = [];
+
+        for (const line of contentLines) {
+          if (line.length <= availW) {
+            wrappedLines.push(line);
+          } else {
+            // Simple word wrap
+            let remaining = line;
+            while (remaining.length > 0) {
+              if (remaining.length <= availW) {
+                wrappedLines.push(remaining);
+                break;
+              }
+              let breakAt = remaining.lastIndexOf(" ", availW);
+              if (breakAt <= 0) breakAt = availW;
+              wrappedLines.push(remaining.slice(0, breakAt));
+              remaining = remaining.slice(breakAt).trimStart();
+            }
+          }
+          if (wrappedLines.length >= MAX_QUEUED_LINES - 1) break;
+        }
+
+        // Cap and add truncation indicator
+        const maxContentLines = MAX_QUEUED_LINES - 1;
+        const isTruncated =
+          wrappedLines.length > maxContentLines || contentLines.length > wrappedLines.length;
+        const displayLines = wrappedLines.slice(0, maxContentLines);
+
+        for (let i = 0; i < displayLines.length; i++) {
+          const isLast = i === displayLines.length - 1;
+          let lineText = displayLines[i];
+
+          // Add ellipsis if truncated on last line
+          if (isLast && isTruncated) {
+            const ellipsis = mu("dim", " …");
+            const maxW = availW - 2; // room for ellipsis
+            if (lineText.length > maxW) {
+              lineText = lineText.slice(0, maxW);
+            }
+            lineText = lineText + ellipsis;
+          }
+
+          // Content in same color as prefix (queued appearance)
+          const styled = `  ${mu(color, lineText)}`;
+          result.push(styled + " ".repeat(Math.max(0, width - visibleWidth(styled))));
+        }
+
+        return result;
+      };
+    };
+
     for (const child of tuiAny.children ?? []) {
       if (child.constructor?.name === "Container") {
         // Track last component type
@@ -1726,6 +1864,8 @@ const setupUIPatching = (ctx: ExtensionContext) => {
           } else if (isTool(gc)) {
             patchTool(gc, lastWasUser);
             lastWasUser = false;
+          } else if (isTruncatedText(gc)) {
+            patchQueuedMessage(gc);
           }
         }
 
@@ -1746,6 +1886,8 @@ const setupUIPatching = (ctx: ExtensionContext) => {
               } else if (isTool(newChild)) {
                 patchTool(newChild, addSpace);
                 child._mu_lastWasUser = false;
+              } else if (isTruncatedText(newChild)) {
+                patchQueuedMessage(newChild);
               }
               return origAdd(newChild);
             };
@@ -1807,11 +1949,14 @@ function highlightValue(v: unknown): string[] {
 function formatToolArgsPreview(name: string, args: Record<string, unknown>): string {
   if (!args) return "";
   const p = (args.path ?? args.file_path ?? "") as string;
-  const relPath = p.startsWith("/") ? p.split("/").slice(-2).join("/") : p;
+  const relPath = toRelativePath(p);
 
   switch (name) {
-    case "bash":
-      return preview((args.command as string) ?? "", 60);
+    case "bash": {
+      const rawCmd = (args.command as string) ?? "";
+      const stripped = stripCdPrefix(rawCmd);
+      return preview(stripped, 60);
+    }
     case "read":
     case "write":
     case "ls":
@@ -1834,6 +1979,7 @@ export default function (pi: ExtensionAPI) {
   // Setup UI patching on session start
   pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext) => {
     workingTimer.stop(); // defensive cleanup from any prior session
+    refreshCwdCache(); // refresh CWD for path utilities
 
     // Persistence: set session identity and load prior results
     setCurrentSessionId(ctx.sessionManager.getSessionId());
@@ -2113,7 +2259,8 @@ export default function (pi: ExtensionAPI) {
       "bash",
       createBashTool,
       (args, t) => {
-        const cmd = typeof args.command === "string" ? args.command : "";
+        const rawCmd = typeof args.command === "string" ? args.command : "";
+        const cmd = stripCdPrefix(rawCmd); // Strip redundant cd <cwd> &&
         return `${t.fg("accent", "bash")} ${t.fg("dim", "$")} ${t.fg("text", cmd)}`;
       },
     ],
@@ -2121,10 +2268,19 @@ export default function (pi: ExtensionAPI) {
       "read",
       createReadTool,
       (args, t) => {
+        const rawPath = typeof args.path === "string" ? args.path : "";
+
+        // Special handling for skill files
+        if (isSkillRead(rawPath)) {
+          const skillName = extractSkillName(rawPath);
+          const { r, g, b } = SKILL_COLOR;
+          return rgbRaw(r, g, b, `${SKILL_ICON} skill loaded: ${skillName}`);
+        }
+
         const offset = typeof args.offset === "number" ? args.offset : undefined;
         const limit = typeof args.limit === "number" ? args.limit : undefined;
         const info = formatReadLoc(offset, limit);
-        const path = typeof args.path === "string" ? args.path : "";
+        const path = toRelativePath(rawPath); // CWD-relative
         return `${t.fg("accent", "read")} ${t.fg("text", path)} ${info ? t.fg("dim", info) : ""}`.trimEnd();
       },
     ],
@@ -2133,7 +2289,8 @@ export default function (pi: ExtensionAPI) {
       createGrepTool,
       (args, t) => {
         const pattern = args.pattern !== undefined ? String(args.pattern) : "";
-        const where = typeof args.path === "string" ? args.path : ".";
+        const rawWhere = typeof args.path === "string" ? args.path : ".";
+        const where = toRelativePath(rawWhere); // CWD-relative
         return `${t.fg("accent", "grep")} ${t.fg("text", JSON.stringify(pattern))} ${t.fg("text", where)}`;
       },
     ],
@@ -2142,7 +2299,8 @@ export default function (pi: ExtensionAPI) {
       createFindTool,
       (args, t) => {
         const pattern = args.pattern !== undefined ? String(args.pattern) : "";
-        const where = typeof args.path === "string" ? args.path : ".";
+        const rawWhere = typeof args.path === "string" ? args.path : ".";
+        const where = toRelativePath(rawWhere); // CWD-relative
         return `${t.fg("accent", "find")} ${t.fg("text", JSON.stringify(pattern))} ${t.fg("text", where)}`;
       },
     ],
@@ -2150,7 +2308,8 @@ export default function (pi: ExtensionAPI) {
       "ls",
       createLsTool,
       (args, t) => {
-        const path = typeof args.path === "string" ? args.path : ".";
+        const rawPath = typeof args.path === "string" ? args.path : ".";
+        const path = toRelativePath(rawPath); // CWD-relative
         return `${t.fg("accent", "ls")} ${t.fg("text", path)}`;
       },
     ],
@@ -2158,7 +2317,8 @@ export default function (pi: ExtensionAPI) {
       "write",
       createWriteTool,
       (args, t) => {
-        const path = typeof args.path === "string" ? args.path : "";
+        const rawPath = typeof args.path === "string" ? args.path : "";
+        const path = toRelativePath(rawPath); // CWD-relative
         const content = typeof args.content === "string" ? args.content : "";
         const lines = content ? content.split("\n").length : 0;
         return `${t.fg("accent", "write")} ${t.fg("text", path)} ${lines > 0 ? t.fg("dim", `(${lines} lines)`) : ""}`.trimEnd();
@@ -2168,7 +2328,8 @@ export default function (pi: ExtensionAPI) {
       "edit",
       createEditTool,
       (args, t) => {
-        const path = typeof args.path === "string" ? args.path : "";
+        const rawPath = typeof args.path === "string" ? args.path : "";
+        const path = toRelativePath(rawPath); // CWD-relative
         const oldText = typeof args.oldText === "string" ? args.oldText : "";
         const newText = typeof args.newText === "string" ? args.newText : "";
         const oldLines = oldText ? oldText.split("\n").length : 0;
