@@ -49,11 +49,14 @@
         "@mariozechner/pi-ai": "*",
         "@mariozechner/pi-coding-agent": "*",
         "@mariozechner/pi-tui": "*",
+        "@sinclair/typebox": "^0.34.8",
         "pi-ext-shared": "../shared/core",
         "shared-tui": "file:../shared/tui",
       },
       "devDependencies": {
+        "@types/better-sqlite3": "^7.6.13",
         "@types/node": "^22",
+        "better-sqlite3": "^12.6.2",
         "typescript": "^5",
         "vitest": "^4.0.18",
       },
@@ -1053,6 +1056,10 @@
 
     "micromatch/picomatch": ["picomatch@2.3.1", "", {}, "sha512-JU3teHTNjmE2VCGFzuY8EXzCDVwEqB2a8fsIvwaStHhAWJEeVd1o1QD80CU6+ZdEXXSLbSsuLwJjkCBWqRQUVA=="],
 
+    "mu/@sinclair/typebox": ["@sinclair/typebox@0.34.48", "", {}, "sha512-kKJTNuK3AQOrgjjotVxMrCn1sUJwM76wMszfq1kdU4uYVJjvEWuFQ6HgvLt4Xz3fSmZlTOxJ/Ie13KnIcWQXFA=="],
+
+    "mu/better-sqlite3": ["better-sqlite3@12.6.2", "", { "dependencies": { "bindings": "^1.5.0", "prebuild-install": "^7.1.1" } }, "sha512-8VYKM3MjCa9WcaSAI3hzwhmyHVlH8tiGFwf0RlTsZPWJ1I5MkzjiudCo4KC4DxOaL/53A5B1sI/IbldNFDbsKA=="],
+
     "mu/pi-ext-shared": ["pi-ext-shared@file:extensions/shared/core", { "dependencies": { "@mariozechner/pi-coding-agent": "*", "@sinclair/typebox": "^0.32.15", "better-sqlite3": "^11.7.0" }, "devDependencies": { "@types/better-sqlite3": "^7.6.12", "@types/node": "^22", "typescript": "^5" } }],
 
     "mu/shared-tui": ["shared-tui@file:extensions/shared/tui", { "dependencies": { "@mariozechner/pi-tui": "*" }, "devDependencies": { "@types/node": "^22", "typescript": "^5" } }],
@@ -1110,6 +1117,10 @@
     "cliui/wrap-ansi/ansi-styles": ["ansi-styles@4.3.0", "", { "dependencies": { "color-convert": "^2.0.1" } }, "sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg=="],
 
     "log-update/slice-ansi/is-fullwidth-code-point": ["is-fullwidth-code-point@5.1.0", "", { "dependencies": { "get-east-asian-width": "^1.3.1" } }, "sha512-5XHYaSyiqADb4RnZ1Bdad6cPp8Toise4TzEjcOYDHZkTCbKgiUl7WTUCpNWHuxmDt91wnsZBc9xinNzopv3JMQ=="],
+
+    "mu/pi-ext-shared/@sinclair/typebox": ["@sinclair/typebox@0.32.35", "", {}, "sha512-Ul3YyOTU++to8cgNkttakC0dWvpERr6RYoHO2W47DLbFvrwBDJUY31B1sImH6JZSYc4Kt4PyHtoPNu+vL2r2dA=="],
+
+    "mu/pi-ext-shared/better-sqlite3": ["better-sqlite3@11.10.0", "", { "dependencies": { "bindings": "^1.5.0", "prebuild-install": "^7.1.1" } }, "sha512-EwhOpyXiOEL/lKzHz9AW1msWFNzGc/z+LzeB3/jnFJpxu+th2yqvzsSWas1v9jgs9+xiXJcD5A8CJxAG2TaghQ=="],
 
     "rimraf/glob/jackspeak": ["jackspeak@3.4.3", "", { "dependencies": { "@isaacs/cliui": "^8.0.2" }, "optionalDependencies": { "@pkgjs/parseargs": "^0.11.0" } }, "sha512-OGlZQpz2yfahA/Rd1Y8Cd9SIEsqvXkLVoSw/cgwhnhFMDbsQFeZYoJJ7bIZBS9BcamUW96asq/npPWugM+RQBw=="],
 

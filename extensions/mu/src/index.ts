@@ -31,6 +31,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
+import { Type } from "@sinclair/typebox";
 
 // Internal modules
 import {
@@ -2335,7 +2336,7 @@ export default function (pi: ExtensionAPI) {
       label: dummy.label,
       description: dummy.description,
       // biome-ignore lint/suspicious/noExplicitAny: Type coercion for pi tool registration
-      parameters: dummy.parameters as any,
+      parameters: (dummy.parameters ?? Type.Object({})) as any,
 
       async execute(id, params, _onUpdate, ctx, signal) {
         throwIfAborted(signal);
