@@ -186,7 +186,7 @@ const deltaDelete = createTool(
 const deltaLog = createTool(
   "delta_log",
   "Memory Log",
-  "Log an event, decision, or fact to episodic memory with timestamp. Use to remember important events, decisions made, bugs found, user preferences, etc.",
+  "Log an event, decision, or fact to episodic memory with timestamp. CALL AFTER: making architecture decisions, finding bugs, discovering patterns, encountering gotchas, completing milestones. Use tags like ['decision'], ['bug'], ['pattern'], ['gotcha'].",
   LogSchema,
   ({ content, context, tags }) => {
     const id = logEpisode(content, context, tags);
@@ -197,7 +197,7 @@ const deltaLog = createTool(
 const deltaRecall = createTool(
   "delta_recall",
   "Memory Recall",
-  "Search and recall past events/facts from episodic memory. Filter by text query, tags, time range, or session.",
+  "Search past events in episodic memory. CALL to recall decisions, bugs, patterns from previous sessions. Filter by text query, tags, time range, or current session only.",
   RecallSchema,
   (options) => {
     const episodes = recallEpisodes(options as RecallOptions);
@@ -235,7 +235,7 @@ const deltaEpisodeDelete = createTool(
 const deltaNoteCreate = createTool(
   "delta_note_create",
   "Create Note",
-  "Create a project note for persistent context. Notes marked 'active' are automatically loaded at session start. Categories: issue, convention, workflow, reminder, general. Use for project-specific issues, coding conventions, workflow notes, or reminders.",
+  "Create a project note for persistent knowledge. CALL WHEN: you identify a reusable pattern, coding convention, build/deploy workflow, recurring issue, or important reminder. Categories: issue (bugs, workarounds), convention (code patterns, decisions), workflow (build/deploy/test), reminder (common mistakes). Notes marked 'active' are auto-loaded at session start.",
   NoteCreateSchema,
   (input) => {
     const id = createNote(input);
@@ -300,7 +300,7 @@ const deltaNoteGet = createTool(
 const deltaIndexSearch = createTool(
   "delta_index_search",
   "Search Memory Index",
-  "Search the memory index by keywords across all memory types (notes, episodes, kv). Returns matching entries with source references for selective retrieval.",
+  "Search all memories by keyword. CALL FIRST before starting any new task — check for relevant past decisions, known issues, conventions. Returns entries from notes, episodes, and kv with source references.",
   IndexSearchSchema,
   ({ query, source_type }) => {
     const results = searchIndex(query, source_type);

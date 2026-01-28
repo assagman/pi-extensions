@@ -717,36 +717,171 @@ export function getMemoryContext(): MemoryContext {
   };
 }
 
+// ============ Awareness Classification ============
+
+type AwarenessCategory =
+  | "decisions"
+  | "preferences"
+  | "environment"
+  | "workflows"
+  | "conventions"
+  | "architecture"
+  | "issues"
+  | "explorations"
+  | "commits"
+  | "other";
+
+/** Display order and labels for awareness categories */
+const AWARENESS_DISPLAY: [AwarenessCategory, string][] = [
+  ["decisions", "Decisions"],
+  ["preferences", "Preferences"],
+  ["environment", "Environment"],
+  ["workflows", "Workflows"],
+  ["conventions", "Conventions"],
+  ["architecture", "Architecture"],
+  ["issues", "Issues"],
+  ["explorations", "Explorations"],
+  ["commits", "Commits"],
+  ["other", "Other"],
+];
+
+function classifyEntry(entry: MemoryIndexEntry): AwarenessCategory {
+  switch (entry.source_type) {
+    case "note": {
+      const cat = entry.keywords || "general";
+      if (cat === "issue") return "issues";
+      if (cat === "convention") return "conventions";
+      if (cat === "workflow") return "workflows";
+      if (cat === "reminder") return "issues";
+      return "architecture";
+    }
+    case "episode": {
+      const tags = parseTagKeywords(entry.keywords);
+      if (tags.includes("commit")) return "commits";
+      if (tags.includes("decision")) return "decisions";
+      if (tags.includes("exploration")) return "explorations";
+      if (tags.includes("bug") || tags.includes("gotcha")) return "issues";
+      if (tags.includes("approach")) return "conventions";
+      return "other";
+    }
+    case "kv": {
+      const key = entry.source_id;
+      if (key.startsWith("pref:")) return "preferences";
+      if (key.startsWith("env:")) return "environment";
+      return "other";
+    }
+    default:
+      return "other";
+  }
+}
+
+function parseTagKeywords(keywords: string | null): string[] {
+  if (!keywords) return [];
+  try {
+    const parsed = JSON.parse(keywords);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function truncateStr(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+function extractDisplayKeyword(
+  entry: MemoryIndexEntry,
+  category: AwarenessCategory
+): string | null {
+  if (category === "commits") return null;
+  switch (entry.source_type) {
+    case "kv":
+      return entry.source_id.replace(/^(pref|env):/, "");
+    case "note":
+      return truncateStr(entry.summary, 25);
+    case "episode":
+      return truncateStr(entry.summary, 25);
+    default:
+      return null;
+  }
+}
+
+interface AwarenessCategoryGroup {
+  count: number;
+  keywords: string[];
+}
+
+function buildAwarenessMap(
+  entries: MemoryIndexEntry[]
+): Map<AwarenessCategory, AwarenessCategoryGroup> {
+  const groups = new Map<AwarenessCategory, { count: number; kwSet: Set<string> }>();
+
+  for (const entry of entries) {
+    const category = classifyEntry(entry);
+    if (!groups.has(category)) {
+      groups.set(category, { count: 0, kwSet: new Set() });
+    }
+    const g = groups.get(category);
+    if (!g) continue;
+    g.count++;
+    const kw = extractDisplayKeyword(entry, category);
+    if (kw && g.kwSet.size < 3) g.kwSet.add(kw);
+  }
+
+  return new Map(
+    [...groups.entries()].map(([cat, g]) => [cat, { count: g.count, keywords: [...g.kwSet] }])
+  );
+}
+
+function formatMemoryMap(entries: MemoryIndexEntry[]): string[] {
+  if (entries.length === 0) return [];
+
+  const map = buildAwarenessMap(entries);
+  const lines: string[] = [];
+
+  lines.push("## Memory Map");
+
+  for (const [cat, label] of AWARENESS_DISPLAY) {
+    const group = map.get(cat);
+    if (!group || group.count === 0) continue;
+    const kwStr = group.keywords.length > 0 ? ` (${group.keywords.join(", ")})` : "";
+    lines.push(`  ${label}: ${group.count}${kwStr}`);
+  }
+
+  lines.push("");
+  lines.push(
+    "Retrieve: delta_recall(tags/query) · delta_note_list(category) · delta_note_get(id) · delta_get(key)"
+  );
+
+  return lines;
+}
+
+// ============ Prompt Building ============
+
 export interface PromptOptions {
-  instructions?: boolean;
   ctx?: MemoryContext;
+  sessionWrites?: number;
+  turnsIdle?: number;
 }
 
 export function buildMemoryPrompt(options: PromptOptions = {}): string {
-  const includeInstructions = options.instructions !== false;
   const ctx = options.ctx ?? getMemoryContext();
+  const writes = options.sessionWrites ?? 0;
+  const idle = options.turnsIdle ?? 0;
   const lines: string[] = [];
 
   lines.push("<delta_memory>");
   lines.push("");
 
-  if (includeInstructions) {
-    lines.push("## MANDATORY Workflow");
-    lines.push(
-      "1. **ALWAYS recall first** — Before ANY task, search related memories with delta_recall/delta_index_search/delta_note_get"
-    );
-    lines.push("2. **ALWAYS save discoveries** — Log every new finding, exploration, or learning:");
-    lines.push("   - delta_log for events: bugs, decisions, patterns, gotchas");
-    lines.push('     Bugs → tags=["bug", "discovery"], Patterns → tags=["pattern", "discovery"]');
-    lines.push('     Decisions → tags=["decision"], Gotchas → tags=["gotcha", "discovery"]');
-    lines.push("   - delta_note_create for reusable knowledge:");
-    lines.push("     issue: bugs, limitations, workarounds, tech debt");
-    lines.push("     convention: code patterns, naming, architecture decisions");
-    lines.push("     workflow: build/deploy/test commands and procedures");
-    lines.push("     reminder: common mistakes, review checklist items");
-    lines.push("3. Check delta_note_list and delta_recall before creating to avoid duplicates");
-    lines.push("");
-  }
+  // Compact always-on instructions (every turn, never removed)
+  lines.push("## Memory (mandatory)");
+  lines.push("- **BEFORE** work: delta_index_search(query) / delta_recall to check past context");
+  lines.push(
+    "- **AFTER** decisions, bugs, patterns: delta_log to record · delta_note_create for reusable knowledge"
+  );
+  const idleStr = idle > 0 ? `${idle} turns idle` : "active";
+  lines.push(`- Status: ${writes} writes this session · ${idleStr}`);
+  lines.push("");
 
   // Critical Knowledge: HIGH/CRITICAL notes loaded in full
   if (ctx.criticalNotes.length > 0) {
@@ -760,81 +895,10 @@ export function buildMemoryPrompt(options: PromptOptions = {}): string {
     }
   }
 
-  // Hierarchical Memory Index
-  if (ctx.indexEntries.length > 0) {
-    const noteEntries = ctx.indexEntries.filter((e) => e.source_type === "note");
-    const episodeEntries = ctx.indexEntries.filter((e) => e.source_type === "episode");
-    const kvEntries = ctx.indexEntries.filter((e) => e.source_type === "kv");
-
-    lines.push(`## Memory Index (${ctx.indexEntries.length} entries)`);
-    lines.push("");
-
-    // Notes: grouped by category → titles
-    if (noteEntries.length > 0) {
-      lines.push("Notes:");
-      const byCategory = new Map<string, typeof noteEntries>();
-      for (const e of noteEntries) {
-        const cat = e.keywords || "general";
-        if (!byCategory.has(cat)) byCategory.set(cat, []);
-        byCategory.get(cat)?.push(e);
-      }
-      for (const [cat, entries] of byCategory) {
-        const titles = entries
-          .map((e) => {
-            const imp = e.importance !== "normal" ? " ⚠" : "";
-            return `[N${e.source_id}]${imp} ${e.summary}`;
-          })
-          .join(", ");
-        lines.push(`  ${cat}: ${titles}`);
-      }
-      lines.push("");
-    }
-
-    // Episodes: recent + tag summary
-    if (episodeEntries.length > 0) {
-      lines.push(`Episodes (${episodeEntries.length} total):`);
-
-      // Show 5 most recent
-      const recent = episodeEntries.slice(0, 5);
-      for (const e of recent) {
-        const tags = e.keywords ? ` (${e.keywords.replace(/[[\]"]/g, "")})` : "";
-        lines.push(`  [E${e.source_id}] ${e.summary}${tags}`);
-      }
-
-      // Tag frequency summary
-      const tagCounts = new Map<string, number>();
-      for (const e of episodeEntries) {
-        if (e.keywords) {
-          try {
-            const tags = JSON.parse(e.keywords) as string[];
-            for (const t of tags) {
-              tagCounts.set(t, (tagCounts.get(t) || 0) + 1);
-            }
-          } catch {
-            /* non-JSON keywords */
-          }
-        }
-      }
-      if (tagCounts.size > 0) {
-        const tagSummary = [...tagCounts.entries()]
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 8)
-          .map(([tag, count]) => `${tag}(${count})`)
-          .join(", ");
-        lines.push(`  Tags: ${tagSummary}`);
-      }
-      lines.push("");
-    }
-
-    // KV: compact list
-    if (kvEntries.length > 0) {
-      const keys = kvEntries.map((e) => e.source_id).join(", ");
-      lines.push(`KV: ${keys}`);
-      lines.push("");
-    }
-
-    lines.push("Fetch full content: delta_note_get(id), delta_recall(query), delta_get(key)");
-    lines.push("Search index: delta_index_search(query)");
+  // Awareness-based Memory Map (compact, no content — agent pulls on-demand)
+  const mapLines = formatMemoryMap(ctx.indexEntries);
+  if (mapLines.length > 0) {
+    lines.push(...mapLines);
     lines.push("");
   }
 

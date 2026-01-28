@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSIONS_DIR="$SCRIPT_DIR/extensions"
 TARGET_DIR="$HOME/.pi/agent/extensions"
+SKILL_TARGET_DIR="$HOME/.pi/agent/skills"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -199,7 +200,15 @@ install_extension() {
   fi
 
   ln -sfn "$dist_dir" "$TARGET_DIR/$name"
-  echo -e "  ${GREEN}✓ installed${NC} → $TARGET_DIR/$name"
+  echo -e "  ${GREEN}✓ extension${NC} → $TARGET_DIR/$name"
+
+  # Deploy skill if exists
+  local skill_dir="$ext_dir/skill"
+  if [[ -d "$skill_dir" ]]; then
+    mkdir -p "$SKILL_TARGET_DIR"
+    ln -sfn "$skill_dir" "$SKILL_TARGET_DIR/$name"
+    echo -e "  ${GREEN}✓ skill${NC}     → $SKILL_TARGET_DIR/$name"
+  fi
 }
 
 # ── Parse args ─────────────────────────────────────────────────────────
