@@ -28,9 +28,12 @@ import { createSigmaUI } from "./sigma-ui.js";
 import type { AskResult, Question } from "./types.js";
 
 // ─── Schema ─────────────────────────────────────────────────────────────────
+// NOTE: Descriptions kept short and free of quotes/special chars to reduce
+// LLM JSON-generation errors (see task #156). The streaming layer in pi-ai
+// does a raw JSON.parse on model output with no repair/retry.
 
 const QuestionOptionSchema = Type.Object({
-  value: Type.String({ description: "The value returned when selected" }),
+  value: Type.String({ description: "Value returned when selected" }),
   label: Type.String({ description: "Display label for the option" }),
   description: Type.Optional(
     Type.String({ description: "Optional description shown below label" })
@@ -40,10 +43,7 @@ const QuestionOptionSchema = Type.Object({
 const QuestionSchema = Type.Object({
   id: Type.String({ description: "Unique identifier for this question" }),
   label: Type.Optional(
-    Type.String({
-      description:
-        "Short contextual label for tab bar, e.g. 'Scope', 'Priority' (defaults to Q1, Q2)",
-    })
+    Type.String({ description: "Short contextual label for tab bar, defaults to Q1, Q2" })
   ),
   prompt: Type.String({ description: "The full question text to display" }),
   options: Type.Array(QuestionOptionSchema, { description: "Available options to choose from" }),
@@ -64,9 +64,10 @@ You have access to the \`sigma\` tool for interactive user questions.
 
 **When to use sigma:**
 
-1. **Use \`sigma\`** in case of unclarity/ambiguity, decision points, and when confident enough that there are better alternatives/recommendations/suggestions and out-of-the-box ideas.
-2. **Ask category by category.** Group related questions together, don't overwhelm with too many at once.
-3. **"Type something" is always available.** The user can always type a custom answer — you don't need to add it as an option.
+1. **Always use \`sigma\` to ask questions to the user, interview the user, and questionnaire the user.** It is the primary and mandatory tool for all user-facing questions.
+2. **Use \`sigma\`** in case of unclarity/ambiguity, decision points, and when confident enough that there are better alternatives/recommendations/suggestions and out-of-the-box ideas.
+3. **Ask category by category.** Group related questions together, don't overwhelm with too many at once.
+4. **"Type something" is always available.** The user can always type a custom answer — you don't need to add it as an option.
 `.trim();
 
 // ─── Extension ──────────────────────────────────────────────────────────────
