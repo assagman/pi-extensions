@@ -49,10 +49,13 @@
         "@mariozechner/pi-ai": "*",
         "@mariozechner/pi-coding-agent": "*",
         "@mariozechner/pi-tui": "*",
+        "pi-ext-shared": "../shared/core",
+        "shared-tui": "file:../shared/tui",
       },
       "devDependencies": {
         "@types/node": "^22",
         "typescript": "^5",
+        "vitest": "^4.0.18",
       },
     },
     "extensions/omega": {
@@ -1049,6 +1052,10 @@
     "log-update/slice-ansi": ["slice-ansi@7.1.2", "", { "dependencies": { "ansi-styles": "^6.2.1", "is-fullwidth-code-point": "^5.0.0" } }, "sha512-iOBWFgUX7caIZiuutICxVgX1SdxwAVFFKwt1EvMYYec/NWO5meOJ6K5uQxhrYBdQJne4KxiqZc+KptFOWFSI9w=="],
 
     "micromatch/picomatch": ["picomatch@2.3.1", "", {}, "sha512-JU3teHTNjmE2VCGFzuY8EXzCDVwEqB2a8fsIvwaStHhAWJEeVd1o1QD80CU6+ZdEXXSLbSsuLwJjkCBWqRQUVA=="],
+
+    "mu/pi-ext-shared": ["pi-ext-shared@file:extensions/shared/core", { "dependencies": { "@mariozechner/pi-coding-agent": "*", "@sinclair/typebox": "^0.32.15", "better-sqlite3": "^11.7.0" }, "devDependencies": { "@types/better-sqlite3": "^7.6.12", "@types/node": "^22", "typescript": "^5" } }],
+
+    "mu/shared-tui": ["shared-tui@file:extensions/shared/tui", { "dependencies": { "@mariozechner/pi-tui": "*" }, "devDependencies": { "@types/node": "^22", "typescript": "^5" } }],
 
     "node-fetch/data-uri-to-buffer": ["data-uri-to-buffer@4.0.1", "", {}, "sha512-0R9ikRb668HB7QDxT1vkpuUBtqc53YyAwMwGeUFKRojY/NWKvdZ+9UYtRfGmhqNbRkTSVpMbmyhXipFFv2cb/A=="],
 

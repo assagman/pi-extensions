@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import {
   type AgentEndEvent,
@@ -6,7 +5,9 @@ import {
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
+  type SessionShutdownEvent,
   type SessionStartEvent,
+  type ThemeColor,
   type ToolCallEvent,
   type ToolResultEvent,
   createBashTool,
@@ -17,11 +18,13 @@ import {
   createReadTool,
   createWriteTool,
   getMarkdownTheme,
+  highlightCode,
 } from "@mariozechner/pi-coding-agent";
 import {
   type Component,
   type KeyId,
   Markdown,
+  type TUI,
   Text,
   matchesKey,
   truncateToWidth,
@@ -29,132 +32,55 @@ import {
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
 
-// =============================================================================
-// THEME COLORS (Orange Premium Palette)
-// =============================================================================
-const C = {
-  orange: { r: 255, g: 159, b: 67 },
-  green: { r: 38, g: 222, b: 129 },
-  red: { r: 238, g: 90, b: 82 },
-  yellow: { r: 254, g: 211, b: 48 },
-  dim: { r: 92, g: 92, b: 92 },
-  gray: { r: 140, g: 140, b: 140 },
-  teal: { r: 84, g: 160, b: 160 },
-  amber: { r: 254, g: 202, b: 87 },
-  white: { r: 220, g: 220, b: 220 },
-  violet: { r: 167, g: 139, b: 250 },
-  cyan: { r: 34, g: 211, b: 238 },
-} as const;
-
-type ColorKey = keyof typeof C;
-
-const rgb = (c: ColorKey, text: string): string => {
-  const { r, g, b } = C[c];
-  return `\x1b[38;2;${r};${g};${b}m${text}\x1b[0m`;
-};
-
-const rgbPulse = (c: ColorKey, text: string, brightness: number): string => {
-  const { r, g, b } = C[c];
-  const f = Math.max(0.3, Math.min(1, brightness));
-  return `\x1b[38;2;${Math.round(r * f)};${Math.round(g * f)};${Math.round(b * f)}m${text}\x1b[0m`;
-};
-
-// =============================================================================
-// STATUS CONFIGURATION
-// =============================================================================
-type ToolStatus = "pending" | "running" | "success" | "failed" | "canceled";
-
-const STATUS: Record<ToolStatus, { sym: string; color: ColorKey }> = {
-  pending: { sym: "◌", color: "dim" },
-  running: { sym: "●", color: "orange" },
-  success: { sym: "", color: "green" },
-  failed: { sym: "", color: "red" },
-  canceled: { sym: "", color: "gray" },
-};
-
-const TOOL_ICONS: Record<string, string> = {
-  bash: "󰆍",
-  read: "󰈙",
-  write: "󰷈",
-  edit: "󰏫",
-  grep: "󰍉",
-  find: "󰍉",
-  ls: "󰉋",
-};
-
-// =============================================================================
-// MU CONFIG
-// =============================================================================
-const MU_CONFIG = {
-  MAX_TOOL_RESULTS: 200,
-  MAX_COMPLETED_DURATIONS: 500,
-  PREVIEW_LENGTH: 140,
-  VIEWER_OPTION_MAX_LENGTH: 200,
-  SIGNATURE_HASH_LENGTH: 16,
-  PULSE_INTERVAL_MS: 50,
-  PULSE_SPEED: 0.2,
-  PULSE_MIN_BRIGHTNESS: 0.4,
-} as const;
-
-const MU_TOOL_VIEWER_SHORTCUT = "ctrl+alt+o";
-
-// =============================================================================
-// UTILITIES
-// =============================================================================
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  v !== null && typeof v === "object" && !Array.isArray(v);
-
-const preview = (text: string, max = 140): string => {
-  const s = (text ?? "").replace(/\s+/g, " ").trim();
-  return s.length <= max ? s : `${s.slice(0, max - 3)}...`;
-};
-
-const formatReadLoc = (offset?: number, limit?: number): string => {
-  if (offset === undefined && limit === undefined) return "";
-  const start = offset ?? 1;
-  const end = limit === undefined ? "end" : start + Math.max(0, Number(limit) - 1);
-  return `@L${start}-${end}`;
-};
-
-const computeSignature = (name: string, args: Record<string, unknown>): string => {
-  const hash = createHash("sha256");
-  hash.update(name);
-  hash.update(JSON.stringify(args));
-  return hash.digest("hex").slice(0, MU_CONFIG.SIGNATURE_HASH_LENGTH);
-};
-
-// =============================================================================
-// TOOL STATE TRACKING
-// =============================================================================
-interface ToolState {
-  toolCallId: string;
-  sig: string;
-  toolName: string;
-  args: Record<string, unknown>;
-  startTime: number;
-  status: ToolStatus;
-  exitCode?: number;
-  duration?: number;
-}
-
-const activeToolsById = new Map<string, ToolState>();
-const toolStatesBySig = new Map<string, ToolState[]>();
-const fullToolResultContentById = new Map<string, unknown>();
-const cardInstanceCountBySig = new Map<string, number>();
-
-const getToolStateByIndex = (sig: string, index: number): ToolState | undefined => {
-  const states = toolStatesBySig.get(sig);
-  return states?.[index];
-};
-
-const getToolState = (sig: string): ToolState | undefined => {
-  const states = toolStatesBySig.get(sig);
-  return states?.[states.length - 1];
-};
-
-// Track if next tool card should have leading space (after user message)
-let nextToolNeedsLeadingSpace = false;
-const _toolLeadingSpaceByToolCallId = new Map<string, boolean>();
+// Internal modules
+import {
+  MU_CONFIG,
+  MU_TOOL_VIEWER_SHORTCUT,
+  SKILL_COLOR,
+  SKILL_ICON,
+  STATUS,
+  TOOL_ICONS,
+} from "./config.js";
+import {
+  type ToolResultOption,
+  cleanupOldSessions,
+  closeMuDb,
+  loadToolResults,
+  persistToolResult,
+} from "./db.js";
+import { debugLog } from "./debug.js";
+import { bashLineIsChained, bashUpdateQuoteState, highlightBashLine } from "./highlighting/bash.js";
+import { DimmedOverlay } from "./overlay.js";
+import {
+  activeToolsById,
+  cardInstanceCountBySig,
+  clearToolStateMaps,
+  currentSessionId,
+  getToolState,
+  getToolStateByIndex,
+  nextToolNeedsLeadingSpace,
+  setCurrentSessionId,
+  setNextToolNeedsLeadingSpace,
+  toolStatesBySig,
+} from "./state.js";
+import { clearThemeCache, getTheme, mu, muPulse } from "./theme.js";
+import type { MuColor, ToolState, ToolStatus } from "./types.js";
+import {
+  clampLines,
+  computeEditStats,
+  computeSignature,
+  detectLanguageFromPath,
+  extractResultText,
+  extractSkillName,
+  formatReadLoc,
+  formatWorkingElapsed,
+  isRecord,
+  isSkillRead,
+  preview,
+  refreshCwdCache,
+  stripCdPrefix,
+  toRelativePath,
+} from "./utils.js";
 
 // =============================================================================
 // WORKING TIMER
@@ -166,7 +92,7 @@ const MIN_ELAPSED_FOR_NOTIFICATION_MS = 1000;
  * Returns empty string for durations < 1 second (intentional — avoids
  * flickering UI updates during the first second of operation).
  */
-const formatWorkingElapsed = (ms: number): string => {
+const formatWorkingElapsedFractional = (ms: number): string => {
   const s = ms / 1000;
   if (s < 1) return "";
   return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m${Math.floor(s % 60)}s`;
@@ -200,7 +126,7 @@ class WorkingTimer {
     this.interval = setInterval(() => {
       if (!this.ctx?.hasUI) return;
       const ms = Date.now() - this.startMs;
-      const elapsed = formatWorkingElapsed(ms);
+      const elapsed = formatWorkingElapsedFractional(ms);
       if (elapsed) {
         this.ctx.ui.setWorkingMessage(`Working... ⏱ ${elapsed}`);
       }
@@ -216,10 +142,6 @@ const workingTimer = new WorkingTimer();
 interface MuTheme {
   fg: (color: string, text: string) => string;
   bg: (color: string, text: string) => string;
-}
-
-interface ThemeWithAnsi extends MuTheme {
-  getFgAnsi?: (color: string) => string;
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: Tool types require any
@@ -265,7 +187,9 @@ const rgbRaw = (r: number, g: number, b: number, text: string): string =>
 
 // Progress bar with green→yellow→red gradient based on percentage
 const progressBar = (percent: number, width = 5): string => {
-  const filled = Math.round((percent / 100) * width);
+  // Clamp percent to 0-100 to prevent incorrect bar rendering
+  const clampedPercent = Math.max(0, Math.min(100, percent));
+  const filled = Math.round((clampedPercent / 100) * width);
   const empty = width - filled;
 
   // Gradient color: green (0%) → yellow (50%) → red (100%)
@@ -288,11 +212,11 @@ const progressBar = (percent: number, width = 5): string => {
     };
   };
 
-  const color = getColor(percent);
+  const color = getColor(clampedPercent);
   const filledStr = "█".repeat(filled);
   const emptyStr = "░".repeat(empty);
 
-  return rgbRaw(color.r, color.g, color.b, filledStr) + rgb("dim", emptyStr);
+  return rgbRaw(color.r, color.g, color.b, filledStr) + mu("dim", emptyStr);
 };
 
 const formatModelDisplay = (
@@ -350,7 +274,7 @@ class BoxedToolCard implements Component {
     this.instanceIndex = cardInstanceCountBySig.get(this.sig) ?? 0;
     cardInstanceCountBySig.set(this.sig, this.instanceIndex + 1);
     this.needsLeadingSpace = nextToolNeedsLeadingSpace;
-    nextToolNeedsLeadingSpace = false;
+    setNextToolNeedsLeadingSpace(false);
   }
 
   private getStatus(): ToolStatus {
@@ -407,110 +331,177 @@ class BoxedToolCard implements Component {
       const brightness =
         MU_CONFIG.PULSE_MIN_BRIGHTNESS +
         (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * (0.5 + 0.5 * Math.sin(this.pulsePhase));
-      statusStr = rgbPulse(color, sym, brightness);
+      statusStr = muPulse(color, sym, brightness);
     } else {
-      statusStr = rgb(color, sym);
+      statusStr = mu(color, sym);
     }
 
-    const timerStr = elapsed ? rgb("dim", ` ${elapsed}`) : "";
+    const timerStr = elapsed ? mu("dim", ` ${elapsed}`) : "";
     const rightPart = `${statusStr}${timerStr}`;
     const rightLen = visibleWidth(rightPart);
 
-    // For bash: render multiline with full command, no truncation
+    // For bash: render multiline, cap height
     if (this.toolName === "bash") {
       const rawCmd = typeof this.args.command === "string" ? this.args.command : "";
-      const lines = this.renderBashMultiline(rawCmd, icon, color, rightPart, rightLen, innerW);
+      let lines = clampLines(
+        this.renderBashMultiline(rawCmd, icon, color, rightPart, rightLen, innerW),
+        width
+      );
+      if (lines.length > MU_CONFIG.MAX_BASH_LINES) {
+        const total = lines.length;
+        lines = lines.slice(0, MU_CONFIG.MAX_BASH_LINES);
+        lines.push(mu("dim", `  … ${total - MU_CONFIG.MAX_BASH_LINES} more lines`));
+      }
       this.lastWidth = width;
       this.cachedLines = this.needsLeadingSpace ? ["", ...lines] : lines;
       return this.cachedLines;
     }
 
-    // Default: single-line truncated rendering for other tools
-    const leftMax = innerW - rightLen - 1;
-    const iconColored = rgb(color, icon);
-    const leftContent = `${iconColored} ${content}`;
-    const leftTrunc = truncateToWidth(leftContent, leftMax);
-    const leftLen = visibleWidth(leftTrunc);
-    const padding = " ".repeat(Math.max(0, innerW - leftLen - rightLen));
+    // Special handling for skill reads — render without "read" prefix
+    if (this.toolName === "read") {
+      const rawPath = typeof this.args.path === "string" ? this.args.path : "";
+      if (isSkillRead(rawPath)) {
+        const skillName = extractSkillName(rawPath);
+        const { r, g, b } = SKILL_COLOR;
+        const skillLine = rgbRaw(r, g, b, `${SKILL_ICON} skill loaded: ${skillName}`);
+        const lineLen = visibleWidth(skillLine);
+        const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+        const line = `${skillLine}${pad}${rightPart}`;
+        this.lastWidth = width;
+        this.cachedLines = this.needsLeadingSpace ? ["", line] : [line];
+        return this.cachedLines;
+      }
+    }
 
-    const line = `${leftTrunc}${padding}${rightPart}`;
-
-    this.lastWidth = width;
-    this.cachedLines = this.needsLeadingSpace ? ["", line] : [line];
-    return this.cachedLines;
-  }
-
-  private renderBashMultiline(
-    rawCmd: string,
-    icon: string,
-    color: ColorKey,
-    rightPart: string,
-    rightLen: number,
-    innerW: number
-  ): string[] {
-    const iconColored = rgb(color, icon);
-    const prefix = `${iconColored} ${rgb(color, "bash")} ${rgb("dim", "$")} `;
+    // Non-bash tools: multiline rendering with full args, no truncation
+    const iconColored = mu(color, icon);
+    const toolLabel = this.toolName;
+    const prefix = `${iconColored} ${mu(color, toolLabel)} `;
     const prefixLen = visibleWidth(prefix);
     const indent = " ".repeat(prefixLen);
 
-    // Available width for command text on first line (needs room for status)
     const firstLineWidth = innerW - prefixLen - rightLen - 1;
-    // Continuation lines have full width minus indent
     const contLineWidth = innerW - prefixLen;
 
     if (firstLineWidth <= 0 || contLineWidth <= 0) {
-      // Terminal too narrow, show truncated
-      const fallback = `${prefix}${rgb("white", truncateToWidth(rawCmd, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
+      const fallback = `${prefix}${mu("dim", truncateToWidth(content, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
       const fallbackLen = visibleWidth(fallback);
-      const padding = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
-      return [`${fallback}${padding}${rightPart}`];
+      const pad = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
+      const line = `${fallback}${pad}${rightPart}`;
+      this.lastWidth = width;
+      this.cachedLines = this.needsLeadingSpace ? ["", line] : [line];
+      return this.cachedLines;
     }
 
-    // Split command preserving original line breaks, then wrap each segment
-    const cmdLines = rawCmd.split("\n");
+    const segments = content.split("\n");
     const allWrapped: string[] = [];
 
-    for (const cmdLine of cmdLines) {
+    for (const seg of segments) {
       if (allWrapped.length === 0) {
-        // First segment uses first-line width
-        const wrapped = wrapTextWithAnsi(cmdLine, firstLineWidth);
+        const wrapped = wrapTextWithAnsi(seg, firstLineWidth);
         if (wrapped.length === 0) {
           allWrapped.push("");
         } else {
           allWrapped.push(wrapped[0]);
-          // Remaining from first segment use continuation width
           if (wrapped.length > 1) {
             const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contLineWidth);
             allWrapped.push(...rewrapped);
           }
         }
       } else {
-        // Subsequent segments use continuation width
-        const wrapped = wrapTextWithAnsi(cmdLine, contLineWidth);
+        const wrapped = wrapTextWithAnsi(seg, contLineWidth);
         allWrapped.push(...(wrapped.length > 0 ? wrapped : [""]));
       }
     }
 
     const resultLines: string[] = [];
-
     for (let i = 0; i < allWrapped.length; i++) {
-      const line = allWrapped[i];
+      const wl = allWrapped[i];
       if (i === 0) {
-        // First line: prefix + command + padding + status
-        const lineContent = `${prefix}${rgb("white", line)}`;
+        const lineContent = `${prefix}${mu("dim", wl)}`;
         const lineLen = visibleWidth(lineContent);
-        const padding = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
-        resultLines.push(`${lineContent}${padding}${rightPart}`);
+        const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+        resultLines.push(`${lineContent}${pad}${rightPart}`);
       } else {
-        // Continuation: indent + command + padding
-        const lineContent = `${indent}${rgb("white", line)}`;
-        resultLines.push(lineContent);
+        resultLines.push(`${indent}${mu("dim", wl)}`);
       }
     }
 
-    return resultLines.length > 0
-      ? resultLines
-      : [`${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart}`];
+    if (resultLines.length === 0) {
+      resultLines.push(
+        `${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart}`
+      );
+    }
+
+    this.lastWidth = width;
+    const clamped = clampLines(resultLines, width);
+    this.cachedLines = this.needsLeadingSpace ? ["", ...clamped] : clamped;
+    return this.cachedLines;
+  }
+
+  private renderBashMultiline(
+    rawCmd: string,
+    icon: string,
+    color: MuColor,
+    rightPart: string,
+    rightLen: number,
+    innerW: number
+  ): string[] {
+    const iconColored = mu(color, icon);
+
+    // Strip redundant cd <cwd> && prefix for cleaner display
+    const cmd = stripCdPrefix(rawCmd);
+
+    // Line 1: header with $ prompt — no command text on this line
+    const header = `${iconColored} ${mu(color, "bash")} ${mu("dim", "$")}`;
+    const headerLen = visibleWidth(header);
+    const headerPad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
+    const resultLines: string[] = [`${header}${headerPad}${rightPart}`];
+
+    // Line 2+: 2-space indent for new statements, 4-space for chain continuations & wraps
+    const stmtIndent = "  ";
+    const contIndent = "    ";
+    const stmtWidth = innerW - 2;
+    const contWidth = innerW - 4;
+
+    if (stmtWidth <= 0) {
+      resultLines.push(`${stmtIndent}${mu("text", cmd)}`);
+      return resultLines;
+    }
+
+    const cmdLines = cmd.split("\n");
+    let prevChained = false;
+    let inSQ = false;
+    let inDQ = false;
+
+    for (const cmdLine of cmdLines) {
+      const highlighted = highlightBashLine(cmdLine, inSQ, inDQ);
+      const inQuote = inSQ || inDQ;
+      // Continuation if: inside a quoted string, or previous line ended with chain operator
+      const isCont = inQuote || prevChained;
+      const indent = isCont ? contIndent : stmtIndent;
+      const lineWidth = isCont ? contWidth : stmtWidth;
+
+      const wrapped = wrapTextWithAnsi(highlighted, lineWidth);
+      if (wrapped.length === 0) {
+        resultLines.push(indent);
+      } else {
+        resultLines.push(`${indent}${wrapped[0]}`);
+        if (wrapped.length > 1) {
+          // Wrap continuations always at 4-space indent
+          const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contWidth);
+          for (const rw of rewrapped) {
+            resultLines.push(`${contIndent}${rw}`);
+          }
+        }
+      }
+
+      [inSQ, inDQ] = bashUpdateQuoteState(cmdLine, inSQ, inDQ);
+      // Only check chain operators when not inside a quote
+      prevChained = !(inSQ || inDQ) && bashLineIsChained(cmdLine);
+    }
+
+    return resultLines;
   }
 
   invalidate(): void {
@@ -529,62 +520,101 @@ class BoxedToolCard implements Component {
 // =============================================================================
 // TOOL RESULT DETAIL VIEWER
 // =============================================================================
-interface ToolResultOption {
-  key: string;
-  toolName: string;
-  sig: string;
-  label: string;
-  args: Record<string, unknown>;
-  result: unknown;
-  startTime: number;
-  duration?: number;
-  isError: boolean;
-}
-
 const toolResultOptions: ToolResultOption[] = [];
 
-const GRAPHEME_SEGMENTER =
-  typeof Intl !== "undefined" && "Segmenter" in Intl
-    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
-    : null;
+/** Card body background — dark surface matching ask extension's card. */
+const OVERLAY_CARD_BG = "\x1b[48;2;22;22;32m";
+const OVERLAY_RESET = "\x1b[0m";
 
-const _splitGraphemes = (value: string): string[] => {
-  if (!value) return [];
-  if (GRAPHEME_SEGMENTER) {
-    return Array.from(GRAPHEME_SEGMENTER.segment(value), (s) => s.segment);
-  }
-  return Array.from(value);
+/** Apply card background to a line, persisting through any ANSI resets. */
+const applyCardBg = (text: string, width: number): string => {
+  const vis = visibleWidth(text);
+  const padded = vis < width ? text + " ".repeat(width - vis) : text;
+  return (
+    OVERLAY_CARD_BG + padded.replaceAll("\x1b[0m", `\x1b[0m${OVERLAY_CARD_BG}`) + OVERLAY_RESET
+  );
 };
 
 class ToolResultDetailViewer implements Component {
   private option: ToolResultOption;
   private scrollOffset = 0;
-  private lines: string[] = [];
-  private theme: ThemeWithAnsi;
+  private allLines: string[] = [];
+  private tui: TUI;
+  private lastWidth = 0;
+  // Render cache
+  private renderCache: string[] = [];
+  private renderCacheScroll = -1;
+  private renderCacheWidth = -1;
 
-  constructor(option: ToolResultOption, theme: ThemeWithAnsi) {
+  constructor(option: ToolResultOption, tui: TUI) {
     this.option = option;
-    this.theme = theme;
+    this.tui = tui;
   }
 
-  render(width: number): string[] {
+  /** Available viewport height (lines for scrollable content). */
+  private viewportHeight(): number {
+    // Reserve: scroll-up indicator (1) + scroll-down indicator (1) + help line (1) + blank (1) = 4
+    return Math.max(8, Math.floor(this.tui.terminal.rows * 0.9) - 4);
+  }
+
+  private buildLines(width: number): void {
     const { toolName, args, result, duration, isError } = this.option;
     const out: string[] = [];
+    const innerW = width - 4; // Indent for content
 
-    const header = `${rgb("amber", "─")} ${rgb("amber", toolName)} ${rgb("dim", "─".repeat(Math.max(0, width - toolName.length - 4)))}`;
-    out.push(header);
+    // ═══ HEADER ═══
+    const icon = TOOL_ICONS[toolName] ?? "⚙";
+    const dur = duration !== undefined ? ` ${mu("dim", `(${(duration / 1000).toFixed(2)}s)`)}` : "";
+    const statusIcon = isError ? mu("error", "✗") : mu("success", "✓");
+    out.push(`${statusIcon} ${mu("info", icon)} ${mu("warning", toolName)}${dur}`);
+    out.push(mu("dim", "─".repeat(width)));
 
-    const argLines = Object.entries(args).map(([k, v]) => {
-      const val = typeof v === "string" ? preview(v, 80) : JSON.stringify(v);
-      return `  ${rgb("teal", k)}: ${rgb("white", val)}`;
-    });
-    out.push(...argLines);
-
-    if (duration !== undefined) {
-      out.push(`  ${rgb("dim", `duration: ${(duration / 1000).toFixed(2)}s`)}`);
+    // ═══ ARGUMENTS ═══
+    out.push(mu("info", "▸ Arguments"));
+    const argEntries = Object.entries(args);
+    if (argEntries.length === 0) {
+      out.push(mu("dim", "  (none)"));
+    } else {
+      for (const [k, v] of argEntries) {
+        const keyLabel = mu("accent", k);
+        if (typeof v === "string") {
+          const lines = v.split("\n");
+          if (lines.length === 1 && v.length <= innerW - k.length - 4) {
+            // Single short line
+            out.push(`  ${keyLabel}: ${mu("text", v)}`);
+          } else {
+            // Multi-line or long: show key, then indented content
+            out.push(`  ${keyLabel}:`);
+            for (const line of lines) {
+              const wrapped = wrapTextWithAnsi(line, innerW);
+              for (const w of wrapped) {
+                out.push(`    ${mu("text", w)}`);
+              }
+            }
+          }
+        } else {
+          // JSON value - pretty print
+          const json = JSON.stringify(v, null, 2);
+          const jsonLines = json.split("\n");
+          if (jsonLines.length === 1) {
+            out.push(`  ${keyLabel}: ${mu("text", json)}`);
+          } else {
+            out.push(`  ${keyLabel}:`);
+            for (const jl of jsonLines) {
+              out.push(`    ${mu("text", jl)}`);
+            }
+          }
+        }
+      }
     }
 
     out.push("");
+
+    // ═══ RESULT ═══
+    const resultColor: MuColor = isError ? "error" : "success";
+    const resultLabel = isError ? "▸ Error" : "▸ Result";
+    out.push(mu(resultColor, resultLabel));
+    out.push(mu("dim", "─".repeat(width)));
 
     const content = Array.isArray((result as { content?: unknown[] })?.content)
       ? (result as { content: unknown[] }).content
@@ -594,28 +624,121 @@ class ToolResultDetailViewer implements Component {
       .map((c) => (c as { text?: string }).text ?? "")
       .join("\n");
 
-    const resultColor = isError ? "red" : "green";
-    out.push(rgb(resultColor, isError ? "─ Error ─" : "─ Result ─"));
+    if (!text.trim()) {
+      out.push(mu("dim", "  (empty)"));
+    } else {
+      // Detect language from file path for syntax highlighting
+      const filePath = typeof args.path === "string" ? args.path : "";
+      const lang = detectLanguageFromPath(filePath);
 
-    const textLines = text.split("\n");
-    for (const line of textLines) {
-      const wrapped = wrapTextWithAnsi(line, width - 2);
-      for (const w of wrapped) {
-        out.push(`  ${w}`);
+      if (lang) {
+        // Syntax highlighted
+        const highlighted = highlightCode(text, lang);
+        for (const hl of highlighted) {
+          const wrapped = wrapTextWithAnsi(hl, innerW);
+          for (const w of wrapped) {
+            out.push(`  ${w}`);
+          }
+        }
+      } else {
+        // Plain text
+        for (const line of text.split("\n")) {
+          const wrapped = wrapTextWithAnsi(line, innerW);
+          if (wrapped.length === 0) {
+            out.push("");
+          } else {
+            for (const w of wrapped) {
+              out.push(`  ${w}`);
+            }
+          }
+        }
       }
     }
 
-    this.lines = out;
+    this.allLines = clampLines(out, width);
+  }
+
+  render(width: number): string[] {
+    // Rebuild content lines when width changes
+    if (width !== this.lastWidth) {
+      this.buildLines(width);
+      this.lastWidth = width;
+      this.renderCacheScroll = -1; // Invalidate render cache
+    }
+
+    const vh = this.viewportHeight();
+    const maxScroll = Math.max(0, this.allLines.length - vh);
+    this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
+
+    // Return cached render if scroll/width unchanged
+    if (this.scrollOffset === this.renderCacheScroll && width === this.renderCacheWidth) {
+      return this.renderCache;
+    }
+
+    const visible = this.allLines.slice(this.scrollOffset, this.scrollOffset + vh);
+    const out: string[] = [];
+
+    // Scroll-up indicator
+    if (this.scrollOffset > 0) {
+      out.push(applyCardBg(mu("dim", `  ↑ ${this.scrollOffset} more lines`), width));
+    } else {
+      out.push(applyCardBg("", width));
+    }
+
+    for (const line of visible) {
+      out.push(applyCardBg(line, width));
+    }
+
+    // Scroll-down indicator
+    const remaining = this.allLines.length - this.scrollOffset - vh;
+    if (remaining > 0) {
+      out.push(applyCardBg(mu("dim", `  ↓ ${remaining} more lines`), width));
+    } else {
+      out.push(applyCardBg("", width));
+    }
+
+    // Help
+    out.push(
+      applyCardBg(
+        mu("dim", "  ↑↓/jk/C-n/C-p scroll • pgup/pgdn page • g/G top/end • h back"),
+        width
+      )
+    );
+
+    // Cache the result
+    this.renderCache = out;
+    this.renderCacheScroll = this.scrollOffset;
+    this.renderCacheWidth = width;
+
     return out;
   }
 
   handleInput(key: KeyId): boolean {
-    if (matchesKey(key, "down") || matchesKey(key, "j")) {
-      this.scrollOffset = Math.min(this.scrollOffset + 1, Math.max(0, this.lines.length - 10));
+    const vh = this.viewportHeight();
+    const maxScroll = Math.max(0, this.allLines.length - vh);
+
+    if (matchesKey(key, "down") || matchesKey(key, "j") || matchesKey(key, "ctrl+n")) {
+      this.scrollOffset = Math.min(this.scrollOffset + 1, maxScroll);
       return true;
     }
-    if (matchesKey(key, "up") || matchesKey(key, "k")) {
+    if (matchesKey(key, "up") || matchesKey(key, "k") || matchesKey(key, "ctrl+p")) {
       this.scrollOffset = Math.max(0, this.scrollOffset - 1);
+      return true;
+    }
+    if (matchesKey(key, "pageDown") || matchesKey(key, "ctrl+d")) {
+      this.scrollOffset = Math.min(this.scrollOffset + vh, maxScroll);
+      return true;
+    }
+    if (matchesKey(key, "pageUp") || matchesKey(key, "ctrl+u")) {
+      this.scrollOffset = Math.max(0, this.scrollOffset - vh);
+      return true;
+    }
+    if (matchesKey(key, "g")) {
+      this.scrollOffset = 0;
+      return true;
+    }
+    if (matchesKey(key, "shift+g")) {
+      this.scrollOffset = maxScroll;
       return true;
     }
     return false;
@@ -625,121 +748,388 @@ class ToolResultDetailViewer implements Component {
 }
 
 // =============================================================================
-// MU TOOLS OVERLAY (Unified List + Preview)
+// MU TOOLS OVERLAY (Two-Pane: List + Preview)
 // =============================================================================
 class MuToolsOverlay implements Component {
   private options: ToolResultOption[];
   private selectedIndex = 0;
-  private theme: ThemeWithAnsi;
+  private tui: TUI;
   private onSelect: (opt: ToolResultOption) => void;
   private onClose: () => void;
-  private scrollOffset = 0;
+  private listScrollOffset = 0;
+  private previewScrollOffset = 0;
+  private previewLines: string[] = [];
+  private previewCacheKey: string | null = null;
+  private previewCacheWidth = 0;
+  // Render cache
+  private renderCache: string[] = [];
+  private renderCacheState = "";
 
   constructor(
     options: ToolResultOption[],
-    theme: ThemeWithAnsi,
+    tui: TUI,
     onSelect: (opt: ToolResultOption) => void,
     onClose: () => void
   ) {
     this.options = options;
-    this.theme = theme;
+    this.tui = tui;
     this.onSelect = onSelect;
     this.onClose = onClose;
   }
 
-  render(width: number): string[] {
+  /** Available height for list content (excluding title and help). */
+  private contentHeight(): number {
+    // Height: title (1) + divider (1) + content + divider (1) + help (1) = 4 overhead
+    return Math.max(8, Math.floor(this.tui.terminal.rows * 0.9) - 4);
+  }
+
+  /** Build preview content for selected tool. */
+  private buildPreview(selected: ToolResultOption, width: number): string[] {
     const lines: string[] = [];
-    const innerW = width - 2;
+    const innerW = width - 4;
 
-    const titleText = "μ Tools";
-    const titleLine = `${rgb("amber", titleText)} ${rgb("teal", "─".repeat(Math.max(0, innerW - titleText.length - 1)))}`;
-    lines.push(titleLine);
+    // ═══ HEADER ═══
+    const icon = TOOL_ICONS[selected.toolName] ?? "⚙";
+    const dur =
+      selected.duration !== undefined
+        ? ` ${mu("dim", `(${(selected.duration / 1000).toFixed(2)}s)`)}`
+        : "";
+    const statusIcon = selected.isError ? mu("error", "✗") : mu("success", "✓");
+    lines.push(`${statusIcon} ${mu("info", icon)} ${mu("warning", selected.toolName)}${dur}`);
+    lines.push(mu("dim", "─".repeat(width)));
 
-    if (this.options.length === 0) {
-      lines.push(rgb("dim", "No tool results yet"));
+    // ═══ ARGUMENTS ═══
+    const argEntries = Object.entries(selected.args);
+    if (argEntries.length > 0) {
+      for (const [k, v] of argEntries) {
+        const keyLabel = mu("accent", k);
+        if (typeof v === "string") {
+          const valLines = v.split("\n");
+          const firstLineMaxW = innerW - k.length - 2;
+          if (valLines.length === 1 && v.length <= firstLineMaxW) {
+            // Short single line - inline
+            lines.push(`${keyLabel}: ${mu("text", v)}`);
+          } else {
+            // Multi-line or long - wrap with indent
+            lines.push(`${keyLabel}:`);
+            for (const vl of valLines) {
+              const wrapped = wrapTextWithAnsi(vl, innerW);
+              for (const w of wrapped) {
+                lines.push(`  ${mu("text", w)}`);
+              }
+            }
+          }
+        } else {
+          const json = JSON.stringify(v, null, 2);
+          const jsonLines = json.split("\n");
+          if (jsonLines.length === 1) {
+            lines.push(`${keyLabel}: ${mu("text", json)}`);
+          } else {
+            lines.push(`${keyLabel}:`);
+            for (const jl of jsonLines) {
+              lines.push(`  ${mu("text", jl)}`);
+            }
+          }
+        }
+      }
     } else {
-      const visibleCount = Math.min(10, this.options.length);
-      const maxScroll = Math.max(0, this.options.length - visibleCount);
-      this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
-      if (this.selectedIndex < this.scrollOffset) {
-        this.scrollOffset = this.selectedIndex;
-      } else if (this.selectedIndex >= this.scrollOffset + visibleCount) {
-        this.scrollOffset = this.selectedIndex - visibleCount + 1;
-      }
-
-      for (let i = 0; i < visibleCount; i++) {
-        const idx = this.scrollOffset + i;
-        const opt = this.options[idx];
-        if (!opt) continue;
-
-        const isSelected = idx === this.selectedIndex;
-        const pointer = isSelected ? rgb("orange", "▸") : " ";
-        const status = opt.isError ? STATUS.failed : STATUS.success;
-        const statusSym = rgb(status.color, status.sym);
-        const icon = TOOL_ICONS[opt.toolName] ?? "⚙";
-
-        const dur = opt.duration !== undefined ? `${(opt.duration / 1000).toFixed(1)}s` : "";
-        const durStr = rgb("dim", dur.padStart(6));
-
-        const label = truncateToWidth(opt.label, innerW - 14);
-        const line = `${pointer}${statusSym} ${rgb("teal", icon)} ${label}${" ".repeat(Math.max(0, innerW - visibleWidth(label) - 12))}${durStr}`;
-        lines.push(line);
-      }
+      lines.push(mu("dim", "(no args)"));
     }
 
-    const divider = rgb("teal", "─".repeat(innerW));
-    lines.push(divider);
+    lines.push("");
 
-    const selected = this.options[this.selectedIndex];
-    if (selected) {
-      const args = Object.entries(selected.args).slice(0, 3);
-      for (const [k, v] of args) {
-        const val = typeof v === "string" ? preview(v, innerW - k.length - 4) : JSON.stringify(v);
-        const argLine = `${rgb("dim", k)}: ${rgb("white", val)}`;
-        lines.push(truncateToWidth(argLine, innerW));
-      }
-      if (args.length === 0) {
-        lines.push(rgb("dim", "(no args)"));
+    // ═══ RESULT ═══
+    const resultColor: MuColor = selected.isError ? "error" : "success";
+    const resultLabel = selected.isError ? "▸ Error" : "▸ Result";
+    lines.push(mu(resultColor, resultLabel));
+
+    const resultText = extractResultText(selected.result);
+    if (resultText) {
+      // Detect language from file path in args (for Read, Write, Edit, Grep)
+      const filePath = typeof selected.args.path === "string" ? selected.args.path : "";
+      const lang = detectLanguageFromPath(filePath);
+
+      if (lang) {
+        // Use syntax highlighting for recognized file types
+        const highlighted = highlightCode(resultText, lang);
+        for (const hl of highlighted) {
+          // Wrap long lines
+          const wrapped = wrapTextWithAnsi(hl, width - 2);
+          for (const w of wrapped) {
+            lines.push(`  ${w}`);
+          }
+        }
+      } else {
+        // Plain text wrapping for unknown types
+        const resultLines = resultText.split("\n");
+        for (const rl of resultLines) {
+          const wrapped = wrapTextWithAnsi(rl, width - 2);
+          if (wrapped.length === 0) {
+            lines.push("");
+          } else {
+            for (const w of wrapped) {
+              lines.push(`  ${w}`);
+            }
+          }
+        }
       }
     } else {
+      lines.push(mu("dim", "(empty)"));
+    }
+
+    // Duration footer
+    if (selected.duration !== undefined) {
       lines.push("");
+      lines.push(mu("dim", `⏱ ${(selected.duration / 1000).toFixed(2)}s`));
     }
-
-    lines.push(rgb("teal", "─".repeat(innerW)));
-
-    const help = rgb("dim", "↑↓ navigate   enter expand   esc close");
-    lines.push(help);
 
     return lines;
   }
 
+  render(width: number): string[] {
+    const innerW = width - 2;
+    const count = this.options.length;
+    const contentH = this.contentHeight();
+
+    // Check render cache - key is combination of all state that affects output
+    const cacheState = `${width}:${this.selectedIndex}:${this.listScrollOffset}:${this.previewScrollOffset}:${this.previewCacheKey}`;
+    if (cacheState === this.renderCacheState && this.renderCache.length > 0) {
+      return this.renderCache;
+    }
+
+    // Column layout: 45% left (list), 2 chars separator, 53% right (preview)
+    const leftW = Math.floor(innerW * 0.45);
+    const rightW = innerW - leftW - 2; // -2 for separator
+    const separator = mu("dim", "│");
+
+    const result: string[] = [];
+
+    // ─── Title Row ───
+    const titleText = `μ Tools (${count})`;
+    const titlePad = "─".repeat(Math.max(0, innerW - visibleWidth(titleText) - 1));
+    result.push(applyCardBg(`${mu("warning", titleText)} ${mu("info", titlePad)}`, width));
+
+    // ─── Divider ───
+    const leftDivider = "─".repeat(leftW);
+    const rightDivider = "─".repeat(rightW);
+    result.push(
+      applyCardBg(`${mu("dim", leftDivider)}${separator}${mu("dim", rightDivider)}`, width)
+    );
+
+    if (count === 0) {
+      // Empty state: show message only once, then empty rows
+      const emptyMsg = mu("dim", "No tool results yet");
+      const emptyLine = `${emptyMsg}${" ".repeat(Math.max(0, leftW - visibleWidth(emptyMsg)))}${separator}${" ".repeat(rightW)}`;
+      const blankLine = `${" ".repeat(leftW)}${separator}${" ".repeat(rightW)}`;
+      for (let i = 0; i < contentH; i++) {
+        result.push(applyCardBg(i === 0 ? emptyLine : blankLine, width));
+      }
+    } else {
+      // Build left pane (list) with scroll management
+      const leftLines: string[] = [];
+      const visibleCount = contentH;
+      const maxScroll = Math.max(0, count - visibleCount);
+      this.listScrollOffset = Math.min(this.listScrollOffset, maxScroll);
+
+      if (this.selectedIndex < this.listScrollOffset) {
+        this.listScrollOffset = this.selectedIndex;
+      } else if (this.selectedIndex >= this.listScrollOffset + visibleCount) {
+        this.listScrollOffset = this.selectedIndex - visibleCount + 1;
+      }
+
+      for (let i = 0; i < visibleCount; i++) {
+        const idx = this.listScrollOffset + i;
+        if (idx >= count) {
+          leftLines.push("");
+          continue;
+        }
+
+        const opt = this.options[idx];
+        const isSelected = idx === this.selectedIndex;
+        const pointer = isSelected ? mu("accent", "▸") : " ";
+        const status = opt.isError ? STATUS.failed : STATUS.success;
+        const statusSym = mu(status.color, status.sym);
+        const icon = TOOL_ICONS[opt.toolName] ?? "⚙";
+
+        // Format: "▸ icon toolName args... 2.3s"
+        const dur = opt.duration !== undefined ? `${(opt.duration / 1000).toFixed(1)}s` : "";
+        const durStr = mu("dim", dur.padStart(5));
+        const durLen = visibleWidth(durStr);
+
+        // Tool name + args, truncated to fit
+        const maxLabelW = leftW - 3 - durLen - 2; // pointer(1) + statusSym(1) + icon(1) + space(2) + dur
+        const toolNameStr = mu("text", opt.toolName);
+        const toolNameLen = visibleWidth(opt.toolName);
+
+        // Extract args snippet
+        const argsStr = formatToolArgsPreview(opt.toolName, opt.args);
+        const maxArgsW = maxLabelW - toolNameLen - 1;
+        const argsTrunc = maxArgsW > 0 ? truncateToWidth(mu("dim", argsStr), maxArgsW) : "";
+
+        const content = `${pointer}${statusSym} ${mu("info", icon)} ${toolNameStr} ${argsTrunc}`;
+        const contentLen = visibleWidth(content);
+        const pad = " ".repeat(Math.max(0, leftW - contentLen - durLen - 1));
+        let line = `${content}${pad}${durStr}`;
+
+        // Highlight selected row
+        if (isSelected) {
+          const SELECTED_BG = "\x1b[48;2;30;35;45m";
+          const RESET = "\x1b[0m";
+          const vis = visibleWidth(line);
+          const padded = vis < leftW ? line + " ".repeat(leftW - vis) : line;
+          line = SELECTED_BG + padded.replaceAll("\x1b[0m", `\x1b[0m${SELECTED_BG}`) + RESET;
+        } else {
+          // Pad to full width
+          const vis = visibleWidth(line);
+          if (vis < leftW) line += " ".repeat(leftW - vis);
+        }
+
+        leftLines.push(line);
+      }
+
+      // Build right pane (preview) with scroll management and caching
+      const selected = this.options[this.selectedIndex];
+      if (selected) {
+        const cacheKey = selected.key;
+        if (cacheKey !== this.previewCacheKey || rightW !== this.previewCacheWidth) {
+          this.previewLines = this.buildPreview(selected, rightW);
+          this.previewCacheKey = cacheKey;
+          this.previewCacheWidth = rightW;
+        }
+      } else {
+        this.previewLines = [];
+        this.previewCacheKey = null;
+      }
+
+      const previewMaxScroll = Math.max(0, this.previewLines.length - contentH);
+      this.previewScrollOffset = Math.min(this.previewScrollOffset, previewMaxScroll);
+
+      const visiblePreview = this.previewLines.slice(
+        this.previewScrollOffset,
+        this.previewScrollOffset + contentH
+      );
+
+      // Add scroll indicators to preview
+      const hasPreviewScrollUp = this.previewScrollOffset > 0;
+      const hasPreviewScrollDown = this.previewScrollOffset < previewMaxScroll;
+
+      // Combine left + right for each row
+      for (let i = 0; i < contentH; i++) {
+        const leftLine = leftLines[i] ?? " ".repeat(leftW);
+        let rightLine = visiblePreview[i] ?? "";
+
+        // Add scroll indicators to preview
+        if (i === 0 && hasPreviewScrollUp) {
+          const indicator = mu("dim", ` ↑ ${this.previewScrollOffset} more`);
+          rightLine = indicator;
+        } else if (i === contentH - 1 && hasPreviewScrollDown) {
+          const remaining = this.previewLines.length - this.previewScrollOffset - contentH;
+          const indicator = mu("dim", ` ↓ ${remaining} more`);
+          rightLine = indicator;
+        }
+
+        // Pad right line to full width
+        const rightVis = visibleWidth(rightLine);
+        const rightPadded =
+          rightVis < rightW
+            ? rightLine + " ".repeat(rightW - rightVis)
+            : truncateToWidth(rightLine, rightW);
+
+        const combined = `${leftLine}${separator}${rightPadded}`;
+        result.push(applyCardBg(combined, width));
+      }
+    }
+
+    // ─── Bottom Divider ───
+    result.push(applyCardBg(mu("dim", "─".repeat(innerW)), width));
+
+    // ─── Help Line ───
+    const hasListScroll = count > contentH;
+    const hasPreviewScroll = this.previewLines.length > contentH;
+    let help = "  ";
+    if (hasListScroll) help += "↑↓/jk list • ";
+    if (hasPreviewScroll) help += "J/K preview • ";
+    help += "l/enter detail • g/G top/end • h/esc close";
+    result.push(applyCardBg(mu("dim", help), width));
+
+    // Cache the result
+    this.renderCache = result;
+    this.renderCacheState = cacheState;
+
+    return result;
+  }
+
   handleInput(key: KeyId): boolean {
-    if (matchesKey(key, "escape") || matchesKey(key, "q")) {
+    if (matchesKey(key, "escape") || matchesKey(key, "q") || matchesKey(key, "h")) {
       this.onClose();
       return true;
     }
-    if (matchesKey(key, "down") || matchesKey(key, "j")) {
+
+    // List navigation (left pane)
+    if (matchesKey(key, "down") || matchesKey(key, "j") || matchesKey(key, "ctrl+n")) {
+      const prevIndex = this.selectedIndex;
       this.selectedIndex = Math.min(this.selectedIndex + 1, this.options.length - 1);
+      if (prevIndex !== this.selectedIndex) {
+        this.previewScrollOffset = 0; // Reset preview scroll on selection change
+      }
       return true;
     }
-    if (matchesKey(key, "up") || matchesKey(key, "k")) {
+    if (matchesKey(key, "up") || matchesKey(key, "k") || matchesKey(key, "ctrl+p")) {
+      const prevIndex = this.selectedIndex;
       this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+      if (prevIndex !== this.selectedIndex) {
+        this.previewScrollOffset = 0; // Reset preview scroll on selection change
+      }
+      return true;
+    }
+    if (matchesKey(key, "pageDown") || matchesKey(key, "ctrl+d")) {
+      const prevIndex = this.selectedIndex;
+      const page = this.contentHeight();
+      this.selectedIndex = Math.min(this.selectedIndex + page, this.options.length - 1);
+      if (prevIndex !== this.selectedIndex) {
+        this.previewScrollOffset = 0;
+      }
+      return true;
+    }
+    if (matchesKey(key, "pageUp") || matchesKey(key, "ctrl+u")) {
+      const prevIndex = this.selectedIndex;
+      const page = this.contentHeight();
+      this.selectedIndex = Math.max(0, this.selectedIndex - page);
+      if (prevIndex !== this.selectedIndex) {
+        this.previewScrollOffset = 0;
+      }
       return true;
     }
     if (matchesKey(key, "g")) {
       this.selectedIndex = 0;
-      this.scrollOffset = 0;
+      this.listScrollOffset = 0;
+      this.previewScrollOffset = 0;
       return true;
     }
     if (matchesKey(key, "shift+g")) {
       this.selectedIndex = this.options.length - 1;
+      this.previewScrollOffset = 0;
       return true;
     }
-    if (matchesKey(key, "enter")) {
+
+    // Preview navigation (right pane) - use Shift+J/K for preview scroll
+    if (matchesKey(key, "shift+j")) {
+      const maxScroll = Math.max(0, this.previewLines.length - this.contentHeight());
+      this.previewScrollOffset = Math.min(this.previewScrollOffset + 1, maxScroll);
+      return true;
+    }
+    if (matchesKey(key, "shift+k")) {
+      this.previewScrollOffset = Math.max(0, this.previewScrollOffset - 1);
+      return true;
+    }
+
+    // Open detail view
+    if (matchesKey(key, "enter") || matchesKey(key, "l")) {
       const opt = this.options[this.selectedIndex];
       if (opt) this.onSelect(opt);
       return true;
     }
+
     return false;
   }
 
@@ -752,53 +1142,46 @@ class MuToolsOverlay implements Component {
 async function openMuToolsOverlay(ctx: ExtensionCommandContext): Promise<void> {
   if (!ctx.hasUI) return;
 
-  const theme: ThemeWithAnsi = {
-    fg: (color, text) => {
-      const c = C[color as ColorKey];
-      return c ? rgbRaw(c.r, c.g, c.b, text) : text;
-    },
-    bg: (_color, text) => text,
-  };
-
   const options = [...toolResultOptions].reverse();
 
-  await new Promise<void>((resolve) => {
-    ctx.ui.custom((_tui, _theme, _kb, done) => {
-      let currentOverlay: Component | null = null;
+  await DimmedOverlay.show<void>(
+    ctx.ui,
+    (tui, _theme, done) => {
+      let listView: MuToolsOverlay | null = null;
       let detailViewer: ToolResultDetailViewer | null = null;
 
-      const closeOverlay = () => {
-        done(true);
-        resolve();
-      };
+      const closeOverlay = () => done();
 
       const openDetail = (opt: ToolResultOption) => {
-        detailViewer = new ToolResultDetailViewer(opt, theme);
+        detailViewer = new ToolResultDetailViewer(opt, tui);
       };
 
-      currentOverlay = new MuToolsOverlay(options, theme, openDetail, closeOverlay);
+      listView = new MuToolsOverlay(options, tui, openDetail, closeOverlay);
 
       return {
         render(width: number): string[] {
           if (detailViewer) return detailViewer.render(width);
-          return currentOverlay?.render(width) ?? [];
+          return listView?.render(width) ?? [];
         },
         handleInput(key: KeyId): boolean {
           if (detailViewer) {
-            if (matchesKey(key, "escape") || matchesKey(key, "q")) {
+            if (matchesKey(key, "escape") || matchesKey(key, "q") || matchesKey(key, "h")) {
               detailViewer = null;
               return true;
             }
             return detailViewer.handleInput(key);
           }
-          // biome-ignore lint/suspicious/noExplicitAny: Component interface
-          return (currentOverlay as any)?.handleInput?.(key) ?? false;
+          return listView?.handleInput(key) ?? false;
         },
         invalidate(): void {},
         dispose(): void {},
       };
-    });
-  });
+    },
+    {
+      scrim: { stars: true },
+      dialog: { width: "75%", maxHeight: "90%", glow: { enabled: true } },
+    }
+  );
 }
 
 // =============================================================================
@@ -894,7 +1277,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         if (!markdownText) return [];
 
         const mdTheme = getMarkdownTheme();
-        const defaultTextStyle = { color: (s: string) => rgb("teal", s) };
+        const defaultTextStyle = { color: (s: string) => mu("info", s) };
         const md = new Markdown(markdownText, 0, 0, mdTheme, defaultTextStyle);
         const lines = md.render(w);
 
@@ -925,7 +1308,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       // Block styles
       const THINKING_STYLE = {
         icon: "󰛨",
-        color: "violet" as ColorKey,
+        color: "keyword" as MuColor,
       };
 
       // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
@@ -944,7 +1327,7 @@ const setupUIPatching = (ctx: ExtensionContext) => {
           // Thinking blocks: icon prefix on first line
           block.render = (w: number): string[] => {
             const lines: string[] = orig(w - 2);
-            const iconStyled = rgb(THINKING_STYLE.color, THINKING_STYLE.icon);
+            const iconStyled = mu(THINKING_STYLE.color, THINKING_STYLE.icon);
 
             return lines.map((line: string, i: number) => {
               if (i === 0) {
@@ -987,78 +1370,79 @@ const setupUIPatching = (ctx: ExtensionContext) => {
     const renderBashMultilineForPatch = (
       rawCmd: string,
       icon: string,
-      color: ColorKey,
+      color: MuColor,
       rightPart: string,
       rightLen: number,
       innerW: number,
       status: ToolStatus,
       pulsePhase: number
     ): string[] => {
+      // Strip redundant cd <cwd> && prefix for cleaner display
+      const cmd = stripCdPrefix(rawCmd);
+
       let iconColored: string;
       let bashColored: string;
       if (status === "running") {
         const brightness =
           MU_CONFIG.PULSE_MIN_BRIGHTNESS +
           (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * (0.5 + 0.5 * Math.sin(pulsePhase));
-        iconColored = rgbPulse(color, icon, brightness);
-        bashColored = rgbPulse(color, "bash", brightness);
+        iconColored = muPulse(color, icon, brightness);
+        bashColored = muPulse(color, "bash", brightness);
       } else {
-        iconColored = rgb(color, icon);
-        bashColored = rgb(color, "bash");
+        iconColored = mu(color, icon);
+        bashColored = mu(color, "bash");
       }
 
-      const prefix = `${iconColored} ${bashColored} ${rgb("dim", "$")} `;
-      const prefixLen = visibleWidth(prefix);
-      const indent = " ".repeat(prefixLen);
+      // Line 1: header with $ prompt — no command text on this line
+      const header = `${iconColored} ${bashColored} ${mu("dim", "$")}`;
+      const headerLen = visibleWidth(header);
+      const headerPad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
+      const resultLines: string[] = [`${header}${headerPad}${rightPart}`];
 
-      const firstLineWidth = innerW - prefixLen - rightLen - 1;
-      const contLineWidth = innerW - prefixLen;
+      // Line 2+: 2-space indent for new statements, 4-space for chain continuations & wraps
+      const stmtIndent = "  ";
+      const contIndent = "    ";
+      const stmtWidth = innerW - 2;
+      const contWidth = innerW - 4;
 
-      if (firstLineWidth <= 0 || contLineWidth <= 0) {
-        const fallback = `${prefix}${rgb("white", truncateToWidth(rawCmd, Math.max(1, innerW - prefixLen - rightLen - 1)))}`;
-        const fallbackLen = visibleWidth(fallback);
-        const padding = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
-        return [`${fallback}${padding}${rightPart}`];
+      if (stmtWidth <= 0) {
+        resultLines.push(`${stmtIndent}${mu("text", cmd)}`);
+        return resultLines;
       }
 
-      const cmdLines = rawCmd.split("\n");
-      const allWrapped: string[] = [];
+      const srcLines = cmd.split("\n");
+      let prevChained = false;
+      let inSQ = false;
+      let inDQ = false;
 
-      for (const cmdLine of cmdLines) {
-        if (allWrapped.length === 0) {
-          const wrapped = wrapTextWithAnsi(cmdLine, firstLineWidth);
-          if (wrapped.length === 0) {
-            allWrapped.push("");
-          } else {
-            allWrapped.push(wrapped[0]);
-            if (wrapped.length > 1) {
-              const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contLineWidth);
-              allWrapped.push(...rewrapped);
+      for (const srcLine of srcLines) {
+        const highlighted = highlightBashLine(srcLine, inSQ, inDQ);
+        const inQuote = inSQ || inDQ;
+        // Continuation if: inside a quoted string, or previous line ended with chain operator
+        const isCont = inQuote || prevChained;
+        const indent = isCont ? contIndent : stmtIndent;
+        const lineWidth = isCont ? contWidth : stmtWidth;
+
+        const wrapped = wrapTextWithAnsi(highlighted, lineWidth);
+        if (wrapped.length === 0) {
+          resultLines.push(indent);
+        } else {
+          resultLines.push(`${indent}${wrapped[0]}`);
+          if (wrapped.length > 1) {
+            // Wrap continuations always at 4-space indent
+            const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contWidth);
+            for (const rw of rewrapped) {
+              resultLines.push(`${contIndent}${rw}`);
             }
           }
-        } else {
-          const wrapped = wrapTextWithAnsi(cmdLine, contLineWidth);
-          allWrapped.push(...(wrapped.length > 0 ? wrapped : [""]));
         }
+
+        [inSQ, inDQ] = bashUpdateQuoteState(srcLine, inSQ, inDQ);
+        // Only check chain operators when not inside a quote
+        prevChained = !(inSQ || inDQ) && bashLineIsChained(srcLine);
       }
 
-      const resultLines: string[] = [];
-      for (let i = 0; i < allWrapped.length; i++) {
-        const line = allWrapped[i];
-        if (i === 0) {
-          const lineContent = `${prefix}${rgb("white", line)}`;
-          const lineLen = visibleWidth(lineContent);
-          const padding = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
-          resultLines.push(`${lineContent}${padding}${rightPart}`);
-        } else {
-          const lineContent = `${indent}${rgb("white", line)}`;
-          resultLines.push(lineContent);
-        }
-      }
-
-      return resultLines.length > 0
-        ? resultLines
-        : [`${prefix}${" ".repeat(Math.max(0, innerW - prefixLen - rightLen))}${rightPart}`];
+      return resultLines;
     };
 
     // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
@@ -1105,6 +1489,31 @@ const setupUIPatching = (ctx: ExtensionContext) => {
       if (!origRender) return;
 
       tool.render = (width: number): string[] => {
+        const lines = _renderStreamingTool(tool, width);
+        const res = tool.result as { isError?: boolean; content?: unknown[] } | undefined;
+        if (res?.isError) {
+          const errText = extractResultText(res);
+          if (errText) {
+            const innerW = width - 2;
+            const errLines = errText.split("\n").filter((l: string) => l.length > 0);
+            const capped = errLines.slice(0, MU_CONFIG.MAX_ERROR_LINES);
+            for (const el of capped) {
+              lines.push(truncateToWidth(`  ${mu("error", el)}`, innerW));
+            }
+            if (errLines.length > MU_CONFIG.MAX_ERROR_LINES) {
+              lines.push(
+                mu("dim", `  … ${errLines.length - MU_CONFIG.MAX_ERROR_LINES} more lines`)
+              );
+            }
+          }
+        }
+        return clampLines(lines, width);
+      };
+
+      const _renderStreamingTool = (
+        tool: Component & Record<string, unknown>,
+        width: number
+      ): string[] => {
         const toolName = tool.toolName as string;
         const args = (tool.args ?? {}) as Record<string, unknown>;
         const isPartial = tool.isPartial as boolean;
@@ -1140,15 +1549,15 @@ const setupUIPatching = (ctx: ExtensionContext) => {
 
         const innerW = width - 2;
 
-        const statusStr = rgb(color, sym);
-        const timerColored = rgb("dim", timerStr);
+        const statusStr = mu(color, sym);
+        const timerColored = mu("dim", timerStr);
         const rightPart = `${statusStr}${timerColored}`;
         const rightLen = visibleWidth(rightPart);
 
-        // For bash: render multiline with full command, no truncation
+        // For bash: render multiline, cap height
         if (toolName === "bash") {
           const rawCmd = typeof args.command === "string" ? args.command : "";
-          const lines = renderBashMultilineForPatch(
+          let lines = renderBashMultilineForPatch(
             rawCmd,
             icon,
             color,
@@ -1158,44 +1567,228 @@ const setupUIPatching = (ctx: ExtensionContext) => {
             status,
             pulsePhase
           );
+          if (lines.length > MU_CONFIG.MAX_BASH_LINES) {
+            const total = lines.length;
+            lines = lines.slice(0, MU_CONFIG.MAX_BASH_LINES);
+            lines.push(mu("dim", `  … ${total - MU_CONFIG.MAX_BASH_LINES} more lines`));
+          }
           if (tool._mu_leading_space) {
             return ["", ...lines];
           }
           return lines;
         }
 
-        // Default: single-line truncated rendering for other tools
-        const leftMax = innerW - rightLen - 1;
+        // Special handling for skill reads — render without "read" prefix
+        if (toolName === "read") {
+          const rawPath = typeof args.path === "string" ? args.path : "";
+          if (isSkillRead(rawPath)) {
+            const skillName = extractSkillName(rawPath);
+            const { r, g, b } = SKILL_COLOR;
+            const skillLine = rgbRaw(r, g, b, `${SKILL_ICON} skill loaded: ${skillName}`);
+            const lineLen = visibleWidth(skillLine);
+            const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+            const line = `${skillLine}${pad}${rightPart}`;
+            if (tool._mu_leading_space) return ["", line];
+            return [line];
+          }
+        }
 
-        // Apply pulsing effect to icon and name when running
+        // Non-bash tools: pretty-printed with syntax highlighting
         let iconColored: string;
         let nameColored: string;
         if (status === "running") {
           const brightness =
             MU_CONFIG.PULSE_MIN_BRIGHTNESS +
             (1 - MU_CONFIG.PULSE_MIN_BRIGHTNESS) * (0.5 + 0.5 * Math.sin(pulsePhase));
-          iconColored = rgbPulse(color, icon, brightness);
-          nameColored = rgbPulse(color, toolName, brightness);
+          iconColored = muPulse(color, icon, brightness);
+          nameColored = muPulse(color, toolName, brightness);
         } else {
-          iconColored = rgb(color, icon);
-          nameColored = rgb(color, toolName);
+          iconColored = mu(color, icon);
+          nameColored = mu(color, toolName);
         }
 
-        const argsPreview = formatToolArgsPreview(toolName, args);
-        const argsColored = rgb("dim", ` ${argsPreview}`);
-        const leftContent = `${iconColored} ${nameColored}${argsColored}`;
-        const leftTrunc = truncateToWidth(leftContent, leftMax);
-        const leftLen = visibleWidth(leftTrunc);
+        // Special case: sigma tool — show question IDs while running, answers on result
+        if (toolName === "sigma") {
+          const questions = args.questions;
+          const qIds = Array.isArray(questions)
+            ? (questions as Array<Record<string, unknown>>)
+                .map((q) => (typeof q.id === "string" ? q.id : ""))
+                .filter(Boolean)
+                .join(", ")
+            : "";
 
-        const padding = " ".repeat(Math.max(0, innerW - leftLen - rightLen));
-        const line = `${leftTrunc}${padding}${rightPart}`;
+          const headerContent = `${iconColored} ${nameColored}`;
+          const headerLen = visibleWidth(headerContent);
 
-        // Add leading blank line if this tool follows a user message
-        if (tool._mu_leading_space) {
-          return ["", line];
+          const resultData = tool.result as { content?: unknown[] } | undefined;
+          let answerText = "";
+          if (resultData?.content && Array.isArray(resultData.content)) {
+            answerText = resultData.content
+              .filter((c: unknown) => isRecord(c) && c.type === "text")
+              .map((c: unknown) => (c as { text?: string }).text ?? "")
+              .join("\n");
+          }
+
+          if (answerText) {
+            // Completed: show answers with colored question titles + teal answers
+            const answerLines = answerText.split("\n").filter((l: string) => l.trim());
+            const pad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
+            const lines: string[] = [`${headerContent}${pad}${rightPart}`];
+            for (const aLine of answerLines) {
+              lines.push(truncateToWidth(`  ${formatSigmaAnswerLine(aLine)}`, innerW));
+            }
+            if (tool._mu_leading_space) return ["", ...lines];
+            return lines;
+          }
+
+          // Running: show question IDs inline
+          const idsStr = qIds ? `  ${mu("dim", qIds)}` : "";
+          const lineContent = `${headerContent}${idsStr}`;
+          const lineLen = visibleWidth(lineContent);
+          const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+          const line = `${lineContent}${pad}${rightPart}`;
+          if (tool._mu_leading_space) return ["", line];
+          return [line];
         }
-        return [line];
-      };
+
+        // Special case: ask tool — suppress args, show only user's answer
+        if (toolName === "ask") {
+          const headerContent = `${iconColored} ${nameColored}`;
+          const headerLen = visibleWidth(headerContent);
+
+          const resultData = tool.result as { content?: unknown[] } | undefined;
+          let answerText = "";
+          if (resultData?.content && Array.isArray(resultData.content)) {
+            answerText = resultData.content
+              .filter((c: unknown) => isRecord(c) && c.type === "text")
+              .map((c: unknown) => (c as { text?: string }).text ?? "")
+              .join("\n");
+          }
+
+          if (answerText) {
+            const answerLines = answerText.split("\n").filter((l: string) => l.trim());
+            const pad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
+            const lines: string[] = [`${headerContent}${pad}${rightPart}`];
+            for (const aLine of answerLines) {
+              lines.push(truncateToWidth(`  ${mu("text", aLine)}`, innerW));
+            }
+            if (tool._mu_leading_space) return ["", ...lines];
+            return lines;
+          }
+
+          // Running or no result yet — just tool name
+          const pad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
+          const line = `${headerContent}${pad}${rightPart}`;
+          if (tool._mu_leading_space) return ["", line];
+          return [line];
+        }
+
+        const hasComplex = Object.values(args).some(isComplexValue);
+
+        if (hasComplex) {
+          // Pretty-print mode: tool name on first line, args below with highlighting
+          const headerContent = `${iconColored} ${nameColored}`;
+          const headerLen = visibleWidth(headerContent);
+          const pad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
+          const resultLines: string[] = [`${headerContent}${pad}${rightPart}`];
+
+          const BLOCK_INDENT = "  ";
+          for (const [k, v] of Object.entries(args)) {
+            const keyStr = `${mu("info", k)}${mu("dim", "=")}`;
+
+            if (isComplexValue(v)) {
+              const highlighted = highlightValue(v);
+              for (let i = 0; i < highlighted.length; i++) {
+                const raw =
+                  i === 0
+                    ? `${BLOCK_INDENT}${keyStr}${highlighted[i]}`
+                    : `${BLOCK_INDENT}${highlighted[i]}`;
+                resultLines.push(truncateToWidth(raw, innerW));
+              }
+            } else {
+              const valStr =
+                v === null
+                  ? mu("keyword", "null")
+                  : v === undefined
+                    ? mu("dim", "undefined")
+                    : typeof v === "boolean"
+                      ? mu("keyword", String(v))
+                      : typeof v === "number"
+                        ? mu("warning", String(v))
+                        : mu("text", String(v));
+              resultLines.push(truncateToWidth(`${BLOCK_INDENT}${keyStr}${valStr}`, innerW));
+            }
+          }
+
+          if (tool._mu_leading_space) return ["", ...resultLines];
+          return resultLines;
+        }
+
+        // Simple mode: inline args with multiline wrapping
+        const argsStr = formatToolArgsPreview(toolName, args);
+        const annotation = formatToolAnnotation(toolName, args);
+        const annotationSuffix = annotation ? ` ${annotation}` : "";
+        const annotationLen = annotation ? 1 + visibleWidth(annotation) : 0;
+
+        const prefix = `${iconColored} ${nameColored} `;
+        const prefixLen = visibleWidth(prefix);
+        const indent = " ".repeat(prefixLen);
+
+        const firstLineWidth = innerW - prefixLen - rightLen - 1 - annotationLen;
+        const contLineWidth = innerW - prefixLen;
+
+        if (firstLineWidth <= 0 || contLineWidth <= 0) {
+          const fallback = `${prefix}${mu("dim", truncateToWidth(argsStr, Math.max(1, innerW - prefixLen - rightLen - 1 - annotationLen)))}${annotationSuffix}`;
+          const fallbackLen = visibleWidth(fallback);
+          const pad = " ".repeat(Math.max(0, innerW - fallbackLen - rightLen));
+          const lines = [`${fallback}${pad}${rightPart}`];
+          if (tool._mu_leading_space) return ["", ...lines];
+          return lines;
+        }
+
+        const argsSegments = argsStr.split("\n");
+        const allWrapped: string[] = [];
+
+        for (const seg of argsSegments) {
+          if (allWrapped.length === 0) {
+            const wrapped = wrapTextWithAnsi(seg, firstLineWidth);
+            if (wrapped.length === 0) {
+              allWrapped.push("");
+            } else {
+              allWrapped.push(wrapped[0]);
+              if (wrapped.length > 1) {
+                const rewrapped = wrapTextWithAnsi(wrapped.slice(1).join(" "), contLineWidth);
+                allWrapped.push(...rewrapped);
+              }
+            }
+          } else {
+            const wrapped = wrapTextWithAnsi(seg, contLineWidth);
+            allWrapped.push(...(wrapped.length > 0 ? wrapped : [""]));
+          }
+        }
+
+        const resultLines: string[] = [];
+        for (let i = 0; i < allWrapped.length; i++) {
+          const wl = allWrapped[i];
+          if (i === 0) {
+            const lineContent = `${prefix}${mu("dim", wl)}${annotationSuffix}`;
+            const lineLen = visibleWidth(lineContent);
+            const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+            resultLines.push(`${lineContent}${pad}${rightPart}`);
+          } else {
+            resultLines.push(`${indent}${mu("dim", wl)}`);
+          }
+        }
+
+        if (resultLines.length === 0) {
+          resultLines.push(
+            `${prefix}${annotationSuffix}${" ".repeat(Math.max(0, innerW - prefixLen - annotationLen - rightLen))}${rightPart}`
+          );
+        }
+
+        if (tool._mu_leading_space) return ["", ...resultLines];
+        return resultLines;
+      }; // end _renderStreamingTool
 
       // Cleanup on dispose
       const origDispose = tool.dispose?.bind(tool);
@@ -1207,6 +1800,126 @@ const setupUIPatching = (ctx: ExtensionContext) => {
 
     // biome-ignore lint/suspicious/noExplicitAny: Accessing TUI internals
     const tuiAny = tui as any;
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Steering/Follow-up Message Patching
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Patches TruncatedText components to show multiline (up to 3 lines) with
+    // distinct colors: teal for steering, purple for follow-up.
+
+    const MAX_QUEUED_LINES = 3;
+
+    // Note: Uses constructor.name which would break under minification.
+    // Safe here because Pi runs unminified extension code.
+    const isTruncatedText = (c: unknown): boolean => {
+      const x = c as { constructor?: { name?: string }; text?: unknown };
+      return x.constructor?.name === "TruncatedText" && typeof x.text === "string";
+    };
+
+    // Strip ANSI codes to get raw text for parsing
+    // Handles: SGR (\x1b[...m), 256-color (\x1b[38;5;Nm), RGB (\x1b[38;2;R;G;Bm)
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape sequence matching requires control chars
+    const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+    // biome-ignore lint/suspicious/noExplicitAny: Patching Pi internals
+    const patchQueuedMessage = (comp: any) => {
+      if (comp._mu_patched) return;
+      comp._mu_patched = true;
+
+      const rawText: string = comp.text ?? "";
+      const stripped = stripAnsi(rawText);
+
+      // Detect message type from prefix
+      const isSteering = stripped.startsWith("Steering:");
+      const isFollowUp = stripped.startsWith("Follow-up:");
+      const isHint = stripped.startsWith("↳");
+
+      if (!isSteering && !isFollowUp && !isHint) return;
+
+      // Extract the actual message content (after prefix)
+      let prefix: string;
+      let content: string;
+      let color: MuColor;
+
+      if (isSteering) {
+        prefix = "󰍻 Steering"; // nf-md-arrow_right_bold — teal, interrupts current work
+        content = stripped.slice("Steering:".length).trim();
+        color = "info";
+      } else if (isFollowUp) {
+        prefix = "󰁔 Follow-up"; // nf-md-arrow_down_bold — cyan, queued for after completion
+        content = stripped.slice("Follow-up:".length).trim();
+        color = "variable";
+      } else {
+        // Hint line - keep as-is but style it
+        comp.render = (width: number): string[] => {
+          const hint = mu("dim", stripped);
+          const padded = hint + " ".repeat(Math.max(0, width - visibleWidth(hint)));
+          return [padded];
+        };
+        return;
+      }
+
+      // Override render to show up to MAX_QUEUED_LINES with truncation indicator
+      comp.render = (width: number): string[] => {
+        const result: string[] = [];
+        const availW = Math.max(1, width - 2); // 2 chars for left indent
+
+        // Header line: prefix with icon
+        const header = `${mu(color, prefix)}${mu("dim", ":")}`;
+        result.push(header + " ".repeat(Math.max(0, width - visibleWidth(header))));
+
+        // Content lines: split by newline, wrap, cap at MAX_QUEUED_LINES-1
+        const contentLines = content.split("\n");
+        const wrappedLines: string[] = [];
+
+        for (const line of contentLines) {
+          if (line.length <= availW) {
+            wrappedLines.push(line);
+          } else {
+            // Simple word wrap
+            let remaining = line;
+            while (remaining.length > 0) {
+              if (remaining.length <= availW) {
+                wrappedLines.push(remaining);
+                break;
+              }
+              let breakAt = remaining.lastIndexOf(" ", availW);
+              if (breakAt <= 0) breakAt = availW;
+              wrappedLines.push(remaining.slice(0, breakAt));
+              remaining = remaining.slice(breakAt).trimStart();
+            }
+          }
+          if (wrappedLines.length >= MAX_QUEUED_LINES - 1) break;
+        }
+
+        // Cap and add truncation indicator
+        const maxContentLines = MAX_QUEUED_LINES - 1;
+        const isTruncated =
+          wrappedLines.length > maxContentLines || contentLines.length > wrappedLines.length;
+        const displayLines = wrappedLines.slice(0, maxContentLines);
+
+        for (let i = 0; i < displayLines.length; i++) {
+          const isLast = i === displayLines.length - 1;
+          let lineText = displayLines[i];
+
+          // Add ellipsis if truncated on last line
+          if (isLast && isTruncated) {
+            const ellipsis = mu("dim", " …");
+            const maxW = availW - 2; // room for ellipsis
+            if (lineText.length > maxW) {
+              lineText = lineText.slice(0, maxW);
+            }
+            lineText = lineText + ellipsis;
+          }
+
+          // Content in same color as prefix (queued appearance)
+          const styled = `  ${mu(color, lineText)}`;
+          result.push(styled + " ".repeat(Math.max(0, width - visibleWidth(styled))));
+        }
+
+        return result;
+      };
+    };
+
     for (const child of tuiAny.children ?? []) {
       if (child.constructor?.name === "Container") {
         // Track last component type
@@ -1221,6 +1934,8 @@ const setupUIPatching = (ctx: ExtensionContext) => {
           } else if (isTool(gc)) {
             patchTool(gc, lastWasUser);
             lastWasUser = false;
+          } else if (isTruncatedText(gc)) {
+            patchQueuedMessage(gc);
           }
         }
 
@@ -1241,6 +1956,8 @@ const setupUIPatching = (ctx: ExtensionContext) => {
               } else if (isTool(newChild)) {
                 patchTool(newChild, addSpace);
                 child._mu_lastWasUser = false;
+              } else if (isTruncatedText(newChild)) {
+                patchQueuedMessage(newChild);
               }
               return origAdd(newChild);
             };
@@ -1254,14 +1971,82 @@ const setupUIPatching = (ctx: ExtensionContext) => {
   });
 };
 
+// =============================================================================
+// SIGMA ANSWER LINE FORMATTING
+// =============================================================================
+
+/**
+ * Colorize a sigma answer line: question title in accent, separator dim, answer in teal.
+ * Parses: "Label: user wrote: answer" or "Label: user selected: N. answer"
+ */
+function formatSigmaAnswerLine(line: string): string {
+  const wroteMatch = line.match(/^(.+?):\s*(user wrote:\s*)(.+)$/);
+  if (wroteMatch) {
+    return `${mu("accent", wroteMatch[1])}: ${mu("dim", wroteMatch[2])}${mu("info", wroteMatch[3])}`;
+  }
+  const selectedMatch = line.match(/^(.+?):\s*(user selected:\s*)(.+)$/);
+  if (selectedMatch) {
+    return `${mu("accent", selectedMatch[1])}: ${mu("dim", selectedMatch[2])}${mu("info", selectedMatch[3])}`;
+  }
+  return mu("info", line);
+}
+
+// =============================================================================
+// PRETTY-PRINT & SYNTAX HIGHLIGHTING FOR TOOL ARGS
+// =============================================================================
+
+function isComplexValue(v: unknown): boolean {
+  if (v === null || v === undefined) return false;
+  if (typeof v === "object") return true;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if ((t.startsWith("{") && t.endsWith("}")) || (t.startsWith("[") && t.endsWith("]"))) {
+      try {
+        JSON.parse(t);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+function highlightValue(v: unknown): string[] {
+  if (v === null) return highlightCode("null", "json");
+  if (v === undefined) return [mu("dim", "undefined")];
+  if (typeof v === "boolean" || typeof v === "number") {
+    return highlightCode(JSON.stringify(v), "json");
+  }
+  if (typeof v === "object") {
+    return highlightCode(JSON.stringify(v, null, 2), "json");
+  }
+  if (typeof v === "string") {
+    const t = v.trim();
+    if ((t.startsWith("{") && t.endsWith("}")) || (t.startsWith("[") && t.endsWith("]"))) {
+      try {
+        const parsed = JSON.parse(t);
+        return highlightCode(JSON.stringify(parsed, null, 2), "json");
+      } catch {
+        /* not JSON */
+      }
+    }
+    return [v];
+  }
+  return [String(v)];
+}
+
 function formatToolArgsPreview(name: string, args: Record<string, unknown>): string {
   if (!args) return "";
   const p = (args.path ?? args.file_path ?? "") as string;
-  const relPath = p.startsWith("/") ? p.split("/").slice(-2).join("/") : p;
+  const relPath = toRelativePath(p);
 
   switch (name) {
-    case "bash":
-      return preview((args.command as string) ?? "", 60);
+    case "bash": {
+      const rawCmd = (args.command as string) ?? "";
+      const stripped = stripCdPrefix(rawCmd);
+      return preview(stripped, 60);
+    }
     case "read":
     case "write":
     case "ls":
@@ -1270,11 +2055,57 @@ function formatToolArgsPreview(name: string, args: Record<string, unknown>): str
     case "grep":
     case "find":
       return `${args.pattern ?? ""} ${relPath}`;
+    case "sigma": {
+      const questions = args.questions;
+      if (Array.isArray(questions)) {
+        return (questions as Array<Record<string, unknown>>)
+          .map((q) => (typeof q.id === "string" ? q.id : ""))
+          .filter(Boolean)
+          .join(", ");
+      }
+      return "";
+    }
+    case "ask":
+      return "";
     default:
       return Object.entries(args)
-        .slice(0, 2)
-        .map(([k, v]) => `${k}=${preview(String(v), 20)}`)
+        .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
         .join(" ");
+  }
+}
+
+/**
+ * Generate a colored annotation string for read/write/edit tools.
+ * Shown inline after the tool args in the condensed patchTool view.
+ *
+ * - read:  "@100-150" (dim) or "full" (dim)
+ * - write: "+124" (success/green)
+ * - edit:  "+4 ~30 -50" (green/yellow/red, only non-zero parts)
+ */
+function formatToolAnnotation(toolName: string, args: Record<string, unknown>): string {
+  switch (toolName) {
+    case "read": {
+      const offset = typeof args.offset === "number" ? args.offset : undefined;
+      const limit = typeof args.limit === "number" ? args.limit : undefined;
+      return mu("dim", formatReadLoc(offset, limit));
+    }
+    case "write": {
+      const content = typeof args.content === "string" ? args.content : "";
+      const lines = content ? content.split("\n").length : 0;
+      return lines > 0 ? mu("success", `+${lines}`) : "";
+    }
+    case "edit": {
+      const oldText = typeof args.oldText === "string" ? args.oldText : "";
+      const newText = typeof args.newText === "string" ? args.newText : "";
+      const { added, modified, deleted } = computeEditStats(oldText, newText);
+      const parts: string[] = [];
+      if (added > 0) parts.push(mu("success", `+${added}`));
+      if (modified > 0) parts.push(mu("warning", `~${modified}`));
+      if (deleted > 0) parts.push(mu("error", `-${deleted}`));
+      return parts.join(" ");
+    }
+    default:
+      return "";
   }
 }
 
@@ -1285,6 +2116,38 @@ export default function (pi: ExtensionAPI) {
   // Setup UI patching on session start
   pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext) => {
     workingTimer.stop(); // defensive cleanup from any prior session
+    refreshCwdCache(); // refresh CWD for path utilities
+    clearThemeCache(); // refresh theme RGB cache (theme may have changed)
+
+    // Clear stale state from any prior session in this process
+    clearToolStateMaps();
+
+    // Persistence: set session identity and load prior results
+    const sessionId = ctx.sessionManager.getSessionId();
+    setCurrentSessionId(sessionId);
+    debugLog(`session_start: sessionId=${sessionId}`);
+
+    const persisted = loadToolResults(sessionId);
+    debugLog(`session_start: loaded ${persisted.length} persisted results`);
+
+    if (persisted.length > 0) {
+      // Deduplicate: only load results not already in memory (by toolCallId)
+      const existingKeys = new Set(toolResultOptions.map((o) => o.key));
+      for (const opt of persisted) {
+        if (!existingKeys.has(opt.key)) {
+          toolResultOptions.push(opt);
+        }
+      }
+      // Re-cap after merge
+      while (toolResultOptions.length > MU_CONFIG.MAX_TOOL_RESULTS) {
+        toolResultOptions.shift();
+      }
+      debugLog(`session_start: merged → ${toolResultOptions.length} total in memory`);
+    }
+
+    // Clean up old sessions (fire-and-forget, non-blocking)
+    cleanupOldSessions();
+
     setupUIPatching(ctx);
 
     // Enable enhanced model display footer
@@ -1292,6 +2155,34 @@ export default function (pi: ExtensionAPI) {
       enableModelDisplayFooter(ctx);
     }
   });
+
+  // Handle session switch (e.g., /resume command within same Pi process)
+  pi.on(
+    "session_switch",
+    (
+      event: { type: "session_switch"; reason: string; previousSessionFile?: string },
+      ctx: ExtensionContext
+    ) => {
+      const prevSessionId = currentSessionId;
+      const newSessionId = ctx.sessionManager.getSessionId();
+      setCurrentSessionId(newSessionId);
+      debugLog(`session_switch: reason=${event.reason} prev=${prevSessionId} new=${newSessionId}`);
+
+      // Clear all in-memory state for clean session switch
+      toolResultOptions.length = 0;
+      clearToolStateMaps();
+
+      // Reload from new session
+      const persisted = loadToolResults(newSessionId);
+      toolResultOptions.push(...persisted);
+
+      // Cap to max
+      while (toolResultOptions.length > MU_CONFIG.MAX_TOOL_RESULTS) {
+        toolResultOptions.shift();
+      }
+      debugLog(`session_switch: loaded ${persisted.length} results from new session`);
+    }
+  );
 
   // Working timer: start on agent_start, stop on agent_end
   pi.on("agent_start", (_event: AgentStartEvent, ctx: ExtensionContext) => {
@@ -1303,11 +2194,25 @@ export default function (pi: ExtensionAPI) {
     if (elapsed >= MIN_ELAPSED_FOR_NOTIFICATION_MS && ctx.hasUI) {
       ctx.ui.notify(`⏱ Completed in ${formatWorkingElapsed(elapsed)}`, "info");
     }
+
+    // Mark any still-active tools as canceled (orphaned by abort/timeout)
+    for (const [id, state] of activeToolsById) {
+      state.status = "canceled";
+      state.duration = Date.now() - state.startTime;
+      activeToolsById.delete(id);
+    }
+  });
+
+  // Close DB on session shutdown
+  pi.on("session_shutdown", (_event: SessionShutdownEvent) => {
+    debugLog(`session_shutdown: sessionId=${currentSessionId}`);
+    closeMuDb();
+    setCurrentSessionId(null);
   });
 
   // When a turn starts (user message sent), set flag for next tool to add leading space
   pi.on("turn_start", () => {
-    nextToolNeedsLeadingSpace = true;
+    setNextToolNeedsLeadingSpace(true);
   });
 
   // Track tool execution state
@@ -1315,6 +2220,8 @@ export default function (pi: ExtensionAPI) {
     const { toolCallId, toolName, input } = event;
     const args = input as Record<string, unknown>;
     const sig = computeSignature(toolName, args);
+
+    debugLog(`tool_call: toolCallId=${toolCallId} toolName=${toolName}`);
 
     const state: ToolState = {
       toolCallId,
@@ -1333,16 +2240,23 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_result", (event: ToolResultEvent, _ctx: ExtensionContext) => {
     const { toolCallId, isError, content } = event;
+    debugLog(`tool_result: toolCallId=${toolCallId} isError=${isError ?? false}`);
+
     const state = activeToolsById.get(toolCallId);
-    if (!state) return;
+    if (!state) {
+      debugLog(
+        `tool_result: WARNING - no state for toolCallId=${toolCallId}, result not persisted`
+      );
+      return;
+    }
 
     const duration = Date.now() - state.startTime;
     state.duration = duration;
     state.status = isError ? "failed" : "success";
-    fullToolResultContentById.set(toolCallId, content);
+    activeToolsById.delete(toolCallId);
 
     const label = `${state.toolName} ${formatToolArgsPreview(state.toolName, state.args)}`;
-    toolResultOptions.push({
+    const resultOption: ToolResultOption = {
       key: toolCallId,
       toolName: state.toolName,
       sig: state.sig,
@@ -1352,11 +2266,20 @@ export default function (pi: ExtensionAPI) {
       startTime: state.startTime,
       duration,
       isError: isError ?? false,
-    });
+    };
+
+    toolResultOptions.push(resultOption);
+
+    // Persist to disk
+    if (currentSessionId) {
+      debugLog(`tool_result: persisting to session=${currentSessionId}`);
+      persistToolResult(currentSessionId, resultOption);
+    } else {
+      debugLog("tool_result: WARNING - currentSessionId is null, result not persisted");
+    }
 
     if (toolResultOptions.length > MU_CONFIG.MAX_TOOL_RESULTS) {
-      const removed = toolResultOptions.shift();
-      if (removed) fullToolResultContentById.delete(removed.key);
+      toolResultOptions.shift();
     }
 
     if (toolStatesBySig.size > MU_CONFIG.MAX_COMPLETED_DURATIONS) {
@@ -1466,16 +2389,11 @@ export default function (pi: ExtensionAPI) {
 
   const _muTheme: MuTheme = {
     fg: (color, text) => {
-      const colorMap: Record<string, ColorKey> = {
-        accent: "orange",
-        text: "white",
-        dim: "dim",
-        success: "green",
-        error: "red",
-        warning: "yellow",
-      };
-      const c = C[colorMap[color] ?? (color as ColorKey)];
-      return c ? rgbRaw(c.r, c.g, c.b, text) : text;
+      try {
+        return getTheme().fg(color as ThemeColor, text);
+      } catch {
+        return text;
+      }
     },
     bg: (_color, text) => text,
   };
@@ -1485,7 +2403,8 @@ export default function (pi: ExtensionAPI) {
       "bash",
       createBashTool,
       (args, t) => {
-        const cmd = typeof args.command === "string" ? args.command : "";
+        const rawCmd = typeof args.command === "string" ? args.command : "";
+        const cmd = stripCdPrefix(rawCmd); // Strip redundant cd <cwd> &&
         return `${t.fg("accent", "bash")} ${t.fg("dim", "$")} ${t.fg("text", cmd)}`;
       },
     ],
@@ -1493,10 +2412,19 @@ export default function (pi: ExtensionAPI) {
       "read",
       createReadTool,
       (args, t) => {
+        const rawPath = typeof args.path === "string" ? args.path : "";
+
+        // Special handling for skill files
+        if (isSkillRead(rawPath)) {
+          const skillName = extractSkillName(rawPath);
+          const { r, g, b } = SKILL_COLOR;
+          return rgbRaw(r, g, b, `${SKILL_ICON} skill loaded: ${skillName}`);
+        }
+
         const offset = typeof args.offset === "number" ? args.offset : undefined;
         const limit = typeof args.limit === "number" ? args.limit : undefined;
         const info = formatReadLoc(offset, limit);
-        const path = typeof args.path === "string" ? args.path : "";
+        const path = toRelativePath(rawPath); // CWD-relative
         return `${t.fg("accent", "read")} ${t.fg("text", path)} ${info ? t.fg("dim", info) : ""}`.trimEnd();
       },
     ],
@@ -1505,7 +2433,8 @@ export default function (pi: ExtensionAPI) {
       createGrepTool,
       (args, t) => {
         const pattern = args.pattern !== undefined ? String(args.pattern) : "";
-        const where = typeof args.path === "string" ? args.path : ".";
+        const rawWhere = typeof args.path === "string" ? args.path : ".";
+        const where = toRelativePath(rawWhere); // CWD-relative
         return `${t.fg("accent", "grep")} ${t.fg("text", JSON.stringify(pattern))} ${t.fg("text", where)}`;
       },
     ],
@@ -1514,7 +2443,8 @@ export default function (pi: ExtensionAPI) {
       createFindTool,
       (args, t) => {
         const pattern = args.pattern !== undefined ? String(args.pattern) : "";
-        const where = typeof args.path === "string" ? args.path : ".";
+        const rawWhere = typeof args.path === "string" ? args.path : ".";
+        const where = toRelativePath(rawWhere); // CWD-relative
         return `${t.fg("accent", "find")} ${t.fg("text", JSON.stringify(pattern))} ${t.fg("text", where)}`;
       },
     ],
@@ -1522,7 +2452,8 @@ export default function (pi: ExtensionAPI) {
       "ls",
       createLsTool,
       (args, t) => {
-        const path = typeof args.path === "string" ? args.path : ".";
+        const rawPath = typeof args.path === "string" ? args.path : ".";
+        const path = toRelativePath(rawPath); // CWD-relative
         return `${t.fg("accent", "ls")} ${t.fg("text", path)}`;
       },
     ],
@@ -1530,24 +2461,28 @@ export default function (pi: ExtensionAPI) {
       "write",
       createWriteTool,
       (args, t) => {
-        const path = typeof args.path === "string" ? args.path : "";
+        const rawPath = typeof args.path === "string" ? args.path : "";
+        const path = toRelativePath(rawPath); // CWD-relative
         const content = typeof args.content === "string" ? args.content : "";
         const lines = content ? content.split("\n").length : 0;
-        return `${t.fg("accent", "write")} ${t.fg("text", path)} ${lines > 0 ? t.fg("dim", `(${lines} lines)`) : ""}`.trimEnd();
+        return `${t.fg("accent", "write")} ${t.fg("text", path)} ${lines > 0 ? t.fg("success", `+${lines}`) : ""}`.trimEnd();
       },
     ],
     [
       "edit",
       createEditTool,
       (args, t) => {
-        const path = typeof args.path === "string" ? args.path : "";
+        const rawPath = typeof args.path === "string" ? args.path : "";
+        const path = toRelativePath(rawPath); // CWD-relative
         const oldText = typeof args.oldText === "string" ? args.oldText : "";
         const newText = typeof args.newText === "string" ? args.newText : "";
-        const oldLines = oldText ? oldText.split("\n").length : 0;
-        const newLines = newText ? newText.split("\n").length : 0;
-        const delta = newLines - oldLines;
-        const deltaStr = delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : "±0";
-        return `${t.fg("accent", "edit")} ${t.fg("text", path)} ${t.fg("dim", `(${oldLines}→${newLines}, ${deltaStr})`)}`;
+        const { added, modified, deleted } = computeEditStats(oldText, newText);
+        const parts: string[] = [];
+        if (added > 0) parts.push(t.fg("success", `+${added}`));
+        if (modified > 0) parts.push(t.fg("warning", `~${modified}`));
+        if (deleted > 0) parts.push(t.fg("error", `-${deleted}`));
+        const statsStr = parts.join(" ");
+        return `${t.fg("accent", "edit")} ${t.fg("text", path)} ${statsStr}`.trimEnd();
       },
     ],
   ];
@@ -1565,6 +2500,62 @@ export default function (pi: ExtensionAPI) {
   // - Thinking: gradient #A17E57 (tan) → #F24C38 (bright red)
 
   let modelDisplayEnabled = true;
+
+  // ---------------------------------------------------------------------------
+  // Process Resource Tracker (PID, RSS, CPU%)
+  // ---------------------------------------------------------------------------
+  // Uses Node.js built-ins only — no external dependencies.
+  // CPU % is computed as delta of process.cpuUsage() over wall-clock time.
+  class ProcessResourceTracker {
+    private lastCpuUsage = process.cpuUsage();
+    private lastSampleTime = Date.now();
+    private cpuPercent = 0;
+    private numCpus = 1;
+
+    constructor() {
+      try {
+        const os = require("node:os");
+        this.numCpus = os.cpus().length || 1;
+      } catch {
+        this.numCpus = 1;
+      }
+    }
+
+    /** Sample CPU and return current snapshot. Call on each render. */
+    sample(): { pid: number; rssMB: number; cpuPercent: number } {
+      const now = Date.now();
+      const elapsed = now - this.lastSampleTime;
+
+      // Only recompute CPU % if ≥500ms since last sample to avoid noise
+      if (elapsed >= 500) {
+        const cpu = process.cpuUsage(this.lastCpuUsage);
+        // cpu.user + cpu.system are in microseconds
+        const totalCpuUs = cpu.user + cpu.system;
+        const elapsedUs = elapsed * 1000; // ms → µs
+        // Normalize by number of CPUs (single process can't exceed 100% per core)
+        this.cpuPercent = (totalCpuUs / (elapsedUs * this.numCpus)) * 100;
+        this.lastCpuUsage = process.cpuUsage();
+        this.lastSampleTime = now;
+      }
+
+      const rss = process.memoryUsage.call(process).rss; // bytes
+      const rssMB = rss / (1024 * 1024);
+
+      return {
+        pid: process.pid,
+        rssMB,
+        cpuPercent: this.cpuPercent,
+      };
+    }
+  }
+
+  const processTracker = new ProcessResourceTracker();
+
+  /** Format bytes as human-readable: 128M, 1.2G */
+  const fmtMem = (mb: number): string => {
+    if (mb < 1024) return `${Math.round(mb)}M`;
+    return `${(mb / 1024).toFixed(1)}G`;
+  };
 
   const enableModelDisplayFooter = (ctx: ExtensionContext | ExtensionCommandContext) => {
     if (!ctx.hasUI) return;
@@ -1624,18 +2615,18 @@ export default function (pi: ExtensionAPI) {
             pwd = `${pwd} • ${sessionName}`;
           }
 
-          // Truncate path if too long
-          if (pwd.length > width) {
-            const half = Math.floor(width / 2) - 2;
-            if (half > 1) {
-              const start = pwd.slice(0, half);
-              const endLen = half - 1;
-              const end = pwd.slice(pwd.length - endLen);
-              pwd = `${start}...${end}`;
-            } else {
-              pwd = pwd.slice(0, Math.max(1, width));
-            }
-          }
+          // Process info (PID, RSS, CPU%) — left side of model line
+          // Each metric gets a distinct dark color for visual differentiation
+          const proc = processTracker.sample();
+          const procInfo =
+            mu("dim", "[") +
+            rgbRaw(90, 105, 135, `PID:${proc.pid}`) +
+            mu("dim", " ") +
+            rgbRaw(75, 120, 110, `RSS:${fmtMem(proc.rssMB)}`) +
+            mu("dim", " ") +
+            rgbRaw(110, 90, 120, `CPU:${proc.cpuPercent.toFixed(1)}%`) +
+            mu("dim", "]");
+          const procInfoWidth = visibleWidth(procInfo);
 
           // Format token counts
           const fmt = (n: number) => {
@@ -1646,7 +2637,7 @@ export default function (pi: ExtensionAPI) {
             return `${Math.round(n / 1000000)}M`;
           };
 
-          // Build stats line with bracketed groups and semantic colors
+          // Build stats groups with bracketed semantic colors
           const statsParts: string[] = [];
 
           // Tokens group (cyan): [↑in ↓out]
@@ -1654,7 +2645,7 @@ export default function (pi: ExtensionAPI) {
             const tokenParts: string[] = [];
             if (totalInput) tokenParts.push(`↑${fmt(totalInput)}`);
             if (totalOutput) tokenParts.push(`↓${fmt(totalOutput)}`);
-            statsParts.push(rgb("dim", "[") + rgb("cyan", tokenParts.join(" ")) + rgb("dim", "]"));
+            statsParts.push(mu("dim", "[") + mu("variable", tokenParts.join(" ")) + mu("dim", "]"));
           }
 
           // Cache group (green): [Rread Wwrite]
@@ -1662,24 +2653,43 @@ export default function (pi: ExtensionAPI) {
             const cacheParts: string[] = [];
             if (totalCacheRead) cacheParts.push(`R${fmt(totalCacheRead)}`);
             if (totalCacheWrite) cacheParts.push(`W${fmt(totalCacheWrite)}`);
-            statsParts.push(rgb("dim", "[") + rgb("green", cacheParts.join(" ")) + rgb("dim", "]"));
+            statsParts.push(mu("dim", "[") + mu("success", cacheParts.join(" ")) + mu("dim", "]"));
           }
 
           // Cost group (amber): [$cost sub]
           const usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false;
           if (totalCost || usingSubscription) {
             const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " sub" : ""}`;
-            statsParts.push(rgb("dim", "[") + rgb("amber", costStr) + rgb("dim", "]"));
+            statsParts.push(mu("dim", "[") + mu("warning", costStr) + mu("dim", "]"));
           }
 
           // Context group with gradient progress bar: [█▓░░░ 29k/200k (14.5%)]
           const bar = progressBar(contextPercentValue, 5);
           const contextInfo = `${fmt(contextTokens)}/${fmt(contextWindow)} (${contextPercent}%)`;
-          statsParts.push(
-            `${rgb("dim", "[")}${bar} ${rgb("white", contextInfo)}${rgb("dim", "]")}`
-          );
+          statsParts.push(`${mu("dim", "[")}${bar} ${mu("text", contextInfo)}${mu("dim", "]")}`);
 
-          const statsLeft = statsParts.join(" ");
+          const statsRight = statsParts.join(" ");
+          const statsRightWidth = visibleWidth(statsRight);
+
+          // Truncate path if too long (account for stats on same line)
+          const maxPwdWidth = width - statsRightWidth - 2; // 2 chars min padding
+          if (pwd.length > maxPwdWidth) {
+            const half = Math.floor(maxPwdWidth / 2) - 2;
+            if (half > 1) {
+              const start = pwd.slice(0, half);
+              const endLen = half - 1;
+              const end = pwd.slice(pwd.length - endLen);
+              pwd = `${start}...${end}`;
+            } else {
+              pwd = pwd.slice(0, Math.max(1, maxPwdWidth));
+            }
+          }
+
+          // Build pwd line with stats right-aligned
+          const pwdStyled = theme.fg("dim", pwd);
+          const pwdWidth = visibleWidth(pwdStyled);
+          const pwdPadLen = Math.max(1, width - pwdWidth - statsRightWidth);
+          const pwdLine = pwdStyled + " ".repeat(pwdPadLen) + statsRight;
 
           // Build model display: provider:model:thinkingLevel
           const model = ctx.model;
@@ -1690,34 +2700,28 @@ export default function (pi: ExtensionAPI) {
 
           const rightSide = formatModelDisplay(provider, modelId, thinkingLevel, hasReasoning);
 
-          // Calculate padding
-          const statsLeftWidth = visibleWidth(statsLeft);
+          // Build process line: procInfo left, model right
           const rightSideWidth = visibleWidth(rightSide);
           const minPadding = 2;
-          const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
+          const totalNeeded = procInfoWidth + minPadding + rightSideWidth;
 
-          let statsLine: string;
+          let procLine: string;
           if (totalNeeded <= width) {
-            const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
-            statsLine = statsLeft + padding + rightSide;
+            const padding = " ".repeat(width - procInfoWidth - rightSideWidth);
+            procLine = procInfo + theme.fg("dim", padding) + rightSide;
           } else {
-            const availableForRight = width - statsLeftWidth - minPadding;
+            const availableForRight = width - procInfoWidth - minPadding;
             if (availableForRight > 3) {
               const truncatedRight = truncateToWidth(rightSide, availableForRight);
               const truncatedWidth = visibleWidth(truncatedRight);
-              const padding = " ".repeat(width - statsLeftWidth - truncatedWidth);
-              statsLine = statsLeft + padding + truncatedRight;
+              const padding = " ".repeat(width - procInfoWidth - truncatedWidth);
+              procLine = procInfo + theme.fg("dim", padding) + truncatedRight;
             } else {
-              statsLine = statsLeft;
+              procLine = procInfo;
             }
           }
 
-          // Apply dim styling
-          const dimStatsLeft = theme.fg("dim", statsLeft);
-          const remainder = statsLine.slice(statsLeft.length);
-          const dimRemainder = theme.fg("dim", remainder.replace(rightSide, "")) + rightSide;
-
-          const lines = [theme.fg("dim", pwd), dimStatsLeft + dimRemainder];
+          const lines = [pwdLine, procLine];
 
           // Add extension statuses
           const extensionStatuses = footerData.getExtensionStatuses();
