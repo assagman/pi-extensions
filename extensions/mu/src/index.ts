@@ -139,6 +139,7 @@ const MU_CONFIG = {
   PULSE_SPEED: 0.2,
   PULSE_MIN_BRIGHTNESS: 0.4,
   MAX_ERROR_LINES: 10,
+  MAX_BASH_STREAMING_LINES: 10,
 } as const;
 
 const MU_TOOL_VIEWER_SHORTCUT = "ctrl+alt+o";
@@ -475,13 +476,18 @@ class BoxedToolCard implements Component {
     const rightPart = `${statusStr}${timerStr}`;
     const rightLen = visibleWidth(rightPart);
 
-    // For bash: render multiline with full command, no truncation
+    // For bash: render multiline, cap height during streaming
     if (this.toolName === "bash") {
       const rawCmd = typeof this.args.command === "string" ? this.args.command : "";
-      const lines = clampLines(
+      let lines = clampLines(
         this.renderBashMultiline(rawCmd, icon, color, rightPart, rightLen, innerW),
         width
       );
+      if (status === "running" && lines.length > MU_CONFIG.MAX_BASH_STREAMING_LINES) {
+        const total = lines.length;
+        lines = lines.slice(0, MU_CONFIG.MAX_BASH_STREAMING_LINES);
+        lines.push(mu("dim", `  … ${total - MU_CONFIG.MAX_BASH_STREAMING_LINES} more lines`));
+      }
       this.lastWidth = width;
       this.cachedLines = this.needsLeadingSpace ? ["", ...lines] : lines;
       return this.cachedLines;
@@ -1273,10 +1279,10 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         const rightPart = `${statusStr}${timerColored}`;
         const rightLen = visibleWidth(rightPart);
 
-        // For bash: render multiline with full command, no truncation
+        // For bash: render multiline, cap height during streaming
         if (toolName === "bash") {
           const rawCmd = typeof args.command === "string" ? args.command : "";
-          const lines = renderBashMultilineForPatch(
+          let lines = renderBashMultilineForPatch(
             rawCmd,
             icon,
             color,
@@ -1286,6 +1292,11 @@ const setupUIPatching = (ctx: ExtensionContext) => {
             status,
             pulsePhase
           );
+          if (isPartial && lines.length > MU_CONFIG.MAX_BASH_STREAMING_LINES) {
+            const total = lines.length;
+            lines = lines.slice(0, MU_CONFIG.MAX_BASH_STREAMING_LINES);
+            lines.push(mu("dim", `  … ${total - MU_CONFIG.MAX_BASH_STREAMING_LINES} more lines`));
+          }
           if (tool._mu_leading_space) {
             return ["", ...lines];
           }
