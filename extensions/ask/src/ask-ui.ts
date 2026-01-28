@@ -247,6 +247,7 @@ export function createAskUI<
       }
       scrollOffset = 0;
       manualScroll = false;
+      fixedBodyHeight = null; // Force recompute for new view size
       refresh();
       return true;
     }
@@ -765,13 +766,18 @@ export function createAskUI<
       body.push(""); // spacer before footer
     }
 
-    // ── Compute fixed body viewport height (once) ────────────────────
+    // ── Compute fixed body viewport height (per-view) ─────────────────
+    // Context view uses larger multiplier (88% ≈ 80% screen) for better readability
+    // Question view uses smaller multiplier (72%) for focused interaction
     if (fixedBodyHeight === null) {
       const chromeRows = 6 + (isMulti ? 2 : 0);
-      const maxBody = Math.max(10, Math.floor(tui.terminal.rows * 0.72) - chromeRows);
-      // For multi-question: use full max (tabs may have different content)
-      // For single: fit to content (capped)
-      fixedBodyHeight = isMulti ? maxBody : Math.min(body.length, maxBody);
+      const heightMultiplier = viewMode === "context" ? 0.88 : 0.72;
+      const maxBody = Math.max(10, Math.floor(tui.terminal.rows * heightMultiplier) - chromeRows);
+      // Context view: always use full max for reading space
+      // Multi-question: use full max (tabs may have different content)
+      // Single question: fit to content (capped)
+      fixedBodyHeight =
+        viewMode === "context" || isMulti ? maxBody : Math.min(body.length, maxBody);
     }
 
     // ── Scroll viewport ──────────────────────────────────────────────

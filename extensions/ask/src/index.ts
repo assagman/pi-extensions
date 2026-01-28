@@ -103,7 +103,7 @@ const askExtension: ExtensionFactory = (pi: ExtensionAPI) => {
         (tui, theme, done) => createAskUI(tui, theme, done, questions, contextMessages),
         {
           scrim: { stars: true },
-          dialog: { width: "72%", maxHeight: "88%", glow: { enabled: true } },
+          dialog: { width: "72%", maxHeight: "95%", glow: { enabled: true } },
         }
       );
 
