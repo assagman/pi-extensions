@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Dashboard } from "./ui/dashboard.js";
+import { DimmedOverlay } from "./ui/dimmed-overlay.js";
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("theta", {
@@ -10,9 +11,21 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      await ctx.ui.custom((tui, theme, keybindings, done) => {
-        return new Dashboard(tui, theme, keybindings, done);
-      });
+      await DimmedOverlay.show(
+        ctx.ui,
+        (tui, theme, done) => {
+          return new Dashboard(tui, theme, done);
+        },
+        {
+          altScreen: true,
+          scrim: { stars: true },
+          dialog: {
+            width: "96%",
+            maxHeight: "94%",
+            glow: { enabled: true },
+          },
+        }
+      );
     },
   });
 }
