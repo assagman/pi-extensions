@@ -13,6 +13,13 @@
  *   - [keycap] help badges in footer
  *   - Dotted (┄) separators between sections
  *   - Scrollable body viewport with ▲/▼ indicators
+ *
+ * Keybindings:
+ *   Navigation:    C-n/C-p (option up/down), j/k (scroll)
+ *   Selection:     0-9 (quick pick), Enter/C-y (select)
+ *   Context view:  l (→ context), h/q/Esc (→ question)
+ *   Multi-question: Tab/Shift+Tab (switch tabs)
+ *   Cancel:        q/Esc (in question view)
  */
 
 import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
@@ -243,15 +250,21 @@ export function createAskUI<
 
   function handleContextFlip(data: string): boolean {
     if (!hasContext) return false;
-    if (matchesKey(data, Key.tab)) {
-      if (viewMode === "question") {
-        viewMode = "context";
-      } else {
-        viewMode = "question";
-      }
+    // l: question → context
+    if (viewMode === "question" && data === "l") {
+      viewMode = "context";
       scrollOffset = 0;
       manualScroll = false;
-      fixedBodyHeight = null; // Force recompute for new view size
+      fixedBodyHeight = null;
+      refresh();
+      return true;
+    }
+    // h: context → question
+    if (viewMode === "context" && data === "h") {
+      viewMode = "question";
+      scrollOffset = 0;
+      manualScroll = false;
+      fixedBodyHeight = null;
       refresh();
       return true;
     }
@@ -260,8 +273,8 @@ export function createAskUI<
 
   function handleTabNavigation(data: string): boolean {
     if (!isMulti) return false;
-    // Use arrow keys only for multi-question tab navigation (Tab is for context flip)
-    if (matchesKey(data, Key.right)) {
+    // Tab: next question tab, Shift+Tab: previous question tab
+    if (matchesKey(data, Key.tab)) {
       currentTab = (currentTab + 1) % totalTabs;
       optionIndex = 0;
       scrollOffset = 0;
@@ -269,7 +282,7 @@ export function createAskUI<
       refresh();
       return true;
     }
-    if (matchesKey(data, Key.left)) {
+    if (matchesKey(data, Key.shift("tab"))) {
       currentTab = (currentTab - 1 + totalTabs) % totalTabs;
       optionIndex = 0;
       scrollOffset = 0;
@@ -282,7 +295,7 @@ export function createAskUI<
 
   function handleSubmitTab(data: string): boolean {
     if (currentTab !== questions.length) return false;
-    if (matchesKey(data, Key.enter) && allAnswered()) {
+    if ((matchesKey(data, Key.enter) || matchesKey(data, Key.ctrl("y"))) && allAnswered()) {
       submit(false);
       return true;
     }
@@ -295,13 +308,13 @@ export function createAskUI<
 
   function handleOptionNavigation(data: string): boolean {
     const opts = currentOptions();
-    if (matchesKey(data, Key.up) || matchesKey(data, Key.ctrl("p"))) {
+    if (matchesKey(data, Key.ctrl("p"))) {
       optionIndex = Math.max(0, optionIndex - 1);
       manualScroll = false;
       refresh();
       return true;
     }
-    if (matchesKey(data, Key.down) || matchesKey(data, Key.ctrl("n"))) {
+    if (matchesKey(data, Key.ctrl("n"))) {
       optionIndex = Math.min(opts.length - 1, optionIndex + 1);
       manualScroll = false;
       refresh();
@@ -332,7 +345,7 @@ export function createAskUI<
   }
 
   function handleEnterKey(data: string): boolean {
-    if (!matchesKey(data, Key.enter)) return false;
+    if (!matchesKey(data, Key.enter) && !matchesKey(data, Key.ctrl("y"))) return false;
     if (currentQuestion()) {
       selectOptionAtIndex(optionIndex);
       return true;
@@ -347,13 +360,25 @@ export function createAskUI<
   }
 
   function handleInput(data: string) {
-    // Context flip (Tab) has highest priority
+    // Context flip (h/l) has highest priority
     if (handleContextFlip(data)) return;
 
-    // In context view, only allow scroll and escape
+    // In context view: scroll, Esc/q returns to question view
     if (viewMode === "context") {
       if (handleScrollKeys(data)) return;
-      handleEscapeKey(data);
+      if (matchesKey(data, Key.escape) || data === "q") {
+        viewMode = "question";
+        scrollOffset = 0;
+        manualScroll = false;
+        fixedBodyHeight = null;
+        refresh();
+      }
+      return;
+    }
+
+    // Question view: q cancels (like Esc)
+    if (data === "q") {
+      submit(true);
       return;
     }
 
@@ -631,42 +656,38 @@ export function createAskUI<
     let help: string;
 
     if (viewMode === "context") {
-      // Context view: scroll + tab back + escape
-      help = [
-        `${cap("j/k")} ${lbl("scroll")}`,
-        `${cap("Tab")} ${lbl("back to question")}`,
-        `${cap("Esc")} ${lbl("cancel")}`,
-      ].join("  ");
+      // Context view: scroll + back (h/q/Esc)
+      help = [`${cap("j/k")} ${lbl("scroll")}`, `${cap("h/q")} ${lbl("back")}`].join("  ");
     } else if (inputMode) {
-      help = `${cap("⏎")} ${lbl("submit")}  ${cap("Esc")} ${lbl("cancel")}`;
+      help = `${cap("⏎/C-y")} ${lbl("submit")}  ${cap("Esc")} ${lbl("cancel")}`;
     } else if (currentTab === questions.length) {
       const parts = [
-        `${cap("⏎")} ${lbl("submit")}`,
+        `${cap("⏎/C-y")} ${lbl("submit")}`,
         `${cap("j/k")} ${lbl("scroll")}`,
-        `${cap("←/→")} ${lbl("switch")}`,
-        `${cap("Esc")} ${lbl("cancel")}`,
+        `${cap("⇥/⇧⇥")} ${lbl("switch")}`,
+        `${cap("q")} ${lbl("cancel")}`,
       ];
-      if (hasContext) parts.splice(3, 0, `${cap("Tab")} ${lbl("context")}`);
+      if (hasContext) parts.splice(3, 0, `${cap("l")} ${lbl("context")}`);
       help = parts.join("  ");
     } else if (isMulti) {
       const parts = [
-        `${cap("C-n/p")} ${lbl("navigate")}`,
+        `${cap("C-n/p")} ${lbl("nav")}`,
         `${cap("j/k")} ${lbl("scroll")}`,
         `${cap("0-9")} ${lbl("pick")}`,
-        `${cap("⏎")} ${lbl("select")}`,
-        `${cap("←/→")} ${lbl("switch")}`,
+        `${cap("⏎/C-y")} ${lbl("select")}`,
+        `${cap("⇥/⇧⇥")} ${lbl("switch")}`,
       ];
-      if (hasContext) parts.push(`${cap("Tab")} ${lbl("context")}`);
+      if (hasContext) parts.push(`${cap("l")} ${lbl("context")}`);
       help = parts.join("  ");
     } else {
       const parts = [
-        `${cap("C-n/p")} ${lbl("navigate")}`,
+        `${cap("C-n/p")} ${lbl("nav")}`,
         `${cap("j/k")} ${lbl("scroll")}`,
         `${cap("0-9")} ${lbl("pick")}`,
-        `${cap("⏎")} ${lbl("select")}`,
-        `${cap("Esc")} ${lbl("cancel")}`,
+        `${cap("⏎/C-y")} ${lbl("select")}`,
+        `${cap("q")} ${lbl("cancel")}`,
       ];
-      if (hasContext) parts.splice(4, 0, `${cap("Tab")} ${lbl("context")}`);
+      if (hasContext) parts.splice(4, 0, `${cap("l")} ${lbl("context")}`);
       help = parts.join("  ");
     }
 
