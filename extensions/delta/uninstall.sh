@@ -2,14 +2,27 @@
 set -euo pipefail
 
 EXT_NAME="delta"
-TARGET_PATH="$HOME/.pi/agent/extensions/$EXT_NAME"
+EXT_PATH="$HOME/.pi/agent/extensions/$EXT_NAME"
+SKILL_PATH="$HOME/.pi/agent/skills/$EXT_NAME"
 
-if [ -L "$TARGET_PATH" ]; then
-  rm "$TARGET_PATH"
-  echo "✅ Uninstalled: $TARGET_PATH"
-elif [ -e "$TARGET_PATH" ]; then
-  rm -rf "$TARGET_PATH"
-  echo "✅ Removed: $TARGET_PATH"
+# Remove extension
+if [ -L "$EXT_PATH" ]; then
+  rm "$EXT_PATH"
+  echo "✅ Extension removed: $EXT_PATH"
+elif [ -e "$EXT_PATH" ]; then
+  rm -rf "$EXT_PATH"
+  echo "✅ Extension removed: $EXT_PATH"
 else
-  echo "Not installed: $TARGET_PATH"
+  echo "Extension not installed: $EXT_PATH"
+fi
+
+# Remove skill
+if [ -L "$SKILL_PATH" ]; then
+  rm "$SKILL_PATH"
+  echo "✅ Skill removed: $SKILL_PATH"
+elif [ -e "$SKILL_PATH" ]; then
+  rm -rf "$SKILL_PATH"
+  echo "✅ Skill removed: $SKILL_PATH"
+else
+  echo "Skill not installed: $SKILL_PATH"
 fi

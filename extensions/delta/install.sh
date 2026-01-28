@@ -2,8 +2,11 @@
 set -euo pipefail
 
 EXT_NAME="delta"
-TARGET_DIR="$HOME/.pi/agent/extensions"
-DIST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dist"
+EXT_TARGET="$HOME/.pi/agent/extensions"
+SKILL_TARGET="$HOME/.pi/agent/skills"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIST_DIR="$SCRIPT_DIR/dist"
+SKILL_DIR="$SCRIPT_DIR/skill"
 
 # Build
 echo "Building $EXT_NAME..."
@@ -15,8 +18,14 @@ if [ ! -d "$DIST_DIR" ]; then
   exit 1
 fi
 
-# Create symlink
-mkdir -p "$TARGET_DIR"
-ln -sfn "$DIST_DIR" "$TARGET_DIR/$EXT_NAME"
+# Install extension (symlink dist → extensions/)
+mkdir -p "$EXT_TARGET"
+ln -sfn "$DIST_DIR" "$EXT_TARGET/$EXT_NAME"
+echo "✅ Extension: $DIST_DIR → $EXT_TARGET/$EXT_NAME"
 
-echo "✅ Installed: $DIST_DIR → $TARGET_DIR/$EXT_NAME"
+# Install skill (symlink skill/ → skills/)
+if [ -d "$SKILL_DIR" ]; then
+  mkdir -p "$SKILL_TARGET"
+  ln -sfn "$SKILL_DIR" "$SKILL_TARGET/$EXT_NAME"
+  echo "✅ Skill:     $SKILL_DIR → $SKILL_TARGET/$EXT_NAME"
+fi

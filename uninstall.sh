@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSIONS_DIR="$SCRIPT_DIR/extensions"
 TARGET_DIR="$HOME/.pi/agent/extensions"
+SKILL_TARGET_DIR="$HOME/.pi/agent/skills"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -175,28 +176,46 @@ run_checklist() {
 uninstall_extension() {
   local name="$1"
   local link_path="$TARGET_DIR/$name"
+  local skill_path="$SKILL_TARGET_DIR/$name"
   local ext_dir="$EXTENSIONS_DIR/$name"
+  local removed_any=false
 
+  # Remove extension symlink
   if [[ -L "$link_path" ]]; then
     local link_target
     link_target="$(readlink "$link_path")"
-    # Only remove symlinks that point into this repo's dist/ directories
+    # Only remove symlinks that point into this repo's directories
     if [[ "$link_target" == "$ext_dir"* ]]; then
       rm "$link_path"
-      echo -e "  ${GREEN}✓${NC} Removed: $name"
-      return 0
+      echo -e "  ${GREEN}✓${NC} Extension removed: $name"
+      removed_any=true
     else
       echo -e "  ${YELLOW}⏭${NC} Skipped: $name ${DIM}(symlink points elsewhere: $link_target)${NC}"
-      return 1
     fi
   elif [[ -e "$link_path" ]]; then
     rm -rf "$link_path"
-    echo -e "  ${GREEN}✓${NC} Removed: $name"
-    return 0
-  else
-    echo -e "  ${DIM}⏭ Not installed: $name${NC}"
-    return 1
+    echo -e "  ${GREEN}✓${NC} Extension removed: $name"
+    removed_any=true
   fi
+
+  # Remove skill symlink
+  if [[ -L "$skill_path" ]]; then
+    local skill_target
+    skill_target="$(readlink "$skill_path")"
+    if [[ "$skill_target" == "$ext_dir"* ]]; then
+      rm "$skill_path"
+      echo -e "  ${GREEN}✓${NC} Skill removed: $name"
+      removed_any=true
+    fi
+  elif [[ -e "$skill_path" ]]; then
+    rm -rf "$skill_path"
+    echo -e "  ${GREEN}✓${NC} Skill removed: $name"
+    removed_any=true
+  fi
+
+  $removed_any && return 0
+  echo -e "  ${DIM}⏭ Not installed: $name${NC}"
+  return 1
 }
 
 # ── Parse args ─────────────────────────────────────────────────────────
@@ -297,16 +316,27 @@ for ext_dir in "$EXTENSIONS_DIR"/*/; do
 
   ext_name=$(basename "$ext_dir")
   link_path="$TARGET_DIR/$ext_name"
+  skill_path="$SKILL_TARGET_DIR/$ext_name"
 
+  # Remove extension symlink
   if [[ -L "$link_path" ]]; then
     link_target="$(readlink "$link_path")"
-    # Only remove symlinks that point into this repo's dist/ directories
+    # Only remove symlinks that point into this repo's directories
     if [[ "$link_target" == "$ext_dir"* ]]; then
       rm "$link_path"
-      echo -e "  ${GREEN}✓${NC} Removed: $ext_name"
+      echo -e "  ${GREEN}✓${NC} Extension removed: $ext_name"
       removed=$((removed + 1))
     else
       echo "  ⏭ Skipped: $ext_name (symlink points elsewhere: $link_target)"
+    fi
+  fi
+
+  # Remove skill symlink
+  if [[ -L "$skill_path" ]]; then
+    skill_target="$(readlink "$skill_path")"
+    if [[ "$skill_target" == "$ext_dir"* ]]; then
+      rm "$skill_path"
+      echo -e "  ${GREEN}✓${NC} Skill removed: $ext_name"
     fi
   fi
 done
