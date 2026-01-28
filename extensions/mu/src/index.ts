@@ -661,6 +661,19 @@ const _splitGraphemes = (value: string): string[] => {
   return Array.from(value);
 };
 
+/** Card body background — dark surface matching ask extension's card. */
+const OVERLAY_CARD_BG = "\x1b[48;2;22;22;32m";
+const OVERLAY_RESET = "\x1b[0m";
+
+/** Apply card background to a line, persisting through any ANSI resets. */
+const applyCardBg = (text: string, width: number): string => {
+  const vis = visibleWidth(text);
+  const padded = vis < width ? text + " ".repeat(width - vis) : text;
+  return (
+    OVERLAY_CARD_BG + padded.replaceAll("\x1b[0m", `\x1b[0m${OVERLAY_CARD_BG}`) + OVERLAY_RESET
+  );
+};
+
 class ToolResultDetailViewer implements Component {
   private option: ToolResultOption;
   private scrollOffset = 0;
@@ -734,23 +747,27 @@ class ToolResultDetailViewer implements Component {
 
     // Scroll-up indicator
     if (this.scrollOffset > 0) {
-      out.push(mu("dim", `  ↑ ${this.scrollOffset} more lines`));
+      out.push(applyCardBg(mu("dim", `  ↑ ${this.scrollOffset} more lines`), width));
     } else {
-      out.push("");
+      out.push(applyCardBg("", width));
     }
 
-    out.push(...visible);
+    for (const line of visible) {
+      out.push(applyCardBg(line, width));
+    }
 
     // Scroll-down indicator
     const remaining = this.allLines.length - this.scrollOffset - vh;
     if (remaining > 0) {
-      out.push(mu("dim", `  ↓ ${remaining} more lines`));
+      out.push(applyCardBg(mu("dim", `  ↓ ${remaining} more lines`), width));
     } else {
-      out.push("");
+      out.push(applyCardBg("", width));
     }
 
     // Help
-    out.push(mu("dim", "↑↓/jk scroll  pgup/pgdn page  g/G top/end  esc back"));
+    out.push(
+      applyCardBg(mu("dim", "↑↓/jk C-n/C-p scroll  pgup/pgdn page  g/G top/end  h back"), width)
+    );
 
     return out;
   }
@@ -759,11 +776,11 @@ class ToolResultDetailViewer implements Component {
     const vh = this.viewportHeight();
     const maxScroll = Math.max(0, this.allLines.length - vh);
 
-    if (matchesKey(key, "down") || matchesKey(key, "j")) {
+    if (matchesKey(key, "down") || matchesKey(key, "j") || matchesKey(key, "ctrl+n")) {
       this.scrollOffset = Math.min(this.scrollOffset + 1, maxScroll);
       return true;
     }
-    if (matchesKey(key, "up") || matchesKey(key, "k")) {
+    if (matchesKey(key, "up") || matchesKey(key, "k") || matchesKey(key, "ctrl+p")) {
       this.scrollOffset = Math.max(0, this.scrollOffset - 1);
       return true;
     }
@@ -819,17 +836,17 @@ class MuToolsOverlay implements Component {
   }
 
   render(width: number): string[] {
-    const lines: string[] = [];
+    const raw: string[] = [];
     const innerW = width - 2;
 
     // Title with count
     const count = this.options.length;
     const titleText = `μ Tools (${count})`;
     const titleLine = `${mu("warning", titleText)} ${mu("info", "─".repeat(Math.max(0, innerW - titleText.length - 1)))}`;
-    lines.push(titleLine);
+    raw.push(titleLine);
 
     if (count === 0) {
-      lines.push(mu("dim", "No tool results yet"));
+      raw.push(mu("dim", "No tool results yet"));
     } else {
       const visibleCount = Math.min(this.listHeight(), count);
       const maxScroll = Math.max(0, count - visibleCount);
@@ -842,7 +859,7 @@ class MuToolsOverlay implements Component {
 
       // Scroll-up indicator
       if (this.scrollOffset > 0) {
-        lines.push(mu("dim", `  ↑ ${this.scrollOffset} more`));
+        raw.push(mu("dim", `  ↑ ${this.scrollOffset} more`));
       }
 
       for (let i = 0; i < visibleCount; i++) {
@@ -861,17 +878,17 @@ class MuToolsOverlay implements Component {
 
         const label = truncateToWidth(opt.label, innerW - 14);
         const line = `${pointer}${statusSym} ${mu("info", icon)} ${label}${" ".repeat(Math.max(0, innerW - visibleWidth(label) - 12))}${durStr}`;
-        lines.push(line);
+        raw.push(line);
       }
 
       // Scroll-down indicator
       const remaining = count - this.scrollOffset - visibleCount;
       if (remaining > 0) {
-        lines.push(mu("dim", `  ↓ ${remaining} more`));
+        raw.push(mu("dim", `  ↓ ${remaining} more`));
       }
     }
 
-    lines.push(mu("info", "─".repeat(innerW)));
+    raw.push(mu("info", "─".repeat(innerW)));
 
     // Preview pane: args + result snippet
     const selected = this.options[this.selectedIndex];
@@ -879,48 +896,48 @@ class MuToolsOverlay implements Component {
       const args = Object.entries(selected.args).slice(0, 3);
       for (const [k, v] of args) {
         const val = typeof v === "string" ? preview(v, innerW - k.length - 4) : JSON.stringify(v);
-        lines.push(truncateToWidth(`${mu("dim", k)}: ${mu("text", val)}`, innerW));
+        raw.push(truncateToWidth(`${mu("dim", k)}: ${mu("text", val)}`, innerW));
       }
       if (args.length === 0) {
-        lines.push(mu("dim", "(no args)"));
+        raw.push(mu("dim", "(no args)"));
       }
 
       // Result snippet
       const resultText = extractResultText(selected.result);
       if (resultText) {
-        lines.push("");
+        raw.push("");
         const snippetLines = resultText
           .split("\n")
           .filter((l: string) => l.trim())
           .slice(0, 3);
         for (const sl of snippetLines) {
-          lines.push(truncateToWidth(`  ${mu("dim", sl)}`, innerW));
+          raw.push(truncateToWidth(`  ${mu("dim", sl)}`, innerW));
         }
         const totalLines = resultText.split("\n").length;
         if (totalLines > 3) {
-          lines.push(mu("dim", `  … ${totalLines - 3} more lines`));
+          raw.push(mu("dim", `  … ${totalLines - 3} more lines`));
         }
       }
     } else {
-      lines.push("");
+      raw.push("");
     }
 
-    lines.push(mu("info", "─".repeat(innerW)));
-    lines.push(mu("dim", "↑↓/jk nav  enter view  pgup/pgdn page  g/G top/end  esc close"));
+    raw.push(mu("info", "─".repeat(innerW)));
+    raw.push(mu("dim", "↑↓/jk/C-n/C-p nav  l view  pgup/pgdn page  g/G top/end  h/esc close"));
 
-    return lines;
+    return raw.map((line) => applyCardBg(line, width));
   }
 
   handleInput(key: KeyId): boolean {
-    if (matchesKey(key, "escape") || matchesKey(key, "q")) {
+    if (matchesKey(key, "escape") || matchesKey(key, "q") || matchesKey(key, "h")) {
       this.onClose();
       return true;
     }
-    if (matchesKey(key, "down") || matchesKey(key, "j")) {
+    if (matchesKey(key, "down") || matchesKey(key, "j") || matchesKey(key, "ctrl+n")) {
       this.selectedIndex = Math.min(this.selectedIndex + 1, this.options.length - 1);
       return true;
     }
-    if (matchesKey(key, "up") || matchesKey(key, "k")) {
+    if (matchesKey(key, "up") || matchesKey(key, "k") || matchesKey(key, "ctrl+p")) {
       this.selectedIndex = Math.max(0, this.selectedIndex - 1);
       return true;
     }
@@ -943,7 +960,7 @@ class MuToolsOverlay implements Component {
       this.selectedIndex = this.options.length - 1;
       return true;
     }
-    if (matchesKey(key, "enter")) {
+    if (matchesKey(key, "enter") || matchesKey(key, "l")) {
       const opt = this.options[this.selectedIndex];
       if (opt) this.onSelect(opt);
       return true;
@@ -983,7 +1000,7 @@ async function openMuToolsOverlay(ctx: ExtensionCommandContext): Promise<void> {
         },
         handleInput(key: KeyId): boolean {
           if (detailViewer) {
-            if (matchesKey(key, "escape") || matchesKey(key, "q")) {
+            if (matchesKey(key, "escape") || matchesKey(key, "q") || matchesKey(key, "h")) {
               detailViewer = null;
               return true;
             }
