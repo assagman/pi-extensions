@@ -104,6 +104,7 @@ const askExtension: ExtensionFactory = (pi: ExtensionAPI) => {
         {
           scrim: { stars: true },
           dialog: { width: "72%", maxHeight: "95%", glow: { enabled: true } },
+          altScreen: true, // Use alternate screen buffer for smoother scrolling
         }
       );
 

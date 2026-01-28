@@ -77,6 +77,14 @@ export interface DimmedOverlayConfig {
   scrim?: ScrimConfig;
   /** Dialog positioning and sizing. */
   dialog?: DialogConfig;
+  /**
+   * Use alternate screen buffer for smoother rendering.
+   * When enabled, the overlay renders in a separate terminal buffer,
+   * eliminating flicker during scroll operations. The original screen
+   * content is restored when the overlay closes.
+   * Default: false.
+   */
+  altScreen?: boolean;
 }
 
 /**
@@ -133,6 +141,7 @@ interface ResolvedDialog {
 interface ResolvedConfig {
   scrim: ResolvedScrim;
   dialog: ResolvedDialog;
+  altScreen: boolean;
 }
 
 // ─── Star types ─────────────────────────────────────────────────────────────
@@ -198,6 +207,7 @@ function resolveConfig(cfg?: DimmedOverlayConfig): ResolvedConfig {
         color: cfg?.dialog?.glow?.color ?? DEFAULT_GLOW_COLOR,
       },
     },
+    altScreen: cfg?.altScreen ?? false,
   };
 }
 
@@ -578,10 +588,32 @@ export class DimmedOverlay {
     config?: DimmedOverlayConfig
   ): Promise<T> {
     const resolved = resolveConfig(config);
+    const useAltScreen = resolved.altScreen;
 
     return ui.custom<T>(
       (tui, theme, _kb, done) => {
-        const dialog = factory(tui, theme, done);
+        // Enter alternate screen buffer for smoother rendering
+        // This creates a separate terminal buffer that doesn't interfere
+        // with the main screen content, eliminating flicker during updates
+        if (useAltScreen) {
+          tui.terminal.write("\x1b[?1049h"); // Enter alternate screen
+          tui.terminal.write("\x1b[?25l"); // Hide cursor
+          tui.terminal.write("\x1b[2J\x1b[H"); // Clear screen and home cursor
+          // Force TUI to reset its internal state for the new buffer
+          tui.requestRender(true);
+        }
+
+        // Wrap done callback to exit alternate screen before completing
+        const wrappedDone = (result: T) => {
+          if (useAltScreen) {
+            tui.terminal.write("\x1b[?1049l"); // Exit alternate screen (restores original)
+            // Force refresh to restore normal buffer rendering
+            tui.requestRender(true);
+          }
+          done(result);
+        };
+
+        const dialog = factory(tui, theme, wrappedDone);
         return new DimmedDialogComponent(tui, dialog, resolved);
       },
       {
