@@ -38,10 +38,11 @@ export const TOOL_ICONS: Record<string, string> = {
   grep: "󰍉",
   find: "󰍉",
   ls: "󰉋",
+  sigma: "❓",
 };
 
 /** Skill loaded indicator */
 export const SKILL_ICON = "󱕦"; // nf-md-head_lightbulb
 
-/** Skill loaded color: #7360A8 (purple) */
-export const SKILL_COLOR = { r: 115, g: 96, b: 168 } as const;
+/** Skill loaded color: #E4C7FF (light lavender) */
+export const SKILL_COLOR = { r: 237, g: 180, b: 232 } as const;

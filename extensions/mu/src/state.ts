@@ -39,3 +39,10 @@ export let currentSessionId: string | null = null;
 export const setCurrentSessionId = (id: string | null): void => {
   currentSessionId = id;
 };
+
+/** Clear all tool-related state maps (call on session switch/start) */
+export const clearToolStateMaps = (): void => {
+  activeToolsById.clear();
+  toolStatesBySig.clear();
+  cardInstanceCountBySig.clear();
+};

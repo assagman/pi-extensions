@@ -54,6 +54,7 @@ import { DimmedOverlay } from "./overlay.js";
 import {
   activeToolsById,
   cardInstanceCountBySig,
+  clearToolStateMaps,
   currentSessionId,
   getToolState,
   getToolStateByIndex,
@@ -62,7 +63,7 @@ import {
   setNextToolNeedsLeadingSpace,
   toolStatesBySig,
 } from "./state.js";
-import { getTheme, mu, muPulse } from "./theme.js";
+import { clearThemeCache, getTheme, mu, muPulse } from "./theme.js";
 import type { MuColor, ToolState, ToolStatus } from "./types.js";
 import {
   clampLines,
@@ -185,7 +186,9 @@ const rgbRaw = (r: number, g: number, b: number, text: string): string =>
 
 // Progress bar with green→yellow→red gradient based on percentage
 const progressBar = (percent: number, width = 5): string => {
-  const filled = Math.round((percent / 100) * width);
+  // Clamp percent to 0-100 to prevent incorrect bar rendering
+  const clampedPercent = Math.max(0, Math.min(100, percent));
+  const filled = Math.round((clampedPercent / 100) * width);
   const empty = width - filled;
 
   // Gradient color: green (0%) → yellow (50%) → red (100%)
@@ -208,7 +211,7 @@ const progressBar = (percent: number, width = 5): string => {
     };
   };
 
-  const color = getColor(percent);
+  const color = getColor(clampedPercent);
   const filledStr = "█".repeat(filled);
   const emptyStr = "░".repeat(empty);
 
@@ -351,6 +354,22 @@ class BoxedToolCard implements Component {
       this.lastWidth = width;
       this.cachedLines = this.needsLeadingSpace ? ["", ...lines] : lines;
       return this.cachedLines;
+    }
+
+    // Special handling for skill reads — render without "read" prefix
+    if (this.toolName === "read") {
+      const rawPath = typeof this.args.path === "string" ? this.args.path : "";
+      if (isSkillRead(rawPath)) {
+        const skillName = extractSkillName(rawPath);
+        const { r, g, b } = SKILL_COLOR;
+        const skillLine = rgbRaw(r, g, b, `${SKILL_ICON} skill loaded: ${skillName}`);
+        const lineLen = visibleWidth(skillLine);
+        const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+        const line = `${skillLine}${pad}${rightPart}`;
+        this.lastWidth = width;
+        this.cachedLines = this.needsLeadingSpace ? ["", line] : [line];
+        return this.cachedLines;
+      }
     }
 
     // Non-bash tools: multiline rendering with full args, no truncation
@@ -501,19 +520,6 @@ class BoxedToolCard implements Component {
 // TOOL RESULT DETAIL VIEWER
 // =============================================================================
 const toolResultOptions: ToolResultOption[] = [];
-
-const GRAPHEME_SEGMENTER =
-  typeof Intl !== "undefined" && "Segmenter" in Intl
-    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
-    : null;
-
-const _splitGraphemes = (value: string): string[] => {
-  if (!value) return [];
-  if (GRAPHEME_SEGMENTER) {
-    return Array.from(GRAPHEME_SEGMENTER.segment(value), (s) => s.segment);
-  }
-  return Array.from(value);
-};
 
 /** Card body background — dark surface matching ask extension's card. */
 const OVERLAY_CARD_BG = "\x1b[48;2;22;22;32m";
@@ -1571,6 +1577,21 @@ const setupUIPatching = (ctx: ExtensionContext) => {
           return lines;
         }
 
+        // Special handling for skill reads — render without "read" prefix
+        if (toolName === "read") {
+          const rawPath = typeof args.path === "string" ? args.path : "";
+          if (isSkillRead(rawPath)) {
+            const skillName = extractSkillName(rawPath);
+            const { r, g, b } = SKILL_COLOR;
+            const skillLine = rgbRaw(r, g, b, `${SKILL_ICON} skill loaded: ${skillName}`);
+            const lineLen = visibleWidth(skillLine);
+            const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+            const line = `${skillLine}${pad}${rightPart}`;
+            if (tool._mu_leading_space) return ["", line];
+            return [line];
+          }
+        }
+
         // Non-bash tools: pretty-printed with syntax highlighting
         let iconColored: string;
         let nameColored: string;
@@ -1583,6 +1604,50 @@ const setupUIPatching = (ctx: ExtensionContext) => {
         } else {
           iconColored = mu(color, icon);
           nameColored = mu(color, toolName);
+        }
+
+        // Special case: sigma tool — show question IDs while running, answers on result
+        if (toolName === "sigma") {
+          const questions = args.questions;
+          const qIds = Array.isArray(questions)
+            ? (questions as Array<Record<string, unknown>>)
+                .map((q) => (typeof q.id === "string" ? q.id : ""))
+                .filter(Boolean)
+                .join(", ")
+            : "";
+
+          const headerContent = `${iconColored} ${nameColored}`;
+          const headerLen = visibleWidth(headerContent);
+
+          const resultData = tool.result as { content?: unknown[] } | undefined;
+          let answerText = "";
+          if (resultData?.content && Array.isArray(resultData.content)) {
+            answerText = resultData.content
+              .filter((c: unknown) => isRecord(c) && c.type === "text")
+              .map((c: unknown) => (c as { text?: string }).text ?? "")
+              .join("\n");
+          }
+
+          if (answerText) {
+            // Completed: show answers with colored question titles + teal answers
+            const answerLines = answerText.split("\n").filter((l: string) => l.trim());
+            const pad = " ".repeat(Math.max(0, innerW - headerLen - rightLen));
+            const lines: string[] = [`${headerContent}${pad}${rightPart}`];
+            for (const aLine of answerLines) {
+              lines.push(truncateToWidth(`  ${formatSigmaAnswerLine(aLine)}`, innerW));
+            }
+            if (tool._mu_leading_space) return ["", ...lines];
+            return lines;
+          }
+
+          // Running: show question IDs inline
+          const idsStr = qIds ? `  ${mu("dim", qIds)}` : "";
+          const lineContent = `${headerContent}${idsStr}`;
+          const lineLen = visibleWidth(lineContent);
+          const pad = " ".repeat(Math.max(0, innerW - lineLen - rightLen));
+          const line = `${lineContent}${pad}${rightPart}`;
+          if (tool._mu_leading_space) return ["", line];
+          return [line];
         }
 
         // Special case: ask tool — suppress args, show only user's answer
@@ -1902,6 +1967,26 @@ const setupUIPatching = (ctx: ExtensionContext) => {
 };
 
 // =============================================================================
+// SIGMA ANSWER LINE FORMATTING
+// =============================================================================
+
+/**
+ * Colorize a sigma answer line: question title in accent, separator dim, answer in teal.
+ * Parses: "Label: user wrote: answer" or "Label: user selected: N. answer"
+ */
+function formatSigmaAnswerLine(line: string): string {
+  const wroteMatch = line.match(/^(.+?):\s*(user wrote:\s*)(.+)$/);
+  if (wroteMatch) {
+    return `${mu("accent", wroteMatch[1])}: ${mu("dim", wroteMatch[2])}${mu("info", wroteMatch[3])}`;
+  }
+  const selectedMatch = line.match(/^(.+?):\s*(user selected:\s*)(.+)$/);
+  if (selectedMatch) {
+    return `${mu("accent", selectedMatch[1])}: ${mu("dim", selectedMatch[2])}${mu("info", selectedMatch[3])}`;
+  }
+  return mu("info", line);
+}
+
+// =============================================================================
 // PRETTY-PRINT & SYNTAX HIGHLIGHTING FOR TOOL ARGS
 // =============================================================================
 
@@ -1965,6 +2050,18 @@ function formatToolArgsPreview(name: string, args: Record<string, unknown>): str
     case "grep":
     case "find":
       return `${args.pattern ?? ""} ${relPath}`;
+    case "sigma": {
+      const questions = args.questions;
+      if (Array.isArray(questions)) {
+        return (questions as Array<Record<string, unknown>>)
+          .map((q) => (typeof q.id === "string" ? q.id : ""))
+          .filter(Boolean)
+          .join(", ");
+      }
+      return "";
+    }
+    case "ask":
+      return "";
     default:
       return Object.entries(args)
         .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
@@ -1980,12 +2077,17 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event: SessionStartEvent, ctx: ExtensionContext) => {
     workingTimer.stop(); // defensive cleanup from any prior session
     refreshCwdCache(); // refresh CWD for path utilities
+    clearThemeCache(); // refresh theme RGB cache (theme may have changed)
+
+    // Clear stale state from any prior session in this process
+    clearToolStateMaps();
 
     // Persistence: set session identity and load prior results
-    setCurrentSessionId(ctx.sessionManager.getSessionId());
-    debugLog(`session_start: sessionId=${currentSessionId}`);
+    const sessionId = ctx.sessionManager.getSessionId();
+    setCurrentSessionId(sessionId);
+    debugLog(`session_start: sessionId=${sessionId}`);
 
-    const persisted = loadToolResults(currentSessionId);
+    const persisted = loadToolResults(sessionId);
     debugLog(`session_start: loaded ${persisted.length} persisted results`);
 
     if (persisted.length > 0) {
@@ -2022,14 +2124,16 @@ export default function (pi: ExtensionAPI) {
       ctx: ExtensionContext
     ) => {
       const prevSessionId = currentSessionId;
-      setCurrentSessionId(ctx.sessionManager.getSessionId());
-      debugLog(
-        `session_switch: reason=${event.reason} prev=${prevSessionId} new=${currentSessionId}`
-      );
+      const newSessionId = ctx.sessionManager.getSessionId();
+      setCurrentSessionId(newSessionId);
+      debugLog(`session_switch: reason=${event.reason} prev=${prevSessionId} new=${newSessionId}`);
 
-      // Clear in-memory state and reload from new session
+      // Clear all in-memory state for clean session switch
       toolResultOptions.length = 0;
-      const persisted = loadToolResults(currentSessionId);
+      clearToolStateMaps();
+
+      // Reload from new session
+      const persisted = loadToolResults(newSessionId);
       toolResultOptions.push(...persisted);
 
       // Cap to max
@@ -2355,6 +2459,62 @@ export default function (pi: ExtensionAPI) {
 
   let modelDisplayEnabled = true;
 
+  // ---------------------------------------------------------------------------
+  // Process Resource Tracker (PID, RSS, CPU%)
+  // ---------------------------------------------------------------------------
+  // Uses Node.js built-ins only — no external dependencies.
+  // CPU % is computed as delta of process.cpuUsage() over wall-clock time.
+  class ProcessResourceTracker {
+    private lastCpuUsage = process.cpuUsage();
+    private lastSampleTime = Date.now();
+    private cpuPercent = 0;
+    private numCpus = 1;
+
+    constructor() {
+      try {
+        const os = require("node:os");
+        this.numCpus = os.cpus().length || 1;
+      } catch {
+        this.numCpus = 1;
+      }
+    }
+
+    /** Sample CPU and return current snapshot. Call on each render. */
+    sample(): { pid: number; rssMB: number; cpuPercent: number } {
+      const now = Date.now();
+      const elapsed = now - this.lastSampleTime;
+
+      // Only recompute CPU % if ≥500ms since last sample to avoid noise
+      if (elapsed >= 500) {
+        const cpu = process.cpuUsage(this.lastCpuUsage);
+        // cpu.user + cpu.system are in microseconds
+        const totalCpuUs = cpu.user + cpu.system;
+        const elapsedUs = elapsed * 1000; // ms → µs
+        // Normalize by number of CPUs (single process can't exceed 100% per core)
+        this.cpuPercent = (totalCpuUs / (elapsedUs * this.numCpus)) * 100;
+        this.lastCpuUsage = process.cpuUsage();
+        this.lastSampleTime = now;
+      }
+
+      const rss = process.memoryUsage.call(process).rss; // bytes
+      const rssMB = rss / (1024 * 1024);
+
+      return {
+        pid: process.pid,
+        rssMB,
+        cpuPercent: this.cpuPercent,
+      };
+    }
+  }
+
+  const processTracker = new ProcessResourceTracker();
+
+  /** Format bytes as human-readable: 128M, 1.2G */
+  const fmtMem = (mb: number): string => {
+    if (mb < 1024) return `${Math.round(mb)}M`;
+    return `${(mb / 1024).toFixed(1)}G`;
+  };
+
   const enableModelDisplayFooter = (ctx: ExtensionContext | ExtensionCommandContext) => {
     if (!ctx.hasUI) return;
 
@@ -2413,18 +2573,18 @@ export default function (pi: ExtensionAPI) {
             pwd = `${pwd} • ${sessionName}`;
           }
 
-          // Truncate path if too long
-          if (pwd.length > width) {
-            const half = Math.floor(width / 2) - 2;
-            if (half > 1) {
-              const start = pwd.slice(0, half);
-              const endLen = half - 1;
-              const end = pwd.slice(pwd.length - endLen);
-              pwd = `${start}...${end}`;
-            } else {
-              pwd = pwd.slice(0, Math.max(1, width));
-            }
-          }
+          // Process info (PID, RSS, CPU%) — left side of model line
+          // Each metric gets a distinct dark color for visual differentiation
+          const proc = processTracker.sample();
+          const procInfo =
+            mu("dim", "[") +
+            rgbRaw(90, 105, 135, `PID:${proc.pid}`) +
+            mu("dim", " ") +
+            rgbRaw(75, 120, 110, `RSS:${fmtMem(proc.rssMB)}`) +
+            mu("dim", " ") +
+            rgbRaw(110, 90, 120, `CPU:${proc.cpuPercent.toFixed(1)}%`) +
+            mu("dim", "]");
+          const procInfoWidth = visibleWidth(procInfo);
 
           // Format token counts
           const fmt = (n: number) => {
@@ -2435,7 +2595,7 @@ export default function (pi: ExtensionAPI) {
             return `${Math.round(n / 1000000)}M`;
           };
 
-          // Build stats line with bracketed groups and semantic colors
+          // Build stats groups with bracketed semantic colors
           const statsParts: string[] = [];
 
           // Tokens group (cyan): [↑in ↓out]
@@ -2466,7 +2626,28 @@ export default function (pi: ExtensionAPI) {
           const contextInfo = `${fmt(contextTokens)}/${fmt(contextWindow)} (${contextPercent}%)`;
           statsParts.push(`${mu("dim", "[")}${bar} ${mu("text", contextInfo)}${mu("dim", "]")}`);
 
-          const statsLeft = statsParts.join(" ");
+          const statsRight = statsParts.join(" ");
+          const statsRightWidth = visibleWidth(statsRight);
+
+          // Truncate path if too long (account for stats on same line)
+          const maxPwdWidth = width - statsRightWidth - 2; // 2 chars min padding
+          if (pwd.length > maxPwdWidth) {
+            const half = Math.floor(maxPwdWidth / 2) - 2;
+            if (half > 1) {
+              const start = pwd.slice(0, half);
+              const endLen = half - 1;
+              const end = pwd.slice(pwd.length - endLen);
+              pwd = `${start}...${end}`;
+            } else {
+              pwd = pwd.slice(0, Math.max(1, maxPwdWidth));
+            }
+          }
+
+          // Build pwd line with stats right-aligned
+          const pwdStyled = theme.fg("dim", pwd);
+          const pwdWidth = visibleWidth(pwdStyled);
+          const pwdPadLen = Math.max(1, width - pwdWidth - statsRightWidth);
+          const pwdLine = pwdStyled + " ".repeat(pwdPadLen) + statsRight;
 
           // Build model display: provider:model:thinkingLevel
           const model = ctx.model;
@@ -2477,34 +2658,28 @@ export default function (pi: ExtensionAPI) {
 
           const rightSide = formatModelDisplay(provider, modelId, thinkingLevel, hasReasoning);
 
-          // Calculate padding
-          const statsLeftWidth = visibleWidth(statsLeft);
+          // Build process line: procInfo left, model right
           const rightSideWidth = visibleWidth(rightSide);
           const minPadding = 2;
-          const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
+          const totalNeeded = procInfoWidth + minPadding + rightSideWidth;
 
-          let statsLine: string;
+          let procLine: string;
           if (totalNeeded <= width) {
-            const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
-            statsLine = statsLeft + padding + rightSide;
+            const padding = " ".repeat(width - procInfoWidth - rightSideWidth);
+            procLine = procInfo + theme.fg("dim", padding) + rightSide;
           } else {
-            const availableForRight = width - statsLeftWidth - minPadding;
+            const availableForRight = width - procInfoWidth - minPadding;
             if (availableForRight > 3) {
               const truncatedRight = truncateToWidth(rightSide, availableForRight);
               const truncatedWidth = visibleWidth(truncatedRight);
-              const padding = " ".repeat(width - statsLeftWidth - truncatedWidth);
-              statsLine = statsLeft + padding + truncatedRight;
+              const padding = " ".repeat(width - procInfoWidth - truncatedWidth);
+              procLine = procInfo + theme.fg("dim", padding) + truncatedRight;
             } else {
-              statsLine = statsLeft;
+              procLine = procInfo;
             }
           }
 
-          // Apply dim styling
-          const dimStatsLeft = theme.fg("dim", statsLeft);
-          const remainder = statsLine.slice(statsLeft.length);
-          const dimRemainder = theme.fg("dim", remainder.replace(rightSide, "")) + rightSide;
-
-          const lines = [theme.fg("dim", pwd), dimStatsLeft + dimRemainder];
+          const lines = [pwdLine, procLine];
 
           // Add extension statuses
           const extensionStatuses = footerData.getExtensionStatuses();
