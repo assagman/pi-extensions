@@ -1,5 +1,5 @@
 {
-  "name": "ask",
+  "name": "sigma",
   "version": "1.0.0",
   "description": "Better questionnaire tool for Pi with number keys, C-n/C-p nav, proper long text wrapping, and always-present 'Type something' option",
   "type": "module",

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXT_NAME="ask"
+EXT_NAME="sigma"
 TARGET_DIR="$HOME/.pi/agent/extensions"
 DIST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dist"
 
