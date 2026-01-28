@@ -10,12 +10,26 @@
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { Component, TUI } from "@mariozechner/pi-tui";
-import { matchesKey, visibleWidth } from "@mariozechner/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Analyzer } from "../analyzer.js";
 import type { NormalizedToolSchema } from "../schema-capture.js";
-import type { DashboardState, TokenAnalysis, TokenCategory } from "../types.js";
+import type { DashboardState, TokenAnalysis, TokenCategory, TokenSource } from "../types.js";
 import { CATEGORY_META } from "../types.js";
 import { renderBarChart, renderProgressBar } from "./charts.js";
+
+// =============================================================================
+// DISPLAY ROW (flattened source with hierarchy info)
+// =============================================================================
+
+interface DisplayRow {
+  label: string;
+  tokens: number;
+  percent: number;
+  isChild: boolean;
+  isGroupHeader: boolean;
+  /** Reference to the source for content viewing */
+  source: TokenSource;
+}
 
 // =============================================================================
 // VISUAL CONSTANTS
@@ -64,10 +78,12 @@ const T_LEFT = "┤";
 // HELPERS
 // =============================================================================
 
-function padRight(text: string, width: number): string {
-  const vis = visibleWidth(text);
-  if (vis >= width) return text;
-  return text + " ".repeat(width - vis);
+/**
+ * Fit text to exact visible width: truncate if too long, pad if too short.
+ * Handles ANSI escape codes correctly.
+ */
+function fitToWidth(text: string, width: number): string {
+  return truncateToWidth(text, width, "…", true);
 }
 
 function formatCompact(n: number): string {
@@ -91,7 +107,15 @@ export class Dashboard implements Component {
   private _invalidate?: () => void;
   private selectedIndex = 0;
   private detailScrollOffset = 0;
+  private detailSelectedIndex = 0;
   private showDiscrepancy = false;
+  private focusedPane: "left" | "right" = "left";
+  private cachedDisplayRowCount = 0;
+  /** Currently displayed content source (null = not in content view) */
+  private contentViewSource: TokenSource | null = null;
+  private contentScrollOffset = 0;
+  /** Cached display rows for source resolution */
+  private cachedDisplayRows: DisplayRow[] = [];
 
   constructor(
     private tui: TUI,
@@ -140,10 +164,55 @@ export class Dashboard implements Component {
 
   invalidate(): void {
     this.detailScrollOffset = 0;
+    this.detailSelectedIndex = 0;
   }
 
   handleInput(key: string): boolean {
+    // ── Content view mode ──
+    if (this.contentViewSource) {
+      if (matchesKey(key, "escape") || matchesKey(key, "q")) {
+        this.contentViewSource = null;
+        this.contentScrollOffset = 0;
+        this._invalidate?.();
+        return true;
+      }
+      if (matchesKey(key, "up") || matchesKey(key, "k")) {
+        if (this.contentScrollOffset > 0) {
+          this.contentScrollOffset--;
+          this._invalidate?.();
+        }
+        return true;
+      }
+      if (matchesKey(key, "down") || matchesKey(key, "j")) {
+        this.contentScrollOffset++;
+        this._invalidate?.();
+        return true;
+      }
+      if (matchesKey(key, "pageUp")) {
+        this.contentScrollOffset = Math.max(0, this.contentScrollOffset - 20);
+        this._invalidate?.();
+        return true;
+      }
+      if (matchesKey(key, "pageDown")) {
+        this.contentScrollOffset += 20;
+        this._invalidate?.();
+        return true;
+      }
+      if (matchesKey(key, "g")) {
+        this.contentScrollOffset = 0;
+        this._invalidate?.();
+        return true;
+      }
+      return true; // Consume all keys in content view
+    }
+
+    // ── Discrepancy view / main view ──
     if (matchesKey(key, "q") || matchesKey(key, "escape")) {
+      if (this.showDiscrepancy) {
+        this.showDiscrepancy = false;
+        this._invalidate?.();
+        return true;
+      }
       this.done(null);
       return true;
     }
@@ -154,24 +223,76 @@ export class Dashboard implements Component {
       }
       return true;
     }
+
+    // Enter: open content viewer for selected source
+    if (matchesKey(key, "return")) {
+      if (this.focusedPane === "right" && this.cachedDisplayRows.length > 0) {
+        const row = this.cachedDisplayRows[this.detailSelectedIndex];
+        if (row?.source) {
+          const content = row.source.content;
+          if (content) {
+            this.contentViewSource = row.source;
+            this.contentScrollOffset = 0;
+            this._invalidate?.();
+          }
+        }
+      }
+      return true;
+    }
+
+    // Pane focus: h/← → left, l/→ → right
+    if (matchesKey(key, "h") || matchesKey(key, "left")) {
+      if (this.focusedPane !== "left") {
+        this.focusedPane = "left";
+        this._invalidate?.();
+      }
+      return true;
+    }
+    if (matchesKey(key, "l") || matchesKey(key, "right")) {
+      if (this.focusedPane !== "right") {
+        this.focusedPane = "right";
+        this._invalidate?.();
+      }
+      return true;
+    }
+
+    // Vertical nav: routed by focused pane
     if (matchesKey(key, "up") || matchesKey(key, "k")) {
-      this.selectPrevCategory();
+      if (this.focusedPane === "left") {
+        this.selectPrevCategory();
+      } else {
+        this.selectPrevDetailRow();
+      }
       return true;
     }
     if (matchesKey(key, "down") || matchesKey(key, "j")) {
-      this.selectNextCategory();
+      if (this.focusedPane === "left") {
+        this.selectNextCategory();
+      } else {
+        this.selectNextDetailRow();
+      }
       return true;
     }
     if (matchesKey(key, "pageUp")) {
-      this.scrollDetail(-5);
+      if (this.focusedPane === "left") {
+        this.selectCategoryPage(-5);
+      } else {
+        this.selectDetailPage(-10);
+      }
       return true;
     }
     if (matchesKey(key, "pageDown")) {
-      this.scrollDetail(5);
+      if (this.focusedPane === "left") {
+        this.selectCategoryPage(5);
+      } else {
+        this.selectDetailPage(10);
+      }
       return true;
     }
     return false;
   }
+
+  // ── Left pane navigation ──
 
   private selectPrevCategory(): void {
     if (!this.state.analysis) return;
@@ -179,7 +300,7 @@ export class Dashboard implements Component {
     if (this.selectedIndex > 0) {
       this.selectedIndex--;
       this.state.selectedCategory = cats[this.selectedIndex].category;
-      this.detailScrollOffset = 0;
+      this.resetDetailSelection();
       this._invalidate?.();
     }
   }
@@ -190,31 +311,76 @@ export class Dashboard implements Component {
     if (this.selectedIndex < cats.length - 1) {
       this.selectedIndex++;
       this.state.selectedCategory = cats[this.selectedIndex].category;
-      this.detailScrollOffset = 0;
+      this.resetDetailSelection();
       this._invalidate?.();
     }
   }
 
-  private scrollDetail(delta: number): void {
-    this.detailScrollOffset = Math.max(0, this.detailScrollOffset + delta);
+  private selectCategoryPage(delta: number): void {
+    if (!this.state.analysis) return;
+    const cats = this.state.analysis.categories;
+    const maxIdx = cats.length - 1;
+    const newIdx = Math.max(0, Math.min(maxIdx, this.selectedIndex + delta));
+    if (newIdx !== this.selectedIndex) {
+      this.selectedIndex = newIdx;
+      this.state.selectedCategory = cats[newIdx].category;
+      this.resetDetailSelection();
+      this._invalidate?.();
+    }
+  }
+
+  // ── Right pane navigation ──
+
+  private selectPrevDetailRow(): void {
+    if (this.detailSelectedIndex > 0) {
+      this.detailSelectedIndex--;
+      this._invalidate?.();
+    }
+  }
+
+  private selectNextDetailRow(): void {
+    const maxIdx = Math.max(0, this.cachedDisplayRowCount - 1);
+    if (this.detailSelectedIndex < maxIdx) {
+      this.detailSelectedIndex++;
+      this._invalidate?.();
+    }
+  }
+
+  private selectDetailPage(delta: number): void {
+    const maxIdx = Math.max(0, this.cachedDisplayRowCount - 1);
+    this.detailSelectedIndex = Math.max(0, Math.min(maxIdx, this.detailSelectedIndex + delta));
     this._invalidate?.();
+  }
+
+  private resetDetailSelection(): void {
+    this.detailScrollOffset = 0;
+    this.detailSelectedIndex = 0;
   }
 
   render(width: number): string[] {
     const height = this.tui.terminal.rows || 24;
 
+    let lines: string[];
+
     if (this.state.isLoading) {
-      return this.renderCentered(width, height, dim("⏳ Analyzing context window..."));
-    }
-    if (this.state.error || !this.state.analysis) {
-      return this.renderCentered(width, height, red(`❌ ${this.state.error ?? "Unknown error"}`));
+      lines = this.renderCentered(width, height, dim("⏳ Analyzing context window..."));
+    } else if (this.state.error || !this.state.analysis) {
+      lines = this.renderCentered(width, height, red(`❌ ${this.state.error ?? "Unknown error"}`));
+    } else if (this.contentViewSource) {
+      lines = this.renderContentView(width, height, this.contentViewSource);
+    } else if (this.showDiscrepancy && this.state.analysis.discrepancy) {
+      lines = this.renderDiscrepancyView(width, height, this.state.analysis);
+    } else {
+      lines = this.renderMain(width, height, this.state.analysis);
     }
 
-    if (this.showDiscrepancy && this.state.analysis.discrepancy) {
-      return this.renderDiscrepancyView(width, height, this.state.analysis);
-    }
-
-    return this.renderMain(width, height, this.state.analysis);
+    // Safety net: ensure no line exceeds terminal width
+    return lines.map((line) => {
+      if (visibleWidth(line) > width) {
+        return truncateToWidth(line, width, "…");
+      }
+      return line;
+    });
   }
 
   private renderCentered(width: number, height: number, msg: string): string[] {
@@ -264,7 +430,7 @@ export class Dashboard implements Component {
       const left = leftBody[i] ?? "";
       const right = rightBody[i] ?? "";
       lines.push(
-        `${muted(V)} ${padRight(left, LEFT_W - 2)}${muted(V)} ${padRight(right, rightW - 3)} ${muted(V)}`
+        `${muted(V)} ${fitToWidth(left, LEFT_W - 2)}${muted(V)} ${fitToWidth(right, rightW - 3)} ${muted(V)}`
       );
     }
 
@@ -277,20 +443,20 @@ export class Dashboard implements Component {
     return lines;
   }
 
-  private renderHeaderLeft(_w: number, _analysis: TokenAnalysis): string {
-    return bold(white("󰊤 GAMMA"));
+  private renderHeaderLeft(w: number, _analysis: TokenAnalysis): string {
+    return fitToWidth(bold(white("󰊤 GAMMA")), w);
   }
 
   private renderHeaderRight(w: number, analysis: TokenAnalysis): string {
     const model = `${analysis.model.provider}:${analysis.model.modelId}`;
-    return padRight(dim(model), w);
+    return fitToWidth(dim(model), w);
   }
 
   private renderUsageLeft(w: number, analysis: TokenAnalysis): string {
     const pct = `${analysis.usagePercent.toFixed(1)}%`;
     const barW = Math.max(8, w - 8);
     const bar = renderProgressBar(analysis.usagePercent, barW);
-    return `${bar} ${colorPct(analysis.usagePercent, pct)}`;
+    return fitToWidth(`${bar} ${colorPct(analysis.usagePercent, pct)}`, w);
   }
 
   private renderUsageRight(w: number, analysis: TokenAnalysis): string {
@@ -299,7 +465,7 @@ export class Dashboard implements Component {
     const remaining = analysis.contextWindow - analysis.totalTokens;
     const remStr = formatCompact(remaining);
     const text = `${white(used)} / ${dim(max)}  ${dim("remaining:")} ${green(remStr)}`;
-    return padRight(text, w);
+    return fitToWidth(text, w);
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -310,7 +476,7 @@ export class Dashboard implements Component {
     const lines: string[] = [];
 
     // Section: CATEGORIES
-    lines.push(dim("CATEGORIES"));
+    lines.push(this.focusedPane === "left" ? white("CATEGORIES") : dim("CATEGORIES"));
 
     for (let i = 0; i < analysis.categories.length; i++) {
       const cat = analysis.categories[i];
@@ -362,6 +528,48 @@ export class Dashboard implements Component {
   // RIGHT BODY: Sources for selected category
   // ─────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Build a flat display list from sources, expanding children inline.
+   * Sources with children produce: group header row + indented child rows.
+   */
+  private buildDisplayRows(sources: TokenSource[]): DisplayRow[] {
+    const rows: DisplayRow[] = [];
+    for (const src of sources) {
+      if (src.children && src.children.length > 0) {
+        // Group header — shows aggregate, visually distinct
+        rows.push({
+          label: src.label,
+          tokens: src.tokens,
+          percent: src.percent,
+          isChild: false,
+          isGroupHeader: true,
+          source: src,
+        });
+        // Children — indented, sorted by tokens desc (already sorted in analyzer)
+        for (const child of src.children) {
+          rows.push({
+            label: child.label,
+            tokens: child.tokens,
+            percent: child.percent,
+            isChild: true,
+            isGroupHeader: false,
+            source: child,
+          });
+        }
+      } else {
+        rows.push({
+          label: src.label,
+          tokens: src.tokens,
+          percent: src.percent,
+          isChild: false,
+          isGroupHeader: false,
+          source: src,
+        });
+      }
+    }
+    return rows;
+  }
+
   private renderRightBody(w: number, h: number, analysis: TokenAnalysis): string[] {
     const lines: string[] = [];
     const selectedCat = this.state.selectedCategory;
@@ -374,51 +582,98 @@ export class Dashboard implements Component {
 
     const meta = CATEGORY_META[selectedCat];
     const catStat = analysis.categories.find((c) => c.category === selectedCat);
+    const catTokens = catStat?.tokens ?? 0;
     const sources = analysis.sources
       .filter((s) => s.category === selectedCat)
       .sort((a, b) => b.tokens - a.tokens);
 
-    // Header
+    // Header (brighter divider when focused)
     const headerIcon = categoryColor(selectedCat, meta.icon);
     const headerLabel = categoryColor(selectedCat, bold(meta.label));
     const headerStats = dim(
       `${catStat?.tokens.toLocaleString() ?? 0} tokens · ${catStat?.percent.toFixed(1) ?? 0}%`
     );
-    lines.push(`${headerIcon} ${headerLabel}  ${headerStats}`);
-    lines.push(dim(H.repeat(w)));
+    lines.push(truncateToWidth(`${headerIcon} ${headerLabel}  ${headerStats}`, w, "…"));
+    const dividerColor = this.focusedPane === "right" ? muted : dim;
+    lines.push(dividerColor(H.repeat(w)));
 
     // Column header
     const nameW = Math.max(20, w - 28);
     const barW = Math.max(8, w - nameW - 20);
     lines.push(
-      `${dim("Source".padEnd(nameW))} ${dim("Tokens".padStart(8))} ${dim("%".padStart(6))}  ${dim("Share")}`
+      truncateToWidth(
+        `${dim("Source".padEnd(nameW))} ${dim("Tokens".padStart(8))} ${dim("%".padStart(6))}  ${dim("Share")}`,
+        w,
+        "…"
+      )
     );
 
+    // Build flattened display rows (expands children inline)
+    const displayRows = this.buildDisplayRows(sources);
+    this.cachedDisplayRows = displayRows;
+    this.cachedDisplayRowCount = displayRows.length;
+
     // Sources list
-    if (sources.length === 0) {
+    if (displayRows.length === 0) {
       lines.push(dim("(no sources)"));
     } else {
       const viewH = h - 4; // header + divider + column header + scroll hint
-      const maxScroll = Math.max(0, sources.length - viewH);
+
+      // Clamp selection to valid range
+      this.detailSelectedIndex = Math.min(
+        this.detailSelectedIndex,
+        Math.max(0, displayRows.length - 1)
+      );
+
+      // Auto-scroll to keep selection visible when right pane focused
+      if (this.focusedPane === "right") {
+        if (this.detailSelectedIndex < this.detailScrollOffset) {
+          this.detailScrollOffset = this.detailSelectedIndex;
+        } else if (this.detailSelectedIndex >= this.detailScrollOffset + viewH) {
+          this.detailScrollOffset = this.detailSelectedIndex - viewH + 1;
+        }
+      }
+
+      const maxScroll = Math.max(0, displayRows.length - viewH);
       this.detailScrollOffset = Math.min(this.detailScrollOffset, maxScroll);
 
-      const visible = sources.slice(this.detailScrollOffset, this.detailScrollOffset + viewH);
+      const visible = displayRows.slice(this.detailScrollOffset, this.detailScrollOffset + viewH);
+      const rightFocused = this.focusedPane === "right";
 
-      for (const src of visible) {
-        const name = src.label.slice(0, nameW - 1).padEnd(nameW);
-        const tokens = src.tokens.toLocaleString().padStart(8);
-        const pct = `${src.percent.toFixed(1).padStart(5)}%`;
-        const shareOfCat = catStat && catStat.tokens > 0 ? (src.tokens / catStat.tokens) * 100 : 0;
+      for (let i = 0; i < visible.length; i++) {
+        const row = visible[i];
+        const absIdx = this.detailScrollOffset + i;
+        const isCursor = rightFocused && absIdx === this.detailSelectedIndex;
+
+        const indent = row.isGroupHeader ? "▾ " : row.isChild ? "  " : "";
+        const labelW = nameW - indent.length;
+        const name = indent + truncateToWidth(row.label, Math.max(1, labelW - 1), "…");
+        const paddedName = fitToWidth(name, nameW);
+        const tokensStr = row.tokens.toLocaleString();
+        const tokens =
+          tokensStr.length > 8 ? formatCompact(row.tokens).padStart(8) : tokensStr.padStart(8);
+        const pct = `${row.percent.toFixed(1).padStart(5)}%`;
+        const shareOfCat = catTokens > 0 ? (row.tokens / catTokens) * 100 : 0;
         const bar = renderBarChart(shareOfCat, barW, meta.color);
 
-        lines.push(`${white(name)} ${white(tokens)} ${dim(pct)}  ${bar}`);
+        let sourceLine: string;
+        if (isCursor) {
+          // Cursor row: reverse-video name in category color
+          const highlighted = `${REVERSE}${categoryColor(selectedCat, paddedName)}${REVERSE_OFF}`;
+          sourceLine = `${highlighted} ${white(tokens)} ${dim(pct)}  ${bar}`;
+        } else if (row.isGroupHeader) {
+          sourceLine = `${muted(paddedName)} ${muted(tokens)} ${dim(pct)}  ${bar}`;
+        } else {
+          sourceLine = `${white(paddedName)} ${white(tokens)} ${dim(pct)}  ${bar}`;
+        }
+        lines.push(truncateToWidth(sourceLine, w, "…"));
       }
 
       // Scroll indicator
-      if (sources.length > viewH) {
+      if (displayRows.length > viewH) {
         const from = this.detailScrollOffset + 1;
-        const to = Math.min(this.detailScrollOffset + viewH, sources.length);
-        lines.push(dim(`[PgUp/Dn] ${from}-${to} of ${sources.length}`));
+        const to = Math.min(this.detailScrollOffset + viewH, displayRows.length);
+        lines.push(dim(`${from}-${to} of ${displayRows.length}`));
       }
     }
 
@@ -431,11 +686,82 @@ export class Dashboard implements Component {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // CONTENT VIEW
+  // ─────────────────────────────────────────────────────────────────────────
+
+  private renderContentView(width: number, height: number, source: TokenSource): string[] {
+    const lines: string[] = [];
+    const innerW = width - 2; // borders
+
+    // Top border
+    lines.push(muted(TL + H.repeat(innerW) + TR));
+
+    // Title bar
+    const cat = source.category;
+    const icon = CATEGORY_META[cat].icon;
+    const title = categoryColor(cat, `${icon} ${bold(source.label)}`);
+    const stats = dim(`${source.tokens.toLocaleString()} tokens · ${source.percent.toFixed(1)}%`);
+    const titleLine = ` ${title}  ${stats}`;
+    lines.push(`${muted(V)}${fitToWidth(titleLine, innerW)}${muted(V)}`);
+
+    // Separator
+    lines.push(muted(`${T_RIGHT}${H.repeat(innerW)}${T_LEFT}`));
+
+    // Content area
+    const contentH = height - 5; // top border + title + separator + bottom border + footer
+    const content = source.content ?? "(no content available)";
+    const contentLines = content.split("\n");
+
+    // Clamp scroll offset
+    const maxScroll = Math.max(0, contentLines.length - contentH);
+    this.contentScrollOffset = Math.min(this.contentScrollOffset, maxScroll);
+
+    const lineNumW = String(contentLines.length).length;
+    const textW = innerW - lineNumW - 3; // lineNum + " │ " + text
+
+    const visible = contentLines.slice(
+      this.contentScrollOffset,
+      this.contentScrollOffset + contentH
+    );
+
+    for (let i = 0; i < contentH; i++) {
+      if (i < visible.length) {
+        const lineIdx = this.contentScrollOffset + i;
+        const lineNum = dim(String(lineIdx + 1).padStart(lineNumW));
+        const text = visible[i];
+        const displayText = fitToWidth(text, textW);
+        const row = ` ${lineNum} ${dim(V)} ${displayText}`;
+        lines.push(`${muted(V)}${fitToWidth(row, innerW)}${muted(V)}`);
+      } else {
+        lines.push(`${muted(V)}${" ".repeat(innerW)}${muted(V)}`);
+      }
+    }
+
+    // Bottom border
+    lines.push(muted(BL + H.repeat(innerW) + BR));
+
+    // Footer
+    const scrollInfo =
+      contentLines.length > contentH
+        ? dim(
+            ` ${this.contentScrollOffset + 1}-${Math.min(this.contentScrollOffset + contentH, contentLines.length)} of ${contentLines.length} lines`
+          )
+        : dim(` ${contentLines.length} lines`);
+    const footerKeys = dim("[j/k] scroll  [PgUp/Dn] page  [g] top  [Esc] back");
+    const footerGap = Math.max(1, width - visibleWidth(scrollInfo) - visibleWidth(footerKeys) - 2);
+    lines.push(truncateToWidth(`${scrollInfo}${" ".repeat(footerGap)}${footerKeys} `, width, "…"));
+
+    return lines;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
   // FOOTER
   // ─────────────────────────────────────────────────────────────────────────
 
   private renderFooter(width: number, analysis: TokenAnalysis): string {
-    const keys = dim("[↑↓/jk] nav  [PgUp/Dn] scroll  [q] quit");
+    const paneHint = this.focusedPane === "left" ? "categories" : "sources";
+    const enterHint = this.focusedPane === "right" ? "  [↵] view" : "";
+    const keys = dim(`[h/l] pane  [j/k] ${paneHint}${enterHint}  [PgUp/Dn] page  [q] quit`);
 
     let discHint = "";
     if (analysis.discrepancy) {
@@ -446,7 +772,7 @@ export class Dashboard implements Component {
 
     const left = ` ${keys}`;
     const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(discHint) - 2);
-    return `${left}${" ".repeat(gap)}${discHint} `;
+    return truncateToWidth(`${left}${" ".repeat(gap)}${discHint} `, width, "…");
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -457,43 +783,34 @@ export class Dashboard implements Component {
     const disc = analysis.discrepancy;
     if (!disc) return this.renderCentered(width, height, dim("No discrepancy data"));
     const lines: string[] = [];
+    const innerW = width - 2;
+
+    /** Build a bordered line: │content│ fitted to exact width */
+    const boxLine = (content: string): string =>
+      `${muted(V)}${fitToWidth(content, innerW)}${muted(V)}`;
 
     // Top border
-    lines.push(muted(TL + H.repeat(width - 2) + TR));
+    lines.push(muted(TL + H.repeat(innerW) + TR));
 
     // Title
     const title = bold(yellow(" ⚠ Token Count Discrepancy Analysis"));
-    lines.push(
-      muted(V) + title + " ".repeat(Math.max(0, width - visibleWidth(title) - 3)) + muted(V)
-    );
-    lines.push(muted(V) + " ".repeat(width - 2) + muted(V));
+    lines.push(boxLine(title));
+    lines.push(boxLine(""));
 
     // Summary
-    const counted = `Counted:   ${white(disc.counted.toLocaleString())}`;
-    const reported = `Reported:  ${white(disc.reported.toLocaleString())}`;
+    const counted = `  Counted:   ${white(disc.counted.toLocaleString())}`;
+    const reported = `  Reported:  ${white(disc.reported.toLocaleString())}`;
     const diffSign = disc.difference > 0 ? "+" : "";
-    const diffLine = `Delta:     ${yellow(diffSign + disc.difference.toLocaleString())} ${dim(`(${disc.percentDiff.toFixed(1)}%)`)}`;
+    const diffLine = `  Delta:     ${yellow(diffSign + disc.difference.toLocaleString())} ${dim(`(${disc.percentDiff.toFixed(1)}%)`)}`;
 
-    lines.push(
-      `${muted(V)}  ${counted}${" ".repeat(Math.max(0, width - visibleWidth(counted) - 5))}${muted(V)}`
-    );
-    lines.push(
-      `${muted(V)}  ${reported}${" ".repeat(Math.max(0, width - visibleWidth(reported) - 5))}${muted(V)}`
-    );
-    lines.push(
-      `${muted(V)}  ${diffLine}${" ".repeat(Math.max(0, width - visibleWidth(diffLine) - 5))}${muted(V)}`
-    );
-    lines.push(muted(V) + " ".repeat(width - 2) + muted(V));
+    lines.push(boxLine(counted));
+    lines.push(boxLine(reported));
+    lines.push(boxLine(diffLine));
+    lines.push(boxLine(""));
 
     // Sources header
-    const sourcesHeader = dim("  Potential Sources:");
-    lines.push(
-      muted(V) +
-        sourcesHeader +
-        " ".repeat(Math.max(0, width - visibleWidth(sourcesHeader) - 3)) +
-        muted(V)
-    );
-    lines.push(muted(V) + " ".repeat(width - 2) + muted(V));
+    lines.push(boxLine(dim("  Potential Sources:")));
+    lines.push(boxLine(""));
 
     // Sources list
     for (const src of disc.sources) {
@@ -503,30 +820,22 @@ export class Dashboard implements Component {
       const name = white(src.name);
       const impact = dim(`±${src.estimatedImpact.toLocaleString()} tokens`);
 
-      const line1 = `  ${badge} ${name}  ${impact}`;
+      lines.push(boxLine(`  ${badge} ${name}  ${impact}`));
       lines.push(
-        muted(V) + line1 + " ".repeat(Math.max(0, width - visibleWidth(line1) - 3)) + muted(V)
-      );
-
-      const reasonLine = `      ${dim(src.reason.slice(0, width - 10))}`;
-      lines.push(
-        muted(V) +
-          reasonLine +
-          " ".repeat(Math.max(0, width - visibleWidth(reasonLine) - 3)) +
-          muted(V)
+        boxLine(`      ${dim(truncateToWidth(src.reason, Math.max(1, innerW - 8), "…"))}`)
       );
     }
 
     // Fill remaining space
     while (lines.length < height - 2) {
-      lines.push(muted(V) + " ".repeat(width - 2) + muted(V));
+      lines.push(boxLine(""));
     }
 
     // Bottom border
-    lines.push(muted(BL + H.repeat(width - 2) + BR));
+    lines.push(muted(BL + H.repeat(innerW) + BR));
 
     // Footer
-    lines.push(dim(" [d] back  [q] quit"));
+    lines.push(truncateToWidth(dim(" [d] back  [q] quit"), width, "…"));
 
     return lines;
   }
