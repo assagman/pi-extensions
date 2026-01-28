@@ -2,11 +2,17 @@
 set -euo pipefail
 
 EXT_NAME="mu"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="$HOME/.pi/agent/extensions"
-DIST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dist"
+DIST_DIR="$SCRIPT_DIR/dist"
+
+# Build shared-tui dependency first
+echo "Building shared-tui..."
+(cd "$SCRIPT_DIR/../shared/tui" && bun install --frozen-lockfile 2>/dev/null || bun install && bun run build)
 
 # Build
 echo "Building $EXT_NAME..."
+bun install --frozen-lockfile 2>/dev/null || bun install
 bun run build
 
 # Verify dist exists

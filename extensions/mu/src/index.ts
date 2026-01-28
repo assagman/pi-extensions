@@ -25,12 +25,14 @@ import {
   type Component,
   type KeyId,
   Markdown,
+  type TUI,
   Text,
   matchesKey,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
+import { DimmedOverlay } from "shared-tui";
 
 // =============================================================================
 // THEME INTEGRATION
@@ -199,7 +201,6 @@ interface ToolState {
 
 const activeToolsById = new Map<string, ToolState>();
 const toolStatesBySig = new Map<string, ToolState[]>();
-const fullToolResultContentById = new Map<string, unknown>();
 const cardInstanceCountBySig = new Map<string, number>();
 
 const getToolStateByIndex = (sig: string, index: number): ToolState | undefined => {
@@ -276,10 +277,6 @@ const workingTimer = new WorkingTimer();
 interface MuTheme {
   fg: (color: string, text: string) => string;
   bg: (color: string, text: string) => string;
-}
-
-interface ThemeWithAnsi extends MuTheme {
-  getFgAnsi?: (color: string) => string;
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: Tool types require any
@@ -667,26 +664,32 @@ const _splitGraphemes = (value: string): string[] => {
 class ToolResultDetailViewer implements Component {
   private option: ToolResultOption;
   private scrollOffset = 0;
-  private lines: string[] = [];
-  private theme: ThemeWithAnsi;
+  private allLines: string[] = [];
+  private tui: TUI;
+  private lastWidth = 0;
 
-  constructor(option: ToolResultOption, theme: ThemeWithAnsi) {
+  constructor(option: ToolResultOption, tui: TUI) {
     this.option = option;
-    this.theme = theme;
+    this.tui = tui;
   }
 
-  render(width: number): string[] {
+  /** Available viewport height (lines for scrollable content). */
+  private viewportHeight(): number {
+    // Reserve: scroll-up indicator (1) + scroll-down indicator (1) + help line (1) + blank (1) = 4
+    return Math.max(5, Math.floor(this.tui.terminal.rows * 0.85) - 4);
+  }
+
+  private buildLines(width: number): void {
     const { toolName, args, result, duration, isError } = this.option;
     const out: string[] = [];
 
     const header = `${mu("warning", "─")} ${mu("warning", toolName)} ${mu("dim", "─".repeat(Math.max(0, width - toolName.length - 4)))}`;
     out.push(header);
 
-    const argLines = Object.entries(args).map(([k, v]) => {
+    for (const [k, v] of Object.entries(args)) {
       const val = typeof v === "string" ? preview(v, 80) : JSON.stringify(v);
-      return truncateToWidth(`  ${mu("info", k)}: ${mu("text", val)}`, width);
-    });
-    out.push(...argLines);
+      out.push(truncateToWidth(`  ${mu("info", k)}: ${mu("text", val)}`, width));
+    }
 
     if (duration !== undefined) {
       out.push(`  ${mu("dim", `duration: ${(duration / 1000).toFixed(2)}s`)}`);
@@ -705,25 +708,79 @@ class ToolResultDetailViewer implements Component {
     const resultColor: MuColor = isError ? "error" : "success";
     out.push(mu(resultColor, isError ? "─ Error ─" : "─ Result ─"));
 
-    const textLines = text.split("\n");
-    for (const line of textLines) {
+    for (const line of text.split("\n")) {
       const wrapped = wrapTextWithAnsi(line, width - 2);
       for (const w of wrapped) {
         out.push(`  ${w}`);
       }
     }
 
-    this.lines = clampLines(out, width);
-    return this.lines;
+    this.allLines = clampLines(out, width);
+  }
+
+  render(width: number): string[] {
+    // Rebuild content lines when width changes
+    if (width !== this.lastWidth) {
+      this.buildLines(width);
+      this.lastWidth = width;
+    }
+
+    const vh = this.viewportHeight();
+    const maxScroll = Math.max(0, this.allLines.length - vh);
+    this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
+
+    const visible = this.allLines.slice(this.scrollOffset, this.scrollOffset + vh);
+    const out: string[] = [];
+
+    // Scroll-up indicator
+    if (this.scrollOffset > 0) {
+      out.push(mu("dim", `  ↑ ${this.scrollOffset} more lines`));
+    } else {
+      out.push("");
+    }
+
+    out.push(...visible);
+
+    // Scroll-down indicator
+    const remaining = this.allLines.length - this.scrollOffset - vh;
+    if (remaining > 0) {
+      out.push(mu("dim", `  ↓ ${remaining} more lines`));
+    } else {
+      out.push("");
+    }
+
+    // Help
+    out.push(mu("dim", "↑↓/jk scroll  pgup/pgdn page  g/G top/end  esc back"));
+
+    return out;
   }
 
   handleInput(key: KeyId): boolean {
+    const vh = this.viewportHeight();
+    const maxScroll = Math.max(0, this.allLines.length - vh);
+
     if (matchesKey(key, "down") || matchesKey(key, "j")) {
-      this.scrollOffset = Math.min(this.scrollOffset + 1, Math.max(0, this.lines.length - 10));
+      this.scrollOffset = Math.min(this.scrollOffset + 1, maxScroll);
       return true;
     }
     if (matchesKey(key, "up") || matchesKey(key, "k")) {
       this.scrollOffset = Math.max(0, this.scrollOffset - 1);
+      return true;
+    }
+    if (matchesKey(key, "pageDown") || matchesKey(key, "ctrl+d")) {
+      this.scrollOffset = Math.min(this.scrollOffset + vh, maxScroll);
+      return true;
+    }
+    if (matchesKey(key, "pageUp") || matchesKey(key, "ctrl+u")) {
+      this.scrollOffset = Math.max(0, this.scrollOffset - vh);
+      return true;
+    }
+    if (matchesKey(key, "g")) {
+      this.scrollOffset = 0;
+      return true;
+    }
+    if (matchesKey(key, "shift+g")) {
+      this.scrollOffset = maxScroll;
       return true;
     }
     return false;
@@ -738,41 +795,54 @@ class ToolResultDetailViewer implements Component {
 class MuToolsOverlay implements Component {
   private options: ToolResultOption[];
   private selectedIndex = 0;
-  private theme: ThemeWithAnsi;
+  private tui: TUI;
   private onSelect: (opt: ToolResultOption) => void;
   private onClose: () => void;
   private scrollOffset = 0;
 
   constructor(
     options: ToolResultOption[],
-    theme: ThemeWithAnsi,
+    tui: TUI,
     onSelect: (opt: ToolResultOption) => void,
     onClose: () => void
   ) {
     this.options = options;
-    this.theme = theme;
+    this.tui = tui;
     this.onSelect = onSelect;
     this.onClose = onClose;
+  }
+
+  /** Max visible list items — scales with terminal height. */
+  private listHeight(): number {
+    // Chrome: title (1) + divider (1) + preview pane (~6) + divider (1) + help (1) = 10
+    return Math.max(3, Math.floor(this.tui.terminal.rows * 0.85) - 10);
   }
 
   render(width: number): string[] {
     const lines: string[] = [];
     const innerW = width - 2;
 
-    const titleText = "μ Tools";
+    // Title with count
+    const count = this.options.length;
+    const titleText = `μ Tools (${count})`;
     const titleLine = `${mu("warning", titleText)} ${mu("info", "─".repeat(Math.max(0, innerW - titleText.length - 1)))}`;
     lines.push(titleLine);
 
-    if (this.options.length === 0) {
+    if (count === 0) {
       lines.push(mu("dim", "No tool results yet"));
     } else {
-      const visibleCount = Math.min(10, this.options.length);
-      const maxScroll = Math.max(0, this.options.length - visibleCount);
+      const visibleCount = Math.min(this.listHeight(), count);
+      const maxScroll = Math.max(0, count - visibleCount);
       this.scrollOffset = Math.min(this.scrollOffset, maxScroll);
       if (this.selectedIndex < this.scrollOffset) {
         this.scrollOffset = this.selectedIndex;
       } else if (this.selectedIndex >= this.scrollOffset + visibleCount) {
         this.scrollOffset = this.selectedIndex - visibleCount + 1;
+      }
+
+      // Scroll-up indicator
+      if (this.scrollOffset > 0) {
+        lines.push(mu("dim", `  ↑ ${this.scrollOffset} more`));
       }
 
       for (let i = 0; i < visibleCount; i++) {
@@ -793,30 +863,50 @@ class MuToolsOverlay implements Component {
         const line = `${pointer}${statusSym} ${mu("info", icon)} ${label}${" ".repeat(Math.max(0, innerW - visibleWidth(label) - 12))}${durStr}`;
         lines.push(line);
       }
+
+      // Scroll-down indicator
+      const remaining = count - this.scrollOffset - visibleCount;
+      if (remaining > 0) {
+        lines.push(mu("dim", `  ↓ ${remaining} more`));
+      }
     }
 
-    const divider = mu("info", "─".repeat(innerW));
-    lines.push(divider);
+    lines.push(mu("info", "─".repeat(innerW)));
 
+    // Preview pane: args + result snippet
     const selected = this.options[this.selectedIndex];
     if (selected) {
       const args = Object.entries(selected.args).slice(0, 3);
       for (const [k, v] of args) {
         const val = typeof v === "string" ? preview(v, innerW - k.length - 4) : JSON.stringify(v);
-        const argLine = `${mu("dim", k)}: ${mu("text", val)}`;
-        lines.push(truncateToWidth(argLine, innerW));
+        lines.push(truncateToWidth(`${mu("dim", k)}: ${mu("text", val)}`, innerW));
       }
       if (args.length === 0) {
         lines.push(mu("dim", "(no args)"));
+      }
+
+      // Result snippet
+      const resultText = extractResultText(selected.result);
+      if (resultText) {
+        lines.push("");
+        const snippetLines = resultText
+          .split("\n")
+          .filter((l: string) => l.trim())
+          .slice(0, 3);
+        for (const sl of snippetLines) {
+          lines.push(truncateToWidth(`  ${mu("dim", sl)}`, innerW));
+        }
+        const totalLines = resultText.split("\n").length;
+        if (totalLines > 3) {
+          lines.push(mu("dim", `  … ${totalLines - 3} more lines`));
+        }
       }
     } else {
       lines.push("");
     }
 
     lines.push(mu("info", "─".repeat(innerW)));
-
-    const help = mu("dim", "↑↓ navigate   enter expand   esc close");
-    lines.push(help);
+    lines.push(mu("dim", "↑↓/jk nav  enter view  pgup/pgdn page  g/G top/end  esc close"));
 
     return lines;
   }
@@ -832,6 +922,16 @@ class MuToolsOverlay implements Component {
     }
     if (matchesKey(key, "up") || matchesKey(key, "k")) {
       this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+      return true;
+    }
+    if (matchesKey(key, "pageDown") || matchesKey(key, "ctrl+d")) {
+      const page = this.listHeight();
+      this.selectedIndex = Math.min(this.selectedIndex + page, this.options.length - 1);
+      return true;
+    }
+    if (matchesKey(key, "pageUp") || matchesKey(key, "ctrl+u")) {
+      const page = this.listHeight();
+      this.selectedIndex = Math.max(0, this.selectedIndex - page);
       return true;
     }
     if (matchesKey(key, "g")) {
@@ -860,39 +960,26 @@ class MuToolsOverlay implements Component {
 async function openMuToolsOverlay(ctx: ExtensionCommandContext): Promise<void> {
   if (!ctx.hasUI) return;
 
-  const overlayTheme: ThemeWithAnsi = {
-    fg: (color, text) => {
-      try {
-        return getTheme().fg(color as ThemeColor, text);
-      } catch {
-        return text;
-      }
-    },
-    bg: (_color, text) => text,
-  };
-
   const options = [...toolResultOptions].reverse();
 
-  await new Promise<void>((resolve) => {
-    ctx.ui.custom((_tui, _theme, _kb, done) => {
-      let currentOverlay: Component | null = null;
+  await DimmedOverlay.show<void>(
+    ctx.ui,
+    (tui, _theme, done) => {
+      let listView: MuToolsOverlay | null = null;
       let detailViewer: ToolResultDetailViewer | null = null;
 
-      const closeOverlay = () => {
-        done(true);
-        resolve();
-      };
+      const closeOverlay = () => done();
 
       const openDetail = (opt: ToolResultOption) => {
-        detailViewer = new ToolResultDetailViewer(opt, overlayTheme);
+        detailViewer = new ToolResultDetailViewer(opt, tui);
       };
 
-      currentOverlay = new MuToolsOverlay(options, overlayTheme, openDetail, closeOverlay);
+      listView = new MuToolsOverlay(options, tui, openDetail, closeOverlay);
 
       return {
         render(width: number): string[] {
           if (detailViewer) return detailViewer.render(width);
-          return currentOverlay?.render(width) ?? [];
+          return listView?.render(width) ?? [];
         },
         handleInput(key: KeyId): boolean {
           if (detailViewer) {
@@ -902,14 +989,17 @@ async function openMuToolsOverlay(ctx: ExtensionCommandContext): Promise<void> {
             }
             return detailViewer.handleInput(key);
           }
-          // biome-ignore lint/suspicious/noExplicitAny: Component interface
-          return (currentOverlay as any)?.handleInput?.(key) ?? false;
+          return listView?.handleInput(key) ?? false;
         },
         invalidate(): void {},
         dispose(): void {},
       };
-    });
-  });
+    },
+    {
+      scrim: { stars: true },
+      dialog: { width: "75%", maxHeight: "90%", glow: { enabled: true } },
+    }
+  );
 }
 
 // =============================================================================
@@ -1922,6 +2012,13 @@ export default function (pi: ExtensionAPI) {
     if (elapsed >= MIN_ELAPSED_FOR_NOTIFICATION_MS && ctx.hasUI) {
       ctx.ui.notify(`⏱ Completed in ${formatWorkingElapsed(elapsed)}`, "info");
     }
+
+    // Mark any still-active tools as canceled (orphaned by abort/timeout)
+    for (const [id, state] of activeToolsById) {
+      state.status = "canceled";
+      state.duration = Date.now() - state.startTime;
+      activeToolsById.delete(id);
+    }
   });
 
   // When a turn starts (user message sent), set flag for next tool to add leading space
@@ -1958,7 +2055,7 @@ export default function (pi: ExtensionAPI) {
     const duration = Date.now() - state.startTime;
     state.duration = duration;
     state.status = isError ? "failed" : "success";
-    fullToolResultContentById.set(toolCallId, content);
+    activeToolsById.delete(toolCallId);
 
     const label = `${state.toolName} ${formatToolArgsPreview(state.toolName, state.args)}`;
     toolResultOptions.push({
@@ -1974,8 +2071,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     if (toolResultOptions.length > MU_CONFIG.MAX_TOOL_RESULTS) {
-      const removed = toolResultOptions.shift();
-      if (removed) fullToolResultContentById.delete(removed.key);
+      toolResultOptions.shift();
     }
 
     if (toolStatesBySig.size > MU_CONFIG.MAX_COMPLETED_DURATIONS) {
