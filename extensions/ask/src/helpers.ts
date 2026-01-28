@@ -84,24 +84,32 @@ export function extractTextContent(
 }
 
 /**
- * Extract the last assistant message from session branch.
- * Returns the full text content or undefined if no assistant message found.
- * Looks for the most recent assistant message with non-empty text content.
+ * Extract the last N assistant messages from session branch.
+ * Returns an array of text content (newest first) from assistant messages.
+ * Looks for the most recent assistant messages with non-empty text content.
+ * Skips tool-only messages or empty messages.
+ *
+ * @param branch - Session branch entries
+ * @param count - Maximum number of messages to extract (default: 2)
+ * @returns Array of assistant message texts (newest first), empty if none found
  */
-export function extractLastAssistantMessage(
+export function extractLastAssistantMessages(
   // biome-ignore lint/suspicious/noExplicitAny: SessionEntry is complex union type
-  branch: readonly any[]
-): string | undefined {
-  // Walk backwards to find last assistant message with actual text content
-  // (Skip tool-only messages or empty messages)
-  for (let i = branch.length - 1; i >= 0; i--) {
+  branch: readonly any[],
+  count = 2
+): string[] {
+  const messages: string[] = [];
+
+  // Walk backwards to find last N assistant messages with actual text content
+  for (let i = branch.length - 1; i >= 0 && messages.length < count; i--) {
     const entry = branch[i];
     if (entry.type === "message" && entry.message?.role === "assistant") {
       const text = extractTextContent(entry.message.content);
       if (text && text.trim().length > 0) {
-        return text;
+        messages.push(text);
       }
     }
   }
-  return undefined;
+
+  return messages;
 }

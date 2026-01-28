@@ -18,7 +18,7 @@ import { DimmedOverlay } from "shared-tui";
 import { createAskUI } from "./ask-ui.js";
 import {
   errorResult,
-  extractLastAssistantMessage,
+  extractLastAssistantMessages,
   formatAnswerLines,
   normalizeQuestions,
 } from "./helpers.js";
@@ -94,13 +94,13 @@ const askExtension: ExtensionFactory = (pi: ExtensionAPI) => {
 
       const questions = normalizeQuestions(params.questions);
 
-      // Extract last assistant message for context
+      // Extract last 2 assistant messages for context (newest first)
       const branch = ctx.sessionManager.getBranch();
-      const contextText = extractLastAssistantMessage(branch);
+      const contextMessages = extractLastAssistantMessages(branch, 2);
 
       const result = await DimmedOverlay.show<AskResult>(
         ctx.ui,
-        (tui, theme, done) => createAskUI(tui, theme, done, questions, contextText),
+        (tui, theme, done) => createAskUI(tui, theme, done, questions, contextMessages),
         {
           scrim: { stars: true },
           dialog: { width: "72%", maxHeight: "88%", glow: { enabled: true } },

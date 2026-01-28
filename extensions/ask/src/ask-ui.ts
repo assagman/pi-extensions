@@ -15,10 +15,12 @@
  *   - Scrollable body viewport with ▲/▼ indicators
  */
 
+import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import {
   Editor,
   type EditorTheme,
   Key,
+  Markdown,
   matchesKey,
   truncateToWidth,
   visibleWidth,
@@ -85,11 +87,11 @@ export function createAskUI<
   theme: T,
   done: (result: AskResult) => void,
   questions: Question[],
-  contextText?: string
+  contextMessages?: string[]
 ) {
   const isMulti = questions.length > 1;
   const totalTabs = questions.length + 1; // questions + Submit
-  const hasContext = !!contextText;
+  const hasContext = contextMessages && contextMessages.length > 0;
 
   // ── State ────────────────────────────────────────────────────────────
   let viewMode: "question" | "context" = "question";
@@ -666,25 +668,44 @@ export function createAskUI<
     return [" ".repeat(PAD) + help];
   }
 
-  /** Render context view: full scrollable assistant message */
+  /** Render context view: full scrollable assistant messages with markdown formatting */
   function renderContextView(innerW: number): { lines: string[]; focusLine: number } {
     const lines: string[] = [];
 
-    if (!contextText) {
+    if (!contextMessages || contextMessages.length === 0) {
       lines.push(" ".repeat(PAD) + theme.fg("dim", "(No context available)"));
       return { lines, focusLine: 0 };
     }
 
-    // Word-wrap context text
+    // Calculate usable width for markdown rendering
     const usable = innerW - PAD * 2;
     if (usable <= 10) {
-      lines.push(" ".repeat(PAD) + theme.fg("text", contextText));
+      // Fallback for narrow terminals: show all messages as plain text
+      for (const msg of contextMessages) {
+        lines.push(" ".repeat(PAD) + theme.fg("text", msg));
+      }
       return { lines, focusLine: 0 };
     }
 
-    const wrapped = wrapTextWithAnsi(contextText, usable);
-    for (const line of wrapped) {
-      lines.push(" ".repeat(PAD) + theme.fg("text", line));
+    // Render each assistant message with markdown formatting
+    const mdTheme = getMarkdownTheme();
+
+    for (let i = 0; i < contextMessages.length; i++) {
+      const msg = contextMessages[i];
+      const markdown = new Markdown(msg, 0, 0, mdTheme);
+      const rendered = markdown.render(usable);
+
+      // Add left padding to each line
+      for (const line of rendered) {
+        lines.push(" ".repeat(PAD) + line);
+      }
+
+      // Add visual separator between messages (not after the last one)
+      if (i < contextMessages.length - 1) {
+        lines.push(""); // blank line
+        lines.push(" ".repeat(PAD) + theme.fg("dim", "─".repeat(usable)));
+        lines.push(""); // blank line
+      }
     }
 
     return { lines, focusLine: 0 };
