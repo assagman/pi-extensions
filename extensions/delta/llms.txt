@@ -1,19 +1,27 @@
-# Delta — Persistent Memory Extension
+# Delta — Persistent Memory Extension (v4)
 
-SQLite-backed persistent memory for Pi coding agent. Provides key-value storage, episodic events with tags, project notes loaded at session start, and a full-text memory index across all types.
+SQLite-backed persistent memory for Pi coding agent. Single unified `memories`
+table with FTS5 full-text search. Everything is `content + tags[]` — no separate
+KV, episodic, or notes tables. Tag-based classification with importance levels.
 
 ## Architecture
 
-16 tools organized as: KV(3), Episodic(3), Notes(5), Index(2), Info(1), Version(2). Database is per-project and per-branch at `~/.local/share/pi-ext-delta/`. Injects `<delta_memory>` block into system prompt with active notes, index summary, and stats.
+Unified CRUD: `remember`, `search`, `forget`, `update`, `getById`. FTS5 indexes
+content, tags, and context for full-text search. High/critical importance memories
+auto-loaded into system prompt. Git commits auto-captured. Repo-scoped DB at
+`~/.local/share/pi-ext-delta/<repo-id>/delta.db`. Injects `<delta_memory>` block
+with critical knowledge + memory map every turn.
 
 ## Files
 
-- [README](docs/README.md): User documentation, tools, schemas, examples
-- [ARCHITECTURE](docs/ARCHITECTURE.md): Module structure, data flow, DB schema, storage
-- [AGENTS](AGENTS.md): Agent instructions
+- [README](docs/README.md): User documentation, tools, schema, examples, prune
+- [ARCHITECTURE](docs/ARCHITECTURE.md): Module structure, data flow, DB schema, migration
+- [AGENTS](AGENTS.md): Agent instructions, API reference
+- [SKILL](skill/SKILL.md): Agent skill doc — awareness categories, retrieval patterns
 
 ## Key Modules
 
-- `src/index.ts`: Extension factory, event handlers, prompt builders
-- `src/db.ts`: SQLite operations, schema init, all queries
-- `src/tools.ts`: 16 tool definitions with TypeBox schemas
+- `src/db.ts`: Schema, migration v3→v4, CRUD, FTS5 search, prompt building (895 lines)
+- `src/index.ts`: Extension factory, events, auto-capture, prompt injection (208 lines)
+- `src/tools.ts`: Tool definitions (Phase 2 rewrite pending)
+- `src/prune/`: Prune module — analyzer, detector, TUI dashboard

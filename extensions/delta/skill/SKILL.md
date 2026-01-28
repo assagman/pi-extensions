@@ -1,48 +1,58 @@
 ---
 name: delta
 description: >-
-  Persistent project memory with 9 awareness categories. Manages decisions,
-  preferences, environment, workflows, approach, explorations, structures,
-  architecture, and issues/gotchas across sessions.
+  Persistent project memory with tag-based classification. Stores decisions,
+  preferences, workflows, conventions, architecture, issues, explorations,
+  and auto-captured commits in a unified memories table with FTS5 search.
+  Includes /delta-prune for intelligent memory cleanup.
   Triggers: remember, recall, memory, delta, preference, convention, decision,
   workflow, gotcha, issue, pattern, exploration, architecture, approach,
-  save knowledge, what did I decide, log discovery.
+  save knowledge, what did I decide, log discovery, prune, cleanup, stale.
 license: MIT
 compatibility: Requires delta Pi extension installed (~/.pi/agent/extensions/delta)
 metadata:
   author: pi-user
-  version: "2.0"
+  version: "4.0"
 ---
 
-# Delta Memory — Awareness Model & Retrieval Guide
+# Delta Memory — Unified Model & Retrieval Guide
 
-## 3-Tier Retrieval Architecture
+## Architecture
 
 ```
 ┌─ TIER 1: MEMORY MAP (always in system prompt) ──────────────────┐
 │ Shows category names + counts + keywords. NO content.            │
-│ You read the map to know WHAT exists, then pull what you need.   │
+│ Read the map to know WHAT exists, then pull what you need.       │
 ├─ TIER 2: ON-DEMAND RETRIEVAL (you call tools) ──────────────────┤
-│ delta_recall(tags/query)  — search episodes                      │
-│ delta_note_list(category) — list notes by category               │
-│ delta_note_get(id)        — full note content                    │
-│ delta_index_search(query) — keyword search across all types      │
-│ delta_get(key)            — specific KV value                    │
+│ delta_search(query)            — FTS5 full-text search           │
+│ delta_search(tags=["..."])     — filter by tags                  │
+│ delta_search(importance="...") — filter by importance             │
 ├─ TIER 3: CRITICAL AUTO-LOAD (rare exceptions) ──────────────────┤
-│ HIGH/CRITICAL importance notes always visible in system prompt.   │
+│ HIGH/CRITICAL importance memories always visible in prompt.      │
 │ Use sparingly — only for must-know project-wide knowledge.       │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-## 9 Awareness Categories
+## Tools
 
-### 1. Decisions (architecture & design)
+| Tool | Purpose | Key Arguments |
+|------|---------|---------------|
+| `delta_remember` | Persist knowledge | content, tags?, importance?, context? |
+| `delta_search` | Find memories | query?, tags?, importance?, limit? |
+| `delta_forget` | Delete memory | id |
+| `delta_info` | Stats & diagnostics | — |
+
+## Awareness Categories
+
+All memories use **tags** for classification. No separate tables or rigid types.
+
+### 1. Decisions
 
 | | |
 |---|---|
-| **When** | After making or approving architecture, design, or technology choices |
-| **Store** | `delta_log content="Chose X over Y — reason" tags=["decision", "<domain>"]` |
-| **Retrieve** | `delta_recall(tags=["decision"])` or `delta_index_search("decision <topic>")` |
+| **When** | After making architecture, design, or technology choices |
+| **Store** | `delta_remember content="Chose X over Y — reason" tags=["decision", "<domain>"]` |
+| **Retrieve** | `delta_search(tags=["decision"])` or `delta_search(query="<topic>")` |
 | **Examples** | "Chose vitest over jest — ESM support", "REST over gRPC — simpler debugging" |
 
 ### 2. User Preferences
@@ -50,79 +60,68 @@ metadata:
 | | |
 |---|---|
 | **When** | User corrects you, expresses preference, or establishes a pattern |
-| **Store** | `delta_set(key="pref:<name>", value="<description>")` |
-| **Retrieve** | `delta_get(key="pref:<name>")` |
-| **Examples** | `pref:test_framework`="vitest", `pref:commit_style`="conventional", `pref:response_style`="ultra-concise" |
+| **Store** | `delta_remember content="Prefers <X>" tags=["preference", "<domain>"]` |
+| **Retrieve** | `delta_search(tags=["preference"])` |
+| **Examples** | "Prefers ultra-concise responses", "Uses vitest for testing", "Commit style: conventional" |
 
 ### 3. System & Environment
 
 | | |
 |---|---|
-| **When** | You discover OS, runtime versions, toolchain, infra details while working |
-| **Store** | `delta_set(key="env:<name>", value="<value>")` |
-| **Retrieve** | `delta_get(key="env:<name>")` |
-| **Examples** | `env:os`="macOS Tahoe 26.3 arm64", `env:node`="22.x", `env:ci`="GitHub Actions" |
+| **When** | Discover OS, runtime versions, toolchain, infra details |
+| **Store** | `delta_remember content="<env detail>" tags=["environment", "<aspect>"]` |
+| **Retrieve** | `delta_search(tags=["environment"])` |
+| **Examples** | "macOS Tahoe 26.3 arm64", "Node 22.x", "CI: GitHub Actions" |
 
-### 4. Way of Working (Workflows)
-
-| | |
-|---|---|
-| **When** | User describes or demonstrates work processes, rituals, patterns |
-| **Store** | `delta_note_create(title="...", category="workflow", content="...")` |
-| **Retrieve** | `delta_note_list(category="workflow")` then `delta_note_get(id)` |
-| **Examples** | "Git worktree workflow", "Deploy to staging process", "PR review checklist" |
-
-### 5. Solution Approach
+### 4. Workflows
 
 | | |
 |---|---|
-| **When** | User guides methodology or effective problem-solving patterns emerge |
-| **Store** | `delta_note_create(title="...", category="convention", content="...")` or `delta_log(..., tags=["approach"])` |
-| **Retrieve** | `delta_note_list(category="convention")` or `delta_recall(tags=["approach"])` |
-| **Examples** | "Plan before executing", "Async-first, thread-safe always", "Verify results after every step" |
+| **When** | User describes or demonstrates work processes |
+| **Store** | `delta_remember content="<workflow>" tags=["workflow", "<process>"]` |
+| **Retrieve** | `delta_search(tags=["workflow"])` |
+| **Examples** | "Git worktree workflow", "Deploy to staging process" |
+
+### 5. Conventions & Approach
+
+| | |
+|---|---|
+| **When** | Code patterns, methodology, or solution approaches emerge |
+| **Store** | `delta_remember content="<pattern>" tags=["convention"]` |
+| **Retrieve** | `delta_search(tags=["convention"])` or `delta_search(tags=["approach"])` |
+| **Examples** | "Async-first, thread-safe always", "All tools use createTool() from pi-ext-shared" |
 
 ### 6. Explorations & Experiments
 
 | | |
 |---|---|
-| **When** | After trying something — whether it worked or failed |
-| **Store** | `delta_log(content="Tried X — result: Y", tags=["exploration", "<outcome>"])` |
-| **Retrieve** | `delta_recall(tags=["exploration"])` |
-| **Examples** | "Tried bun:sqlite — fails in Node.js runtime", "Tested WAL mode on NFS — breaks", "d2 renders ASCII diagrams well" |
+| **When** | After trying something — success or failure |
+| **Store** | `delta_remember content="Tried X — result" tags=["exploration", "outcome:<result>"]` |
+| **Retrieve** | `delta_search(tags=["exploration"])` |
+| **Examples** | "Tried bun:sqlite — fails in Node.js runtime", "d2 renders ASCII diagrams well" |
 
-Outcome tags: `outcome:success`, `outcome:failure`, `outcome:partial`
-
-### 7. Project Structures & Patterns
+### 7. Architecture & System Design
 
 | | |
 |---|---|
-| **When** | You discover or establish project-specific code patterns |
-| **Store** | `delta_note_create(title="...", category="convention", content="...")` |
-| **Retrieve** | `delta_note_list(category="convention")` then `delta_note_get(id)` |
-| **Examples** | "Extension structure: src/index.ts exports ExtensionFactory", "All tools use createTool() from pi-ext-shared" |
+| **When** | Understand or design system components, data flows |
+| **Store** | `delta_remember content="<design>" tags=["architecture", "<component>"]` |
+| **Retrieve** | `delta_search(tags=["architecture"])` |
+| **Examples** | "Pi extension lifecycle: factory → register tools → event handlers" |
 
-### 8. Architecture & System Design
-
-| | |
-|---|---|
-| **When** | You understand or design system components, data flows, interactions |
-| **Store** | `delta_note_create(title="...", category="general", content="...")` |
-| **Retrieve** | `delta_note_list(category="general")` then `delta_note_get(id)` |
-| **Examples** | "Pi extension lifecycle: factory → register tools → event handlers", "Memory index auto-maintained via SQLite triggers" |
-
-### 9. Bugs, Issues & Gotchas
+### 8. Bugs, Issues & Gotchas
 
 | | |
 |---|---|
-| **When** | You encounter bugs, pitfalls, workarounds, or gotchas |
-| **Store** | `delta_note_create(title="...", category="issue", content="...")` or `delta_log(..., tags=["bug", "<component>"])` |
-| **Retrieve** | `delta_note_list(category="issue")` or `delta_recall(tags=["bug"])` |
+| **When** | Encounter bugs, pitfalls, workarounds |
+| **Store** | `delta_remember content="<issue>" tags=["bug", "<component>"] importance="high"` |
+| **Retrieve** | `delta_search(tags=["bug"])` or `delta_search(tags=["issue"])` |
 | **Examples** | "better-sqlite3 doesn't load under bun test", "Empty IN() causes SQLite syntax error" |
 
-### Commits (auto-captured)
+### 9. Commits (auto-captured)
 
-Git commits are **automatically logged** as episodes with `tags=["commit", "auto-captured"]`.
-No manual action needed. Retrieve with: `delta_recall(tags=["commit"])`
+Git commits are **automatically logged** with `tags=["commit", "auto-captured"]`.
+No manual action needed. Retrieve: `delta_search(tags=["commit"])`
 
 ---
 
@@ -131,50 +130,90 @@ No manual action needed. Retrieve with: `delta_recall(tags=["commit"])`
 ### Before Starting Any Task
 
 1. Read the **Memory Map** in your system prompt
-2. Identify which categories are relevant to the task
-3. Pull content from those categories using the retrieval tools above
+2. Identify relevant categories
+3. `delta_search(query="<relevant topic>")` or `delta_search(tags=["<category>"])`
 
 ### During Work
 
 | Trigger | Action |
 |---------|--------|
-| Found a bug | `delta_note_create(category="issue")` or `delta_log(tags=["bug"])` |
-| Made a decision | `delta_log(tags=["decision", "<domain>"])` |
-| Discovered a pattern | `delta_note_create(category="convention")` |
-| User expressed preference | `delta_set(key="pref:<name>")` |
-| Tried something | `delta_log(tags=["exploration", "outcome:<result>"])` |
-| Learned architecture | `delta_note_create(category="general")` |
-| Identified workflow | `delta_note_create(category="workflow")` |
+| Found a bug | `delta_remember(content, tags=["bug", "<component>"])` |
+| Made a decision | `delta_remember(content, tags=["decision", "<domain>"])` |
+| Discovered a pattern | `delta_remember(content, tags=["convention"])` |
+| User expressed preference | `delta_remember(content, tags=["preference"])` |
+| Tried something | `delta_remember(content, tags=["exploration", "outcome:<r>"])` |
+| Learned architecture | `delta_remember(content, tags=["architecture"])` |
+| Identified workflow | `delta_remember(content, tags=["workflow"])` |
 
 ### After Task Completion
 
-- Log significant outcomes: `delta_log(content="...", tags=["milestone"])`
-- Update notes if knowledge changed: `delta_note_update(id, ...)`
+- Log significant outcomes: `delta_remember(content, tags=["milestone"])`
+- For must-know knowledge: `delta_remember(content, importance="high")`
 
 ---
 
-## Tool Quick Reference
+## Importance Levels
 
-| Action | Tool | Key Arguments |
-|--------|------|---------------|
-| Search all | `delta_index_search` | query, source_type? |
-| Recall events | `delta_recall` | query?, tags?, limit? |
-| Get note | `delta_note_get` | id |
-| List notes | `delta_note_list` | category?, importance? |
-| Get KV | `delta_get` | key |
-| Log event | `delta_log` | content, context?, tags? |
-| Create note | `delta_note_create` | title, content, category?, importance? |
-| Update note | `delta_note_update` | id, title?, content?, category?, importance?, active? |
-| Set KV | `delta_set` | key, value |
+| Level | Behavior |
+|-------|----------|
+| `low` | Stored, searchable, not auto-loaded |
+| `normal` | Default — stored, searchable, appears in Memory Map |
+| `high` | **Auto-loaded** into system prompt every turn |
+| `critical` | **Auto-loaded** into system prompt every turn (highest priority) |
+
+Only use `high`/`critical` for knowledge that is essential across ALL sessions.
 
 ---
 
-## Storage Convention Summary
+## Memory Maintenance: /delta-prune
+
+TUI dashboard for intelligent memory cleanup.
+
+### What It Detects
+
+| Reason | Condition |
+|--------|-----------|
+| `stale` | Never accessed or age > 30 days |
+| `orphaned_path` | References non-existent files |
+| `orphaned_branch` | References non-existent branches |
+| `old_session` | From previous session + somewhat stale |
+| `low_importance` | Low importance + stale > 14 days |
+| `duplicate` | >80% content similarity |
+| `low_content` | Content < 10 chars (likely junk) |
+
+### Scoring
+
+`score = importance × recency × access_frequency` (0–100)
+Items below threshold with prune reasons become candidates.
+
+### TUI Controls
+
+| Key | Action |
+|-----|--------|
+| `j/k` | Navigate |
+| `space` | Toggle selection |
+| `a/n` | Select all / deselect all |
+| `Enter/l` | View details |
+| `d` | Delete selected |
+| `q/Esc` | Exit |
+
+### When to Prune
+
+- After completing a major feature/milestone
+- When memory gets noisy
+- Before starting a new project phase
+- Periodically (weekly/monthly)
+
+---
+
+## Tag Convention Summary
 
 ```
-KV keys:     pref:<name>, env:<name>
-Episode tags: ["decision","<domain>"], ["exploration","outcome:<r>"],
-              ["bug","<component>"], ["approach"], ["commit","auto-captured"]
-Note cats:    issue, convention, workflow, reminder, general
-Importance:   low, normal, high, critical (high/critical auto-loaded)
+Classification:  ["decision"], ["bug"], ["convention"], ["workflow"],
+                 ["exploration"], ["architecture"], ["issue"], ["preference"],
+                 ["environment"], ["reminder"], ["approach"]
+
+Qualifiers:      ["outcome:success"], ["outcome:failure"], ["auto-captured"]
+
+Importance:      low, normal, high (auto-loaded), critical (auto-loaded)
 ```
