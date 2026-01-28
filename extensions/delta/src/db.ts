@@ -1,11 +1,11 @@
 /**
- * Delta v3 — Pure memory extension database layer.
+ * Delta v4 — Unified memory database layer.
  *
  * Storage: ~/.local/share/pi-ext-delta/<repo-id>/delta.db
- * Tables:  kv, episodes, project_notes, memory_index, schema_version
+ * Tables:  memories (single table), memories_fts (FTS5 virtual table), schema_version
  *
- * Removed in v3: tasks table, branch-scoped storage.
- * Added in v3:   last_accessed columns, importance decay.
+ * v4 replaces the v3 multi-table design (kv, episodes, project_notes, memory_index)
+ * with a single unified `memories` table using tags for classification and FTS5 for search.
  */
 import type Database from "better-sqlite3";
 import {
@@ -13,7 +13,6 @@ import {
   generateSessionId,
   getExtensionDbPath,
   openDatabase,
-  escapeLike as sharedEscapeLike,
   stampSchemaVersion,
 } from "pi-ext-shared";
 
@@ -24,8 +23,47 @@ import {
  * - v1: original schema (kv, episodes, tasks, project_notes)
  * - v2: added memory_index + triggers, dropped task scope/session_id columns
  * - v3: removed tasks, added last_accessed, repo-scoped storage
+ * - v4: unified memories table + FTS5, dropped kv/episodes/project_notes/memory_index
  */
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
+
+// ============ Types ============
+
+export type Importance = "low" | "normal" | "high" | "critical";
+
+export interface Memory {
+  id: number;
+  content: string;
+  tags: string[];
+  importance: Importance;
+  context: string | null;
+  session_id: string | null;
+  created_at: number;
+  updated_at: number;
+  last_accessed: number;
+}
+
+export interface SearchOptions {
+  /** FTS5 full-text search query */
+  query?: string;
+  /** Filter by tags (OR semantics — matches if any tag present) */
+  tags?: string[];
+  /** Filter by exact importance level */
+  importance?: Importance;
+  /** Max results (default: 50) */
+  limit?: number;
+  /** Only memories created after this timestamp */
+  since?: number;
+  /** Only current session */
+  sessionOnly?: boolean;
+}
+
+export interface UpdateInput {
+  content?: string;
+  tags?: string[];
+  importance?: Importance;
+  context?: string;
+}
 
 // ============ State ============
 
@@ -42,10 +80,6 @@ export function getSessionId(): string {
 
 export function resetSession(): void {
   currentSessionId = null;
-}
-
-function escapeLike(s: string): string {
-  return sharedEscapeLike(s);
 }
 
 // ============ Database Lifecycle ============
@@ -71,6 +105,28 @@ export function getDb(): Database.Database {
   return db;
 }
 
+export function closeDb(): void {
+  if (db) {
+    db.close();
+    db = null;
+    currentDbPath = null;
+  }
+}
+
+export function getDbLocation(): string {
+  return getDbPath();
+}
+
+/** @internal Test-only: reset module state to allow reopening a different DB */
+export function _testReset(): void {
+  if (db) {
+    db.close();
+    db = null;
+  }
+  currentDbPath = null;
+  currentSessionId = null;
+}
+
 // ============ Schema ============
 
 function initSchema(): void {
@@ -78,73 +134,113 @@ function initSchema(): void {
 
   const { current, isFresh } = ensureSchemaVersion(db, DB_VERSION);
 
-  db.exec(`
-    -- Key-Value Store
-    CREATE TABLE IF NOT EXISTS kv (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      last_accessed INTEGER NOT NULL DEFAULT 0
-    );
-
-    -- Episodic Memory
-    CREATE TABLE IF NOT EXISTS episodes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      content TEXT NOT NULL,
-      context TEXT,
-      tags TEXT,
-      timestamp INTEGER NOT NULL,
-      session_id TEXT,
-      last_accessed INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_episodes_timestamp ON episodes(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
-
-    -- Project Notes
-    CREATE TABLE IF NOT EXISTS project_notes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      content TEXT NOT NULL,
-      category TEXT NOT NULL DEFAULT 'general',
-      importance TEXT NOT NULL DEFAULT 'normal',
-      active INTEGER NOT NULL DEFAULT 1,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      last_accessed INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_notes_category ON project_notes(category);
-    CREATE INDEX IF NOT EXISTS idx_notes_active ON project_notes(active);
-    CREATE INDEX IF NOT EXISTS idx_notes_importance ON project_notes(importance);
-
-    -- Memory Index (lightweight catalog for session-start injection)
-    CREATE TABLE IF NOT EXISTS memory_index (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      source_type TEXT NOT NULL,
-      source_id TEXT NOT NULL,
-      summary TEXT NOT NULL,
-      keywords TEXT,
-      importance TEXT NOT NULL DEFAULT 'normal',
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      UNIQUE(source_type, source_id)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_mi_type ON memory_index(source_type);
-    CREATE INDEX IF NOT EXISTS idx_mi_importance ON memory_index(importance);
-  `);
-
-  if (!isFresh) {
+  if (!isFresh && current < DB_VERSION) {
     migrateSchema(current);
   }
 
-  initMemoryIndexTriggers();
-  backfillMemoryIndex();
+  // Create v4 tables (idempotent)
+  createMemoriesTable(db);
+  createFts5(db);
+
+  // Defensive: clean up any lingering v3 artifacts
+  // (handles edge case where DB was partially migrated or version was stamped
+  //  but artifacts remained from a previous code version)
+  cleanupV3Artifacts(db);
 }
 
-// ============ Migrations ============
+/** Create the main memories table + indexes (idempotent) */
+function createMemoriesTable(database: Database.Database): void {
+  database.exec(`
+    -- Unified memories table
+    CREATE TABLE IF NOT EXISTS memories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      content TEXT NOT NULL,
+      tags TEXT,
+      importance TEXT NOT NULL DEFAULT 'normal',
+      context TEXT,
+      session_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_accessed INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);
+    CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);
+    CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
+    CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at);
+  `);
+}
+
+/** Create FTS5 virtual table + sync triggers (idempotent) */
+function createFts5(database: Database.Database): void {
+  // FTS5 doesn't support IF NOT EXISTS — check manually
+  const ftsExists = database
+    .prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name='memories_fts'")
+    .get() as { c: number };
+
+  if (ftsExists.c === 0) {
+    database.exec(`
+      CREATE VIRTUAL TABLE memories_fts USING fts5(
+        content,
+        tags,
+        context,
+        content=memories,
+        content_rowid=id
+      );
+    `);
+  }
+
+  // FTS5 sync triggers (keep index in sync with memories table)
+  database.exec(`
+    CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+      INSERT INTO memories_fts(rowid, content, tags, context)
+      VALUES (new.id, new.content, new.tags, new.context);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+      INSERT INTO memories_fts(memories_fts, rowid, content, tags, context)
+      VALUES ('delete', old.id, old.content, old.tags, old.context);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+      INSERT INTO memories_fts(memories_fts, rowid, content, tags, context)
+      VALUES ('delete', old.id, old.content, old.tags, old.context);
+      INSERT INTO memories_fts(rowid, content, tags, context)
+      VALUES (new.id, new.content, new.tags, new.context);
+    END;
+  `);
+}
+
+/** Populate FTS5 index from all existing memories (used after migration) */
+function rebuildFtsIndex(database: Database.Database): void {
+  database.exec(`
+    INSERT INTO memories_fts(rowid, content, tags, context)
+    SELECT id, content, tags, context FROM memories;
+  `);
+}
+
+/** Remove any lingering v3 triggers/tables (defensive cleanup) */
+function cleanupV3Artifacts(database: Database.Database): void {
+  database.exec(`
+    DROP TRIGGER IF EXISTS mi_note_insert;
+    DROP TRIGGER IF EXISTS mi_note_update;
+    DROP TRIGGER IF EXISTS mi_note_delete;
+    DROP TRIGGER IF EXISTS mi_episode_insert;
+    DROP TRIGGER IF EXISTS mi_episode_update;
+    DROP TRIGGER IF EXISTS mi_episode_delete;
+    DROP TRIGGER IF EXISTS mi_kv_insert;
+    DROP TRIGGER IF EXISTS mi_kv_update;
+    DROP TRIGGER IF EXISTS mi_kv_delete;
+  `);
+  database.exec(`
+    DROP TABLE IF EXISTS memory_index;
+    DROP TABLE IF EXISTS project_notes;
+    DROP TABLE IF EXISTS episodes;
+    DROP TABLE IF EXISTS kv;
+  `);
+}
+
+// ============ Migration ============
 
 function migrateSchema(currentVersion: number): void {
   if (!db) throw new Error("Database not initialized");
@@ -152,46 +248,9 @@ function migrateSchema(currentVersion: number): void {
 
   const database = db;
   const txn = database.transaction(() => {
-    // v1→v2: Drop deprecated scope/session_id from tasks
-    if (currentVersion < 2) {
-      database.exec("DROP INDEX IF EXISTS idx_tasks_scope");
-      database.exec("DROP INDEX IF EXISTS idx_tasks_session");
-      const columns = database
-        .prepare("SELECT name FROM pragma_table_info('tasks')")
-        .all() as Array<{ name: string }>;
-      const colNames = columns.map((c) => c.name);
-      if (colNames.includes("scope")) database.exec("ALTER TABLE tasks DROP COLUMN scope");
-      if (colNames.includes("session_id"))
-        database.exec("ALTER TABLE tasks DROP COLUMN session_id");
-    }
-
-    // v2→v3: Remove tasks, add last_accessed, clean index
-    if (currentVersion < 3) {
-      // Remove task data from index
-      database.exec("DELETE FROM memory_index WHERE source_type = 'task'");
-
-      // Drop task triggers (they reference the tasks table)
-      database.exec("DROP TRIGGER IF EXISTS mi_task_insert");
-      database.exec("DROP TRIGGER IF EXISTS mi_task_update");
-      database.exec("DROP TRIGGER IF EXISTS mi_task_delete");
-
-      // Drop tasks table
-      database.exec("DROP INDEX IF EXISTS idx_tasks_status");
-      database.exec("DROP INDEX IF EXISTS idx_tasks_parent");
-      database.exec("DROP TABLE IF EXISTS tasks");
-
-      // Add last_accessed columns (idempotent check)
-      const addColIfMissing = (table: string) => {
-        const cols = database
-          .prepare(`SELECT name FROM pragma_table_info('${table}')`)
-          .all() as Array<{ name: string }>;
-        if (!cols.some((c) => c.name === "last_accessed")) {
-          database.exec(`ALTER TABLE ${table} ADD COLUMN last_accessed INTEGER NOT NULL DEFAULT 0`);
-        }
-      };
-      addColIfMissing("kv");
-      addColIfMissing("episodes");
-      addColIfMissing("project_notes");
+    // v3→v4: Unified memories table
+    if (currentVersion < 4) {
+      migrateV3toV4(database);
     }
 
     stampSchemaVersion(database, DB_VERSION);
@@ -199,446 +258,299 @@ function migrateSchema(currentVersion: number): void {
   txn();
 }
 
-// ============ Memory Index Triggers ============
+function migrateV3toV4(database: Database.Database): void {
+  // Step 1: Create memories table (WITHOUT FTS5 — to avoid triggers during bulk insert)
+  createMemoriesTable(database);
 
-function initMemoryIndexTriggers(): void {
-  if (!db) throw new Error("Database not initialized");
-
-  // --- Notes triggers ---
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS mi_note_insert AFTER INSERT ON project_notes
-    BEGIN
-      INSERT INTO memory_index(source_type, source_id, summary, keywords, importance, created_at, updated_at)
-      VALUES('note', CAST(NEW.id AS TEXT), NEW.title, NEW.category, NEW.importance, NEW.created_at, NEW.updated_at)
-      ON CONFLICT(source_type, source_id) DO UPDATE SET
-        summary = excluded.summary, keywords = excluded.keywords,
-        importance = excluded.importance, updated_at = excluded.updated_at;
-    END
-  `);
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS mi_note_update AFTER UPDATE ON project_notes
-    BEGIN
-      INSERT INTO memory_index(source_type, source_id, summary, keywords, importance, created_at, updated_at)
-      VALUES('note', CAST(NEW.id AS TEXT), NEW.title, NEW.category, NEW.importance, NEW.updated_at, NEW.updated_at)
-      ON CONFLICT(source_type, source_id) DO UPDATE SET
-        summary = excluded.summary, keywords = excluded.keywords,
-        importance = excluded.importance, updated_at = excluded.updated_at;
-    END
-  `);
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS mi_note_delete AFTER DELETE ON project_notes
-    BEGIN
-      DELETE FROM memory_index WHERE source_type = 'note' AND source_id = CAST(OLD.id AS TEXT);
-    END
-  `);
-
-  // --- Episodes triggers ---
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS mi_episode_insert AFTER INSERT ON episodes
-    BEGIN
-      INSERT INTO memory_index(source_type, source_id, summary, keywords, importance, created_at, updated_at)
-      VALUES('episode', CAST(NEW.id AS TEXT), substr(NEW.content, 1, 120), NEW.tags, 'normal', NEW.timestamp, NEW.timestamp)
-      ON CONFLICT(source_type, source_id) DO UPDATE SET
-        summary = excluded.summary, keywords = excluded.keywords, updated_at = excluded.updated_at;
-    END
-  `);
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS mi_episode_update AFTER UPDATE ON episodes
-    BEGIN
-      INSERT INTO memory_index(source_type, source_id, summary, keywords, importance, created_at, updated_at)
-      VALUES('episode', CAST(NEW.id AS TEXT), substr(NEW.content, 1, 120), NEW.tags, 'normal', NEW.timestamp, NEW.timestamp)
-      ON CONFLICT(source_type, source_id) DO UPDATE SET
-        summary = excluded.summary, keywords = excluded.keywords, updated_at = excluded.updated_at;
-    END
-  `);
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS mi_episode_delete AFTER DELETE ON episodes
-    BEGIN
-      DELETE FROM memory_index WHERE source_type = 'episode' AND source_id = CAST(OLD.id AS TEXT);
-    END
-  `);
-
-  // --- KV triggers ---
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS mi_kv_insert AFTER INSERT ON kv
-    BEGIN
-      INSERT INTO memory_index(source_type, source_id, summary, keywords, importance, created_at, updated_at)
-      VALUES('kv', NEW.key, NEW.key || ': ' || substr(NEW.value, 1, 80), NEW.key, 'normal', NEW.created_at, NEW.updated_at)
-      ON CONFLICT(source_type, source_id) DO UPDATE SET
-        summary = excluded.summary, keywords = excluded.keywords, updated_at = excluded.updated_at;
-    END
-  `);
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS mi_kv_update AFTER UPDATE ON kv
-    BEGIN
-      INSERT INTO memory_index(source_type, source_id, summary, keywords, importance, created_at, updated_at)
-      VALUES('kv', NEW.key, NEW.key || ': ' || substr(NEW.value, 1, 80), NEW.key, 'normal', NEW.updated_at, NEW.updated_at)
-      ON CONFLICT(source_type, source_id) DO UPDATE SET
-        summary = excluded.summary, keywords = excluded.keywords, updated_at = excluded.updated_at;
-    END
-  `);
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS mi_kv_delete AFTER DELETE ON kv
-    BEGIN
-      DELETE FROM memory_index WHERE source_type = 'kv' AND source_id = OLD.key;
-    END
-  `);
-}
-
-// ============ Index Operations ============
-
-/** SQL to populate memory_index from all source tables */
-const POPULATE_INDEX_SQL = `
-  INSERT OR IGNORE INTO memory_index(source_type, source_id, summary, keywords, importance, created_at, updated_at)
-  SELECT 'note', CAST(id AS TEXT), title, category, importance, created_at, updated_at
-  FROM project_notes;
-
-  INSERT OR IGNORE INTO memory_index(source_type, source_id, summary, keywords, importance, created_at, updated_at)
-  SELECT 'episode', CAST(id AS TEXT), substr(content, 1, 120), tags, 'normal', timestamp, timestamp
-  FROM episodes;
-
-  INSERT OR IGNORE INTO memory_index(source_type, source_id, summary, keywords, importance, created_at, updated_at)
-  SELECT 'kv', key, key || ': ' || substr(value, 1, 80), key, 'normal', created_at, updated_at
-  FROM kv;
-`;
-
-function backfillMemoryIndex(): void {
-  if (!db) throw new Error("Database not initialized");
-
-  const indexCount = db.prepare("SELECT COUNT(*) as count FROM memory_index").get() as {
-    count: number;
-  };
-  if (indexCount.count > 0) return;
-
-  const sourceCount = db
-    .prepare(
-      `SELECT
-        (SELECT COUNT(*) FROM project_notes) +
-        (SELECT COUNT(*) FROM episodes) +
-        (SELECT COUNT(*) FROM kv) as total`
-    )
-    .get() as { total: number };
-  if (sourceCount.total === 0) return;
-
-  const database = db;
-  const txn = database.transaction(() => {
-    database.exec(POPULATE_INDEX_SQL);
-  });
-  txn();
-}
-
-/** SQL expression for ordering by importance */
-const IMPORTANCE_ORDER_SQL =
-  "CASE importance WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC";
-
-export interface MemoryIndexEntry {
-  id: number;
-  source_type: "note" | "episode" | "kv";
-  source_id: string;
-  summary: string;
-  keywords: string | null;
-  importance: string;
-  created_at: number;
-  updated_at: number;
-}
-
-export function getMemoryIndex(limit = 100): MemoryIndexEntry[] {
-  return getDb()
-    .prepare(
-      `SELECT * FROM memory_index
-       ORDER BY ${IMPORTANCE_ORDER_SQL}, updated_at DESC
-       LIMIT ?`
-    )
-    .all(limit) as MemoryIndexEntry[];
-}
-
-export function searchIndex(query: string, sourceType?: string): MemoryIndexEntry[] {
-  let sql =
-    "SELECT * FROM memory_index WHERE (summary LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\')";
-  const escaped = escapeLike(query);
-  const params: string[] = [`%${escaped}%`, `%${escaped}%`];
-
-  if (sourceType) {
-    sql += " AND source_type = ?";
-    params.push(sourceType);
+  // Step 2: Migrate data from v3 tables into memories
+  if (tableExists(database, "episodes")) {
+    database.exec(`
+      INSERT INTO memories (content, tags, importance, context, session_id, created_at, updated_at, last_accessed)
+      SELECT
+        content,
+        tags,
+        'normal',
+        context,
+        session_id,
+        timestamp,
+        timestamp,
+        last_accessed
+      FROM episodes;
+    `);
   }
 
-  sql += ` ORDER BY ${IMPORTANCE_ORDER_SQL}, updated_at DESC LIMIT 50`;
+  // title + "\n\n" + content merged, category → tag, importance preserved
+  // If archived (active=0), add 'archived' tag
+  if (tableExists(database, "project_notes")) {
+    database.exec(`
+      INSERT INTO memories (content, tags, importance, context, session_id, created_at, updated_at, last_accessed)
+      SELECT
+        title || char(10) || char(10) || content,
+        CASE
+          WHEN active = 0 THEN json_array(category, 'archived')
+          ELSE json_array(category)
+        END,
+        importance,
+        NULL,
+        NULL,
+        created_at,
+        updated_at,
+        last_accessed
+      FROM project_notes;
+    `);
+  }
 
-  return getDb()
-    .prepare(sql)
-    .all(...params) as MemoryIndexEntry[];
+  // "key: value" as content, ['kv', key] as tags
+  if (tableExists(database, "kv")) {
+    database.exec(`
+      INSERT INTO memories (content, tags, importance, context, session_id, created_at, updated_at, last_accessed)
+      SELECT
+        key || ': ' || value,
+        json_array('kv', key),
+        'normal',
+        NULL,
+        NULL,
+        created_at,
+        updated_at,
+        last_accessed
+      FROM kv;
+    `);
+  }
+
+  // Step 3: Drop v3 triggers + tables (after data is read)
+  cleanupV3Artifacts(database);
+
+  // Step 4: Create FTS5 virtual table + populate from migrated data + create triggers
+  // Order: FTS5 table → bulk populate → triggers (avoids trigger-caused double inserts)
+  const ftsExists = database
+    .prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name='memories_fts'")
+    .get() as { c: number };
+  if (ftsExists.c === 0) {
+    database.exec(`
+      CREATE VIRTUAL TABLE memories_fts USING fts5(
+        content,
+        tags,
+        context,
+        content=memories,
+        content_rowid=id
+      );
+    `);
+  }
+  rebuildFtsIndex(database);
+
+  // Step 5: Create FTS5 sync triggers (AFTER bulk populate to avoid duplicates)
+  database.exec(`
+    CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+      INSERT INTO memories_fts(rowid, content, tags, context)
+      VALUES (new.id, new.content, new.tags, new.context);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+      INSERT INTO memories_fts(memories_fts, rowid, content, tags, context)
+      VALUES ('delete', old.id, old.content, old.tags, old.context);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+      INSERT INTO memories_fts(memories_fts, rowid, content, tags, context)
+      VALUES ('delete', old.id, old.content, old.tags, old.context);
+      INSERT INTO memories_fts(rowid, content, tags, context)
+      VALUES (new.id, new.content, new.tags, new.context);
+    END;
+  `);
 }
 
-export function rebuildIndex(): number {
-  const database = getDb();
-  const txn = database.transaction(() => {
-    database.exec("DELETE FROM memory_index");
-    database.exec(POPULATE_INDEX_SQL);
-  });
-  txn();
-
-  const count = database.prepare("SELECT COUNT(*) as count FROM memory_index").get() as {
-    count: number;
-  };
-  return count.count;
+function tableExists(database: Database.Database, name: string): boolean {
+  const row = database
+    .prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name=?")
+    .get(name) as { c: number };
+  return row.c > 0;
 }
 
-// ============ Key-Value Operations ============
+// ============ CRUD Operations ============
 
-export function kvGet(key: string): string | null {
-  const row = getDb().prepare("SELECT value FROM kv WHERE key = ?").get(key) as
-    | { value: string }
-    | undefined;
-  return row?.value ?? null;
-}
-
-export function kvSet(key: string, value: string): void {
-  const now = Date.now();
-  getDb()
-    .prepare(
-      `INSERT INTO kv (key, value, created_at, updated_at, last_accessed)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, last_accessed = excluded.last_accessed`
-    )
-    .run(key, value, now, now, now);
-}
-
-export function kvDelete(key: string): boolean {
-  const row = getDb().prepare("DELETE FROM kv WHERE key = ? RETURNING key").get(key) as
-    | { key: string }
-    | undefined;
-  return row !== undefined;
-}
-
-// ============ Episodic Operations ============
-
-export interface Episode {
-  id: number;
-  content: string;
-  context: string | null;
-  tags: string[];
-  timestamp: number;
-  session_id: string | null;
-}
-
-export function logEpisode(content: string, context?: string, tags?: string[]): number {
+/** Create a new memory. Returns the new memory's ID. */
+export function remember(
+  content: string,
+  opts?: {
+    tags?: string[];
+    importance?: Importance;
+    context?: string;
+    sessionId?: string;
+  }
+): number {
   const now = Date.now();
   const row = getDb()
     .prepare(
-      `INSERT INTO episodes (content, context, tags, timestamp, session_id, last_accessed)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO memories (content, tags, importance, context, session_id, created_at, updated_at, last_accessed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        RETURNING id`
     )
     .get(
       content,
-      context ?? null,
-      tags ? JSON.stringify(tags) : null,
+      opts?.tags ? JSON.stringify(opts.tags) : null,
+      opts?.importance ?? "normal",
+      opts?.context ?? null,
+      opts?.sessionId ?? getSessionId(),
       now,
-      getSessionId(),
+      now,
       now
     ) as { id: number };
   return row.id;
 }
 
-export interface RecallOptions {
-  query?: string;
-  tags?: string[];
-  limit?: number;
-  sessionOnly?: boolean;
-  since?: number;
+/** Search memories using FTS5 full-text search and/or structured filters. */
+export function search(opts?: SearchOptions): Memory[] {
+  const database = getDb();
+  const limit = opts?.limit ?? 50;
+
+  // Case 1: FTS5 query provided
+  if (opts?.query && opts.query.trim().length > 0) {
+    return ftsSearch(database, opts, limit);
+  }
+
+  // Case 2: No query — structured filter only
+  return filteredSearch(database, opts, limit);
 }
 
-export function deleteEpisode(id: number): boolean {
-  const row = getDb().prepare("DELETE FROM episodes WHERE id = ? RETURNING id").get(id) as
+function ftsSearch(database: Database.Database, opts: SearchOptions, limit: number): Memory[] {
+  const ftsQuery = sanitizeFtsQuery(opts.query ?? "");
+  if (!ftsQuery) return filteredSearch(database, opts, limit);
+
+  let sql = `
+    SELECT m.id, m.content, m.tags, m.importance, m.context, m.session_id,
+           m.created_at, m.updated_at, m.last_accessed
+    FROM memories m
+    JOIN memories_fts ON memories_fts.rowid = m.id
+    WHERE memories_fts MATCH ?
+  `;
+  const params: (string | number)[] = [ftsQuery];
+
+  // Additional filters (FTS JOIN uses alias "m.")
+  sql += buildFilterClauses(opts, params, "m.");
+
+  sql += " ORDER BY rank LIMIT ?";
+  params.push(limit);
+
+  let rows: RawMemoryRow[];
+  try {
+    rows = database.prepare(sql).all(...params) as RawMemoryRow[];
+  } catch {
+    // FTS5 query syntax error — fall back to LIKE search
+    return likeSearch(database, opts, limit);
+  }
+
+  touchAccessedMemories(database, rows);
+  return rows.map(parseMemoryRow);
+}
+
+function filteredSearch(
+  database: Database.Database,
+  opts: SearchOptions | undefined,
+  limit: number
+): Memory[] {
+  let sql = `
+    SELECT id, content, tags, importance, context, session_id,
+           created_at, updated_at, last_accessed
+    FROM memories WHERE 1=1
+  `;
+  const params: (string | number)[] = [];
+
+  if (opts) {
+    sql += buildFilterClauses(opts, params);
+  }
+
+  sql += ` ORDER BY
+    CASE importance WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC,
+    updated_at DESC
+    LIMIT ?`;
+  params.push(limit);
+
+  const rows = database.prepare(sql).all(...params) as RawMemoryRow[];
+  touchAccessedMemories(database, rows);
+  return rows.map(parseMemoryRow);
+}
+
+function likeSearch(database: Database.Database, opts: SearchOptions, limit: number): Memory[] {
+  const query = opts.query ?? "";
+  let sql = `
+    SELECT id, content, tags, importance, context, session_id,
+           created_at, updated_at, last_accessed
+    FROM memories WHERE content LIKE ?
+  `;
+  const params: (string | number)[] = [`%${escapeLikeSafe(query)}%`];
+
+  sql += buildFilterClauses(opts, params);
+
+  sql += " ORDER BY updated_at DESC LIMIT ?";
+  params.push(limit);
+
+  const rows = database.prepare(sql).all(...params) as RawMemoryRow[];
+  touchAccessedMemories(database, rows);
+  return rows.map(parseMemoryRow);
+}
+
+/**
+ * Build WHERE clauses for tag/importance/session/time filters.
+ * Uses table alias prefix when provided (e.g., "m." for JOIN queries).
+ */
+function buildFilterClauses(opts: SearchOptions, params: (string | number)[], prefix = ""): string {
+  let sql = "";
+  const p = prefix; // e.g., "m." or ""
+
+  if (opts.tags && opts.tags.length > 0) {
+    const tagConditions = opts.tags.map(() => `${p}tags LIKE ? ESCAPE '\\'`).join(" OR ");
+    sql += ` AND (${tagConditions})`;
+    for (const tag of opts.tags) {
+      params.push(`%"${escapeLikeSafe(tag)}"%`);
+    }
+  }
+
+  if (opts.importance) {
+    sql += ` AND ${p}importance = ?`;
+    params.push(opts.importance);
+  }
+
+  if (opts.since) {
+    sql += ` AND ${p}created_at >= ?`;
+    params.push(opts.since);
+  }
+
+  if (opts.sessionOnly) {
+    sql += ` AND ${p}session_id = ?`;
+    params.push(getSessionId());
+  }
+
+  return sql;
+}
+
+/** Delete a memory by ID. Returns true if deleted. */
+export function forget(id: number): boolean {
+  const row = getDb().prepare("DELETE FROM memories WHERE id = ? RETURNING id").get(id) as
     | { id: number }
     | undefined;
   return row !== undefined;
 }
 
-export function recallEpisodes(options: RecallOptions = {}): Episode[] {
-  const { query, tags, limit = 20, sessionOnly = false, since } = options;
-  const database = getDb();
-
-  let sql = "SELECT id, content, context, tags, timestamp, session_id FROM episodes WHERE 1=1";
-  const params: (string | number)[] = [];
-
-  if (sessionOnly) {
-    sql += " AND session_id = ?";
-    params.push(getSessionId());
-  }
-
-  if (since) {
-    sql += " AND timestamp >= ?";
-    params.push(since);
-  }
-
-  if (query) {
-    sql += " AND content LIKE ? ESCAPE '\\'";
-    params.push(`%${escapeLike(query)}%`);
-  }
-
-  if (tags && tags.length > 0) {
-    const tagConditions = tags.map(() => "tags LIKE ? ESCAPE '\\'").join(" OR ");
-    sql += ` AND (${tagConditions})`;
-    for (const tag of tags) params.push(`%"${escapeLike(tag)}"%`);
-  }
-
-  sql += " ORDER BY timestamp DESC LIMIT ?";
-  params.push(limit);
-
-  const rows = database.prepare(sql).all(...params) as Array<{
-    id: number;
-    content: string;
-    context: string | null;
-    tags: string | null;
-    timestamp: number;
-    session_id: string | null;
-  }>;
-
-  // Guard: skip UPDATE when no rows matched to avoid empty IN() syntax error.
-  // last_accessed is intentionally updated on explicit recall (not on passive reads).
-  if (rows.length > 0) {
-    const now = Date.now();
-    const ids = rows.map((r) => r.id);
-    database
-      .prepare(
-        `UPDATE episodes SET last_accessed = ? WHERE id IN (${ids.map(() => "?").join(",")})`
-      )
-      .run(now, ...ids);
-  }
-
-  return rows.map((row) => ({
-    ...row,
-    tags: row.tags ? JSON.parse(row.tags) : [],
-  }));
-}
-
-// ============ Project Notes Operations ============
-
-export type NoteCategory = "issue" | "convention" | "workflow" | "reminder" | "general";
-export type NoteImportance = "low" | "normal" | "high" | "critical";
-
-export interface ProjectNote {
-  id: number;
-  title: string;
-  content: string;
-  category: NoteCategory;
-  importance: NoteImportance;
-  active: boolean;
-  created_at: number;
-  updated_at: number;
-}
-
-export interface CreateNoteInput {
-  title: string;
-  content: string;
-  category?: NoteCategory;
-  importance?: NoteImportance;
-  active?: boolean;
-}
-
-export function createNote(input: CreateNoteInput): number {
-  const now = Date.now();
-  const row = getDb()
-    .prepare(
-      `INSERT INTO project_notes (title, content, category, importance, active, created_at, updated_at, last_accessed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       RETURNING id`
-    )
-    .get(
-      input.title,
-      input.content,
-      input.category ?? "general",
-      input.importance ?? "normal",
-      input.active !== false ? 1 : 0,
-      now,
-      now,
-      now
-    ) as { id: number };
-  return row.id;
-}
-
-export interface ListNotesOptions {
-  category?: NoteCategory;
-  importance?: NoteImportance;
-  activeOnly?: boolean;
-  limit?: number;
-}
-
-export function listNotes(options: ListNotesOptions = {}): ProjectNote[] {
-  const { category, importance, activeOnly = false, limit = 50 } = options;
-
-  let sql = "SELECT * FROM project_notes WHERE 1=1";
-  const params: (string | number)[] = [];
-
-  if (activeOnly) {
-    sql += " AND active = 1";
-  }
-
-  if (category) {
-    sql += " AND category = ?";
-    params.push(category);
-  }
-
-  if (importance) {
-    sql += " AND importance = ?";
-    params.push(importance);
-  }
-
-  sql += " ORDER BY importance DESC, created_at DESC LIMIT ?";
-  params.push(limit);
-
-  const rows = getDb()
-    .prepare(sql)
-    .all(...params) as Array<{
-    id: number;
-    title: string;
-    content: string;
-    category: NoteCategory;
-    importance: NoteImportance;
-    active: number;
-    created_at: number;
-    updated_at: number;
-  }>;
-
-  return rows.map((row) => ({
-    ...row,
-    active: row.active === 1,
-  }));
-}
-
-export interface UpdateNoteInput {
-  title?: string;
-  content?: string;
-  category?: NoteCategory;
-  importance?: NoteImportance;
-  active?: boolean;
-}
-
-export function updateNote(id: number, input: UpdateNoteInput): boolean {
+/** Update a memory. Only provided fields are updated. Returns true if found and updated. */
+export function update(id: number, input: UpdateInput): boolean {
   const updates: string[] = [];
   const params: (string | number)[] = [];
 
-  if (input.title !== undefined) {
-    updates.push("title = ?");
-    params.push(input.title);
-  }
   if (input.content !== undefined) {
     updates.push("content = ?");
     params.push(input.content);
   }
-  if (input.category !== undefined) {
-    updates.push("category = ?");
-    params.push(input.category);
+  if (input.tags !== undefined) {
+    updates.push("tags = ?");
+    params.push(JSON.stringify(input.tags));
   }
   if (input.importance !== undefined) {
     updates.push("importance = ?");
     params.push(input.importance);
   }
-  if (input.active !== undefined) {
-    updates.push("active = ?");
-    params.push(input.active ? 1 : 0);
+  if (input.context !== undefined) {
+    updates.push("context = ?");
+    params.push(input.context);
   }
 
   if (updates.length === 0) return false;
@@ -647,73 +559,94 @@ export function updateNote(id: number, input: UpdateNoteInput): boolean {
   params.push(Date.now());
   params.push(id);
 
-  const sql = `UPDATE project_notes SET ${updates.join(", ")} WHERE id = ? RETURNING id`;
   const row = getDb()
-    .prepare(sql)
+    .prepare(`UPDATE memories SET ${updates.join(", ")} WHERE id = ? RETURNING id`)
     .get(...params) as { id: number } | undefined;
   return row !== undefined;
 }
 
-export function deleteNote(id: number): boolean {
-  const row = getDb().prepare("DELETE FROM project_notes WHERE id = ? RETURNING id").get(id) as
-    | { id: number }
-    | undefined;
-  return row !== undefined;
-}
-
-export function getNote(id: number): ProjectNote | null {
-  const row = getDb().prepare("SELECT * FROM project_notes WHERE id = ?").get(id) as
-    | {
-        id: number;
-        title: string;
-        content: string;
-        category: NoteCategory;
-        importance: NoteImportance;
-        active: number;
-        created_at: number;
-        updated_at: number;
-      }
-    | undefined;
+/** Get a single memory by ID. Returns null if not found. */
+export function getById(id: number): Memory | null {
+  const row = getDb()
+    .prepare(
+      `SELECT id, content, tags, importance, context, session_id,
+              created_at, updated_at, last_accessed
+       FROM memories WHERE id = ?`
+    )
+    .get(id) as RawMemoryRow | undefined;
 
   if (!row) return null;
+  return parseMemoryRow(row);
+}
 
-  return {
-    ...row,
-    active: row.active === 1,
-  };
+// ============ Bulk Operations (for prune module) ============
+
+/** Get all memories (for prune analysis). Does NOT update last_accessed. */
+export function getAllMemories(): Memory[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT id, content, tags, importance, context, session_id,
+              created_at, updated_at, last_accessed
+       FROM memories ORDER BY updated_at DESC`
+    )
+    .all() as RawMemoryRow[];
+  return rows.map(parseMemoryRow);
+}
+
+/** Batch delete memories by ID. Returns number of deleted rows. */
+export function batchDeleteMemories(ids: number[]): number {
+  if (ids.length === 0) return 0;
+  const database = getDb();
+  const placeholders = ids.map(() => "?").join(",");
+  const result = database.prepare(`DELETE FROM memories WHERE id IN (${placeholders})`).run(...ids);
+  return result.changes;
 }
 
 // ============ Memory Context & Prompt ============
 
 export interface MemoryContext {
-  indexEntries: MemoryIndexEntry[];
-  criticalNotes: ProjectNote[];
+  /** All memories (limited, sorted by importance then recency) */
+  memories: Memory[];
+  /** High/critical importance memories with full content */
+  important: Memory[];
+  /** Total memory count */
+  total: number;
 }
 
 export function getMemoryContext(): MemoryContext {
-  const indexEntries = getMemoryIndex(100);
+  const database = getDb();
 
-  const criticalNotes = getDb()
+  const total = (database.prepare("SELECT COUNT(*) as c FROM memories").get() as { c: number }).c;
+
+  const memories = database
     .prepare(
-      `SELECT * FROM project_notes
-       WHERE active = 1 AND importance IN ('high', 'critical')
-       ORDER BY importance DESC, updated_at DESC
+      `SELECT id, content, tags, importance, context, session_id,
+              created_at, updated_at, last_accessed
+       FROM memories
+       ORDER BY
+         CASE importance WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC,
+         updated_at DESC
+       LIMIT 100`
+    )
+    .all() as RawMemoryRow[];
+
+  const important = database
+    .prepare(
+      `SELECT id, content, tags, importance, context, session_id,
+              created_at, updated_at, last_accessed
+       FROM memories
+       WHERE importance IN ('high', 'critical')
+       ORDER BY
+         CASE importance WHEN 'critical' THEN 2 WHEN 'high' THEN 1 ELSE 0 END DESC,
+         updated_at DESC
        LIMIT 50`
     )
-    .all() as Array<{
-    id: number;
-    title: string;
-    content: string;
-    category: NoteCategory;
-    importance: NoteImportance;
-    active: number;
-    created_at: number;
-    updated_at: number;
-  }>;
+    .all() as RawMemoryRow[];
 
   return {
-    indexEntries,
-    criticalNotes: criticalNotes.map((n) => ({ ...n, active: n.active === 1 })),
+    memories: memories.map(parseMemoryRow),
+    important: important.map(parseMemoryRow),
+    total,
   };
 }
 
@@ -731,7 +664,6 @@ type AwarenessCategory =
   | "commits"
   | "other";
 
-/** Display order and labels for awareness categories */
 const AWARENESS_DISPLAY: [AwarenessCategory, string][] = [
   ["decisions", "Decisions"],
   ["preferences", "Preferences"],
@@ -745,65 +677,28 @@ const AWARENESS_DISPLAY: [AwarenessCategory, string][] = [
   ["other", "Other"],
 ];
 
-function classifyEntry(entry: MemoryIndexEntry): AwarenessCategory {
-  switch (entry.source_type) {
-    case "note": {
-      const cat = entry.keywords || "general";
-      if (cat === "issue") return "issues";
-      if (cat === "convention") return "conventions";
-      if (cat === "workflow") return "workflows";
-      if (cat === "reminder") return "issues";
-      return "architecture";
-    }
-    case "episode": {
-      const tags = parseTagKeywords(entry.keywords);
-      if (tags.includes("commit")) return "commits";
-      if (tags.includes("decision")) return "decisions";
-      if (tags.includes("exploration")) return "explorations";
-      if (tags.includes("bug") || tags.includes("gotcha")) return "issues";
-      if (tags.includes("approach")) return "conventions";
-      return "other";
-    }
-    case "kv": {
-      const key = entry.source_id;
-      if (key.startsWith("pref:")) return "preferences";
-      if (key.startsWith("env:")) return "environment";
-      return "other";
-    }
-    default:
-      return "other";
-  }
-}
-
-function parseTagKeywords(keywords: string | null): string[] {
-  if (!keywords) return [];
-  try {
-    const parsed = JSON.parse(keywords);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+function classifyMemory(memory: Memory): AwarenessCategory {
+  const tags = memory.tags;
+  if (tags.includes("commit") || tags.includes("auto-captured")) return "commits";
+  if (tags.includes("decision")) return "decisions";
+  if (tags.includes("preference") || tags.includes("pref")) return "preferences";
+  if (tags.includes("environment") || tags.includes("env")) return "environment";
+  if (tags.includes("workflow")) return "workflows";
+  if (tags.includes("convention") || tags.includes("approach")) return "conventions";
+  if (tags.includes("architecture")) return "architecture";
+  if (
+    tags.includes("issue") ||
+    tags.includes("bug") ||
+    tags.includes("gotcha") ||
+    tags.includes("reminder")
+  )
+    return "issues";
+  if (tags.includes("exploration")) return "explorations";
+  return "other";
 }
 
 function truncateStr(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
-}
-
-function extractDisplayKeyword(
-  entry: MemoryIndexEntry,
-  category: AwarenessCategory
-): string | null {
-  if (category === "commits") return null;
-  switch (entry.source_type) {
-    case "kv":
-      return entry.source_id.replace(/^(pref|env):/, "");
-    case "note":
-      return truncateStr(entry.summary, 25);
-    case "episode":
-      return truncateStr(entry.summary, 25);
-    default:
-      return null;
-  }
 }
 
 interface AwarenessCategoryGroup {
@@ -811,21 +706,22 @@ interface AwarenessCategoryGroup {
   keywords: string[];
 }
 
-function buildAwarenessMap(
-  entries: MemoryIndexEntry[]
-): Map<AwarenessCategory, AwarenessCategoryGroup> {
+function buildAwarenessMap(memories: Memory[]): Map<AwarenessCategory, AwarenessCategoryGroup> {
   const groups = new Map<AwarenessCategory, { count: number; kwSet: Set<string> }>();
 
-  for (const entry of entries) {
-    const category = classifyEntry(entry);
+  for (const memory of memories) {
+    const category = classifyMemory(memory);
     if (!groups.has(category)) {
       groups.set(category, { count: 0, kwSet: new Set() });
     }
     const g = groups.get(category);
     if (!g) continue;
     g.count++;
-    const kw = extractDisplayKeyword(entry, category);
-    if (kw && g.kwSet.size < 3) g.kwSet.add(kw);
+    // Extract first line as display keyword
+    const firstLine = memory.content.split("\n")[0].trim();
+    if (firstLine && g.kwSet.size < 3) {
+      g.kwSet.add(truncateStr(firstLine, 25));
+    }
   }
 
   return new Map(
@@ -833,10 +729,10 @@ function buildAwarenessMap(
   );
 }
 
-function formatMemoryMap(entries: MemoryIndexEntry[]): string[] {
-  if (entries.length === 0) return [];
+function formatMemoryMap(memories: Memory[]): string[] {
+  if (memories.length === 0) return [];
 
-  const map = buildAwarenessMap(entries);
+  const map = buildAwarenessMap(memories);
   const lines: string[] = [];
 
   lines.push("## Memory Map");
@@ -849,9 +745,7 @@ function formatMemoryMap(entries: MemoryIndexEntry[]): string[] {
   }
 
   lines.push("");
-  lines.push(
-    "Retrieve: delta_recall(tags/query) · delta_note_list(category) · delta_note_get(id) · delta_get(key)"
-  );
+  lines.push("Retrieve: delta_search(query/tags) · delta_remember(content) · delta_forget(id)");
 
   return lines;
 }
@@ -873,30 +767,31 @@ export function buildMemoryPrompt(options: PromptOptions = {}): string {
   lines.push("<delta_memory>");
   lines.push("");
 
-  // Compact always-on instructions (every turn, never removed)
+  // Compact always-on instructions
   lines.push("## Memory (mandatory)");
-  lines.push("- **BEFORE** work: delta_index_search(query) / delta_recall to check past context");
+  lines.push("- **BEFORE** work: delta_search(query) to check past context");
   lines.push(
-    "- **AFTER** decisions, bugs, patterns: delta_log to record · delta_note_create for reusable knowledge"
+    "- **AFTER** decisions, bugs, patterns: delta_remember(content, tags) to persist knowledge"
   );
   const idleStr = idle > 0 ? `${idle} turns idle` : "active";
   lines.push(`- Status: ${writes} writes this session · ${idleStr}`);
   lines.push("");
 
-  // Critical Knowledge: HIGH/CRITICAL notes loaded in full
-  if (ctx.criticalNotes.length > 0) {
+  // Critical Knowledge: HIGH/CRITICAL memories loaded in full
+  if (ctx.important.length > 0) {
     lines.push("## Critical Knowledge (auto-loaded)");
     lines.push("");
-    for (const note of ctx.criticalNotes) {
-      const imp = ` [${note.importance.toUpperCase()}]`;
-      lines.push(`### ${note.title}${imp} (${note.category})`);
-      lines.push(note.content);
+    for (const mem of ctx.important) {
+      const imp = ` [${mem.importance.toUpperCase()}]`;
+      const tagStr = mem.tags.length > 0 ? ` {${mem.tags.join(", ")}}` : "";
+      lines.push(`### Memory #${mem.id}${imp}${tagStr}`);
+      lines.push(mem.content);
       lines.push("");
     }
   }
 
-  // Awareness-based Memory Map (compact, no content — agent pulls on-demand)
-  const mapLines = formatMemoryMap(ctx.indexEntries);
+  // Awareness-based Memory Map
+  const mapLines = formatMemoryMap(ctx.memories);
   if (mapLines.length > 0) {
     lines.push(...mapLines);
     lines.push("");
@@ -905,6 +800,13 @@ export function buildMemoryPrompt(options: PromptOptions = {}): string {
   lines.push("</delta_memory>");
 
   return lines.join("\n");
+}
+
+// ============ Compatibility (index.ts bridge) ============
+
+/** @deprecated Use remember(). Compatibility shim for index.ts git commit auto-capture. */
+export function logEpisode(content: string, context?: string, tags?: string[]): number {
+  return remember(content, { tags, context });
 }
 
 // ============ Version & Schema Info ============
@@ -934,16 +836,60 @@ export function getDatabaseSchema(): string {
   return rows.map((r) => `-- ${r.type}: ${r.name}\n${r.sql};`).join("\n\n");
 }
 
-// ============ Utility ============
+// ============ Internal Helpers ============
 
-export function closeDb(): void {
-  if (db) {
-    db.close();
-    db = null;
-    currentDbPath = null;
-  }
+/** Raw row from SQLite before parsing tags JSON */
+interface RawMemoryRow {
+  id: number;
+  content: string;
+  tags: string | null;
+  importance: string;
+  context: string | null;
+  session_id: string | null;
+  created_at: number;
+  updated_at: number;
+  last_accessed: number;
 }
 
-export function getDbLocation(): string {
-  return getDbPath();
+function parseMemoryRow(row: RawMemoryRow): Memory {
+  return {
+    id: row.id,
+    content: row.content,
+    tags: row.tags ? JSON.parse(row.tags) : [],
+    importance: row.importance as Importance,
+    context: row.context,
+    session_id: row.session_id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    last_accessed: row.last_accessed,
+  };
+}
+
+/** Update last_accessed on explicit search results */
+function touchAccessedMemories(database: Database.Database, rows: RawMemoryRow[]): void {
+  if (rows.length === 0) return;
+  const now = Date.now();
+  const ids = rows.map((r) => r.id);
+  database
+    .prepare(`UPDATE memories SET last_accessed = ? WHERE id IN (${ids.map(() => "?").join(",")})`)
+    .run(now, ...ids);
+}
+
+/**
+ * Sanitize a user query for FTS5 MATCH syntax.
+ * Splits into words, quotes each to prevent syntax errors.
+ */
+function sanitizeFtsQuery(query: string): string {
+  const terms = query
+    .replace(/[":*(){}[\]^~|&!]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  if (terms.length === 0) return "";
+  // Quote each term as a literal token
+  return terms.map((t) => `"${t}"`).join(" ");
+}
+
+/** Escape LIKE wildcards */
+function escapeLikeSafe(s: string): string {
+  return s.replace(/[%_\\]/g, "\\$&");
 }
