@@ -28,7 +28,6 @@ import {
 
 function clearAll(): void {
   const db = getDb();
-  // Delete from memories (triggers will clean FTS5)
   db.exec("DELETE FROM memories");
 }
 

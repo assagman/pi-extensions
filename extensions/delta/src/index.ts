@@ -1,13 +1,13 @@
 /**
- * Delta v3 — Pure persistent memory extension for Pi coding agent.
+ * Delta v4 — Pure persistent memory extension for Pi coding agent.
  *
- * Provides: notes (semantic), episodes (episodic), KV (scratchpad), memory index (navigator).
+ * Provides: Unified memory with tags, importance, FTS5 full-text search.
  * Storage:  repo-scoped SQLite at ~/.local/share/pi-ext-delta/<repo-id>/delta.db
  *
  * Enforcement features:
  * - Always-on compact instructions injected every turn (never dropped)
  * - Idle nudge after N turns without memory writes
- * - Auto-capture git commits as episodes
+ * - Auto-capture git commits as memories
  * - Session write stats in system prompt
  */
 import type { ExtensionAPI, ExtensionFactory } from "@mariozechner/pi-coding-agent";
@@ -18,12 +18,7 @@ import { registerTools } from "./tools.js";
 // ============ Constants ============
 
 /** Delta write tools that count toward session activity */
-const DELTA_WRITE_TOOLS = new Set([
-  "delta_set",
-  "delta_log",
-  "delta_note_create",
-  "delta_note_update",
-]);
+const DELTA_WRITE_TOOLS = new Set(["delta_remember"]);
 
 /** Turns of inactivity before injecting a nudge message */
 const IDLE_THRESHOLD = 4;
@@ -176,7 +171,7 @@ const deltaExtension: ExtensionFactory = (pi: ExtensionAPI) => {
       lastNudgeTurn = turnCount;
       result.message = {
         customType: "delta-nudge",
-        content: `⚠ No memory writes in ${turnsIdle()} turns. If you've made decisions, found bugs, or learned patterns — log them with delta_log or delta_note_create.`,
+        content: `⚠ No memory writes in ${turnsIdle()} turns. If you've made decisions, found bugs, or learned patterns — use delta_remember(content, tags) to persist them.`,
         display: false,
       };
     }
