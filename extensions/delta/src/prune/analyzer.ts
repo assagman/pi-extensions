@@ -1,8 +1,9 @@
 /**
  * Prune analyzer — core analysis and scoring logic for delta memory pruning.
+ * Delta v4 — Unified memory model (tag-based classification).
  */
 
-import type { Episode, ProjectNote } from "../db.js";
+import type { Memory } from "../db.js";
 import {
   checkBranchesExist,
   checkPathsExist,
@@ -18,6 +19,23 @@ import {
   type PruneReason,
   type PruneStats,
 } from "./types.js";
+
+// ============ Classification ============
+
+/** Classify memory type based on tags (for display/grouping) */
+function classifyMemory(memory: Memory): PrunableSourceType {
+  const tags = memory.tags;
+
+  // KV memories have 'kv' tag
+  if (tags.includes("kv")) return "kv";
+
+  // Note-like memories have category tags
+  const noteTags = ["issue", "convention", "workflow", "reminder", "general"];
+  if (tags.some((t) => noteTags.includes(t))) return "note";
+
+  // Default to episode for commit/auto-captured/general memories
+  return "episode";
+}
 
 // ============ Scoring Weights ============
 
@@ -54,104 +72,66 @@ function accessScore(lastAccessed: number, createdAt: number): number {
 
 // ============ Candidate Analysis ============
 
-/** Analyze a single episode for prune candidacy */
-function analyzeEpisode(
-  episode: Episode & { last_accessed: number },
+/** Analyze a single memory for prune candidacy */
+function analyzeMemory(
+  memory: Memory,
   currentSessionId: string,
   config: PruneConfig
 ): Omit<PruneCandidate, "detectedPaths" | "detectedBranches"> | null {
   const reasons: PruneReason[] = [];
   const now = Date.now();
-  const daysSinceUpdate = (now - episode.timestamp) / (1000 * 60 * 60 * 24);
+  const daysSinceUpdate = (now - memory.updated_at) / (1000 * 60 * 60 * 24);
+  const type = classifyMemory(memory);
 
   // Check low content (likely test/junk data)
-  const contentLength = episode.content.trim().length;
+  const contentLength = memory.content.trim().length;
   if (contentLength < config.minContentLength) {
     reasons.push("low_content");
   }
 
   // Check staleness
-  if (episode.last_accessed === 0) {
+  if (memory.last_accessed === 0) {
     reasons.push("stale");
   } else if (daysSinceUpdate > config.staleAgeDays) {
     reasons.push("stale");
   }
 
-  // Check old session
-  if (episode.session_id && episode.session_id !== currentSessionId) {
+  // Check old session (for session-tagged memories)
+  if (memory.session_id && memory.session_id !== currentSessionId) {
     // Only flag as old_session if also somewhat stale (> 1 day)
     if (daysSinceUpdate > 1) {
       reasons.push("old_session");
     }
   }
 
-  // Calculate score
-  const recency = recencyScore(daysSinceUpdate);
-  const access = accessScore(episode.last_accessed, episode.timestamp);
-  const score = Math.round((recency * 0.4 + access * 0.6) * 100);
-
-  // Only return as candidate if has reasons and below threshold
-  if (reasons.length === 0 && score >= config.minScoreThreshold) {
-    return null;
-  }
-
-  // If score is low enough, add as candidate even without explicit reasons
-  if (reasons.length === 0 && score < config.minScoreThreshold) {
-    reasons.push("stale");
-  }
-
-  return {
-    type: "episode",
-    id: String(episode.id),
-    summary: truncate(episode.content, 80),
-    content: episode.content,
-    reasons,
-    score,
-    createdAt: episode.timestamp,
-    updatedAt: episode.timestamp,
-    lastAccessed: episode.last_accessed,
-    tags: episode.tags,
-    selected: false,
-  };
-}
-
-/** Analyze a single note for prune candidacy */
-function analyzeNote(
-  note: ProjectNote & { last_accessed: number },
-  config: PruneConfig
-): Omit<PruneCandidate, "detectedPaths" | "detectedBranches"> | null {
-  const reasons: PruneReason[] = [];
-  const now = Date.now();
-  const daysSinceUpdate = (now - note.updated_at) / (1000 * 60 * 60 * 24);
-
-  // Check low content (likely test/junk data)
-  const contentLength = note.content.trim().length;
-  if (contentLength < config.minContentLength) {
-    reasons.push("low_content");
-  }
-
-  // Check staleness
-  if (note.last_accessed === 0 && daysSinceUpdate > 7) {
-    reasons.push("stale");
-  } else if (daysSinceUpdate > config.staleAgeDays) {
-    reasons.push("stale");
-  }
-
-  // Check low importance + stale
-  if (note.importance === "low" && daysSinceUpdate > 14) {
+  // Check low importance + stale (for note-like memories)
+  if (type === "note" && memory.importance === "low" && daysSinceUpdate > 14) {
     reasons.push("low_importance");
   }
 
-  // Calculate score
-  const importanceWeight = IMPORTANCE_WEIGHTS[note.importance] ?? 0.5;
-  const recency = recencyScore(daysSinceUpdate);
-  const access = accessScore(note.last_accessed, note.created_at);
-  const score = Math.round((importanceWeight * 0.3 + recency * 0.35 + access * 0.35) * 100);
+  // Check archived tag (old inactive notes)
+  if (memory.tags.includes("archived") && daysSinceUpdate > 7) {
+    reasons.push("stale");
+  }
 
-  // Skip high/critical importance notes unless very stale OR low_content (junk overrides importance)
+  // Calculate score based on type and attributes
+  const importanceWeight = IMPORTANCE_WEIGHTS[memory.importance] ?? 0.5;
+  const recency = recencyScore(daysSinceUpdate);
+  const access = accessScore(memory.last_accessed, memory.created_at);
+
+  let score: number;
+  if (type === "note") {
+    // Notes: importance matters more
+    score = Math.round((importanceWeight * 0.3 + recency * 0.35 + access * 0.35) * 100);
+  } else {
+    // Episodes/KV: recency and access matter more
+    score = Math.round((importanceWeight * 0.1 + recency * 0.45 + access * 0.45) * 100);
+  }
+
+  // Skip high/critical importance memories unless very stale OR low_content
   const hasLowContent = reasons.includes("low_content");
   if (
-    (note.importance === "high" || note.importance === "critical") &&
+    (memory.importance === "high" || memory.importance === "critical") &&
     daysSinceUpdate < 60 &&
     !hasLowContent
   ) {
@@ -163,74 +143,27 @@ function analyzeNote(
     return null;
   }
 
+  // If score is low enough, add as candidate even without explicit reasons
   if (reasons.length === 0 && score < config.minScoreThreshold) {
     reasons.push("stale");
   }
 
-  return {
-    type: "note",
-    id: String(note.id),
-    summary: truncate(note.title, 60),
-    content: `${note.title}\n\n${note.content}`,
-    reasons,
-    score,
-    createdAt: note.created_at,
-    updatedAt: note.updated_at,
-    lastAccessed: note.last_accessed,
-    importance: note.importance,
-    selected: false,
-  };
-}
-
-/** Analyze a KV entry for prune candidacy */
-function analyzeKV(
-  key: string,
-  value: string,
-  createdAt: number,
-  updatedAt: number,
-  lastAccessed: number,
-  config: PruneConfig
-): Omit<PruneCandidate, "detectedPaths" | "detectedBranches"> | null {
-  const reasons: PruneReason[] = [];
-  const now = Date.now();
-  const daysSinceUpdate = (now - updatedAt) / (1000 * 60 * 60 * 24);
-
-  // Check low content (likely test/junk data)
-  const valueLength = value.trim().length;
-  if (valueLength < config.minContentLength) {
-    reasons.push("low_content");
-  }
-
-  // Check staleness
-  if (lastAccessed === 0 && daysSinceUpdate > 7) {
-    reasons.push("stale");
-  } else if (daysSinceUpdate > config.staleAgeDays) {
-    reasons.push("stale");
-  }
-
-  // Calculate score
-  const recency = recencyScore(daysSinceUpdate);
-  const access = accessScore(lastAccessed, createdAt);
-  const score = Math.round((recency * 0.4 + access * 0.6) * 100);
-
-  if (reasons.length === 0 && score >= config.minScoreThreshold) {
-    return null;
-  }
-
-  if (reasons.length === 0 && score < config.minScoreThreshold) {
-    reasons.push("stale");
-  }
+  // Extract display summary (first line or full content if short)
+  const firstLine = memory.content.split("\n")[0].trim();
+  const summary = truncate(firstLine || memory.content, 80);
 
   return {
-    type: "kv",
-    id: key,
-    summary: `${key}: ${truncate(value, 50)}`,
-    content: `Key: ${key}\nValue: ${value}`,
+    type,
+    id: String(memory.id),
+    summary,
+    content: memory.content,
     reasons,
     score,
-    createdAt,
-    updatedAt,
-    lastAccessed,
+    createdAt: memory.created_at,
+    updatedAt: memory.updated_at,
+    lastAccessed: memory.last_accessed,
+    importance: memory.importance,
+    tags: memory.tags,
     selected: false,
   };
 }
@@ -325,15 +258,7 @@ function detectDuplicates(candidates: PruneCandidate[], threshold: number): void
 // ============ Main Analysis ============
 
 export interface AnalyzeInput {
-  episodes: Array<Episode & { last_accessed: number }>;
-  notes: Array<ProjectNote & { last_accessed: number }>;
-  kv: Array<{
-    key: string;
-    value: string;
-    created_at: number;
-    updated_at: number;
-    last_accessed: number;
-  }>;
+  memories: Memory[];
   currentSessionId: string;
   config?: Partial<PruneConfig>;
 }
@@ -344,28 +269,9 @@ export async function analyze(input: AnalyzeInput): Promise<PruneAnalysis> {
   const config = { ...DEFAULT_PRUNE_CONFIG, ...input.config };
   const rawCandidates: Array<Omit<PruneCandidate, "detectedPaths" | "detectedBranches">> = [];
 
-  // Analyze episodes
-  for (const episode of input.episodes) {
-    const candidate = analyzeEpisode(episode, input.currentSessionId, config);
-    if (candidate) rawCandidates.push(candidate);
-  }
-
-  // Analyze notes
-  for (const note of input.notes) {
-    const candidate = analyzeNote(note, config);
-    if (candidate) rawCandidates.push(candidate);
-  }
-
-  // Analyze KV
-  for (const entry of input.kv) {
-    const candidate = analyzeKV(
-      entry.key,
-      entry.value,
-      entry.created_at,
-      entry.updated_at,
-      entry.last_accessed,
-      config
-    );
+  // Analyze all memories
+  for (const memory of input.memories) {
+    const candidate = analyzeMemory(memory, input.currentSessionId, config);
     if (candidate) rawCandidates.push(candidate);
   }
 
@@ -417,11 +323,22 @@ function buildStats(input: AnalyzeInput, candidates: PruneCandidate[]): PruneSta
     }
   }
 
+  // Count total memories by type
+  const totalByType: Record<PrunableSourceType, number> = {
+    episode: 0,
+    note: 0,
+    kv: 0,
+  };
+  for (const memory of input.memories) {
+    const type = classifyMemory(memory);
+    totalByType[type]++;
+  }
+
   return {
     total: {
-      episodes: input.episodes.length,
-      notes: input.notes.length,
-      kv: input.kv.length,
+      episodes: totalByType.episode,
+      notes: totalByType.note,
+      kv: totalByType.kv,
     },
     byReason,
     byType,

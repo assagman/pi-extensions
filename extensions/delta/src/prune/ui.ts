@@ -4,15 +4,7 @@
 
 import type { Component, TUI } from "@mariozechner/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import {
-  batchDeleteEpisodes,
-  batchDeleteKV,
-  batchDeleteNotes,
-  getAllEpisodes,
-  getAllKV,
-  getAllNotes,
-  getSessionId,
-} from "../db.js";
+import { batchDeleteMemories, getAllMemories, getSessionId } from "../db.js";
 import { type AnalyzeInput, analyze } from "./analyzer.js";
 import type { PruneAnalysis, PruneCandidate } from "./types.js";
 import { REASON_LABELS, REASON_RISK } from "./types.js";
@@ -88,15 +80,11 @@ export class PruneDashboard implements Component {
 
   async init(): Promise<void> {
     try {
-      // Gather all data
-      const episodes = getAllEpisodes();
-      const notes = getAllNotes();
-      const kv = getAllKV();
+      // Gather all memories
+      const memories = getAllMemories();
 
       const input: AnalyzeInput = {
-        episodes,
-        notes,
-        kv,
+        memories,
         currentSessionId: getSessionId(),
       };
 
@@ -186,6 +174,7 @@ export class PruneDashboard implements Component {
 
   private renderList(width: number, rows: number): string[] {
     const lines: string[] = [];
+    if (!this.analysis) return lines;
     const analysis = this.analysis;
     const candidates = analysis.candidates;
 
@@ -227,6 +216,7 @@ export class PruneDashboard implements Component {
 
   private renderDetail(width: number, rows: number): string[] {
     const lines: string[] = [];
+    if (!this.analysis) return lines;
     const candidate = this.analysis.candidates[this.selectedIndex];
 
     // Header
@@ -268,6 +258,7 @@ export class PruneDashboard implements Component {
 
   private renderConfirm(width: number, rows: number): string[] {
     const lines: string[] = [];
+    if (!this.analysis) return lines;
     const selected = this.analysis.candidates.filter((c) => c.selected);
     const padTop = Math.floor((rows - 10) / 2);
 
@@ -317,6 +308,7 @@ export class PruneDashboard implements Component {
 
   private renderHeader(width: number): string {
     const title = "🧹 Delta Prune";
+    if (!this.analysis) return title;
     const analysis = this.analysis;
     const selectedCount = analysis.candidates.filter((c) => c.selected).length;
     const right = selectedCount > 0 ? `${FG_GREEN}${selectedCount} selected${RESET}` : "";
@@ -329,6 +321,7 @@ export class PruneDashboard implements Component {
   }
 
   private renderStats(_width: number): string {
+    if (!this.analysis) return "";
     const s = this.analysis.stats;
     const parts = [
       `${FG_DIM}Total:${RESET} ${s.total.episodes}e/${s.total.notes}n/${s.total.kv}k`,
@@ -531,6 +524,7 @@ export class PruneDashboard implements Component {
   }
 
   private handleDetailInput(data: string): void {
+    if (!this.analysis) return;
     const candidate = this.analysis.candidates[this.selectedIndex];
 
     // Scroll
@@ -593,30 +587,13 @@ export class PruneDashboard implements Component {
   // ============ Prune Execution ============
 
   private executePrune(): void {
+    if (!this.analysis) return;
     const selected = this.analysis.candidates.filter((c) => c.selected);
 
-    const episodeIds: number[] = [];
-    const noteIds: number[] = [];
-    const kvKeys: string[] = [];
+    // All candidates have numeric IDs now (unified Memory.id)
+    const ids = selected.map((c) => Number(c.id));
 
-    for (const c of selected) {
-      switch (c.type) {
-        case "episode":
-          episodeIds.push(Number(c.id));
-          break;
-        case "note":
-          noteIds.push(Number(c.id));
-          break;
-        case "kv":
-          kvKeys.push(c.id);
-          break;
-      }
-    }
-
-    let deleted = 0;
-    deleted += batchDeleteEpisodes(episodeIds);
-    deleted += batchDeleteNotes(noteIds);
-    deleted += batchDeleteKV(kvKeys);
+    const deleted = batchDeleteMemories(ids);
 
     this.done({ pruned: deleted });
   }

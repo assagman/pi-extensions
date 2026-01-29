@@ -1,7 +1,9 @@
 /**
  * Tests for prune analyzer module.
+ * Delta v4 — Unified memory model.
  */
 import { describe, expect, it } from "vitest";
+import type { Memory } from "../db.js";
 import { type AnalyzeInput, analyze } from "./analyzer.js";
 import { detectBranchRefs, detectFilePaths } from "./detector.js";
 
@@ -86,9 +88,7 @@ describe("detectBranchRefs", () => {
 describe("analyze - low_content detection", () => {
   const now = Date.now();
   const baseInput: AnalyzeInput = {
-    episodes: [],
-    notes: [],
-    kv: [],
+    memories: [],
     currentSessionId: "test-session",
     config: {
       staleAgeDays: 30,
@@ -101,22 +101,59 @@ describe("analyze - low_content detection", () => {
     },
   };
 
+  /** Helper to create a note-like memory */
+  function createNote(
+    id: number,
+    content: string,
+    importance: Memory["importance"] = "normal"
+  ): Memory {
+    return {
+      id,
+      content,
+      tags: ["general"], // Note-like category tag
+      importance,
+      context: null,
+      session_id: null,
+      created_at: now,
+      updated_at: now,
+      last_accessed: now,
+    };
+  }
+
+  /** Helper to create an episode-like memory */
+  function createEpisode(id: number, content: string): Memory {
+    return {
+      id,
+      content,
+      tags: ["commit"], // Episode-like tag
+      importance: "normal",
+      context: null,
+      session_id: "test-session",
+      created_at: now,
+      updated_at: now,
+      last_accessed: now,
+    };
+  }
+
+  /** Helper to create a KV-like memory */
+  function createKV(id: number, key: string, value: string): Memory {
+    return {
+      id,
+      content: `${key}: ${value}`,
+      tags: ["kv", key], // KV-specific tags
+      importance: "normal",
+      context: null,
+      session_id: null,
+      created_at: now,
+      updated_at: now,
+      last_accessed: now,
+    };
+  }
+
   it("should flag notes with content < minContentLength", async () => {
     const result = await analyze({
       ...baseInput,
-      notes: [
-        {
-          id: 1,
-          title: "Test Note",
-          content: "C", // 1 char - below threshold
-          category: "general",
-          importance: "normal",
-          active: true,
-          created_at: now,
-          updated_at: now,
-          last_accessed: now,
-        },
-      ],
+      memories: [createNote(1, "C")], // 1 char - below threshold
     });
 
     expect(result.candidates).toHaveLength(1);
@@ -127,19 +164,7 @@ describe("analyze - low_content detection", () => {
   it("should NOT flag notes with content >= minContentLength", async () => {
     const result = await analyze({
       ...baseInput,
-      notes: [
-        {
-          id: 1,
-          title: "Test Note",
-          content: "This is a proper note with enough content",
-          category: "general",
-          importance: "normal",
-          active: true,
-          created_at: now,
-          updated_at: now,
-          last_accessed: now,
-        },
-      ],
+      memories: [createNote(1, "This is a proper note with enough content")],
     });
 
     // Should not be a candidate at all (recent, accessed, normal importance)
@@ -150,17 +175,7 @@ describe("analyze - low_content detection", () => {
   it("should flag episodes with content < minContentLength", async () => {
     const result = await analyze({
       ...baseInput,
-      episodes: [
-        {
-          id: 1,
-          content: "X", // 1 char
-          context: null,
-          tags: [],
-          timestamp: now,
-          session_id: "test-session",
-          last_accessed: now,
-        },
-      ],
+      memories: [createEpisode(1, "X")], // 1 char
     });
 
     expect(result.candidates).toHaveLength(1);
@@ -170,15 +185,7 @@ describe("analyze - low_content detection", () => {
   it("should flag KV entries with value < minContentLength", async () => {
     const result = await analyze({
       ...baseInput,
-      kv: [
-        {
-          key: "test-key",
-          value: "AB", // 2 chars
-          created_at: now,
-          updated_at: now,
-          last_accessed: now,
-        },
-      ],
+      memories: [createKV(1, "test-key", "AB")], // 2 chars total value
     });
 
     expect(result.candidates).toHaveLength(1);
@@ -188,19 +195,7 @@ describe("analyze - low_content detection", () => {
   it("should flag high importance notes with low_content (junk overrides importance)", async () => {
     const result = await analyze({
       ...baseInput,
-      notes: [
-        {
-          id: 1,
-          title: "Critical Note",
-          content: "C", // 1 char - junk despite high importance
-          category: "general",
-          importance: "high",
-          active: true,
-          created_at: now,
-          updated_at: now,
-          last_accessed: now,
-        },
-      ],
+      memories: [createNote(1, "C", "high")], // 1 char - junk despite high importance
     });
 
     // Should be flagged despite high importance
@@ -212,19 +207,7 @@ describe("analyze - low_content detection", () => {
     const result = await analyze({
       ...baseInput,
       config: { ...(baseInput.config ?? {}), minContentLength: 50 },
-      notes: [
-        {
-          id: 1,
-          title: "Short Note",
-          content: "Twenty chars here!!", // 20 chars - below 50
-          category: "general",
-          importance: "normal",
-          active: true,
-          created_at: now,
-          updated_at: now,
-          last_accessed: now,
-        },
-      ],
+      memories: [createNote(1, "Twenty chars here!!")], // 20 chars - below 50
     });
 
     expect(result.candidates).toHaveLength(1);
