@@ -1,28 +1,24 @@
 /**
- * Delta v3 — Pure persistent memory extension for Pi coding agent.
+ * Delta v4 — Pure persistent memory extension for Pi coding agent.
  *
- * Provides: notes (semantic), episodes (episodic), KV (scratchpad), memory index (navigator).
+ * Provides: Unified memory with tags, importance, FTS5 full-text search.
  * Storage:  repo-scoped SQLite at ~/.local/share/pi-ext-delta/<repo-id>/delta.db
  *
  * Enforcement features:
  * - Always-on compact instructions injected every turn (never dropped)
  * - Idle nudge after N turns without memory writes
- * - Auto-capture git commits as episodes
+ * - Auto-capture git commits as memories
  * - Session write stats in system prompt
  */
 import type { ExtensionAPI, ExtensionFactory } from "@mariozechner/pi-coding-agent";
 import { buildMemoryPrompt, closeDb, getMemoryContext, logEpisode, resetSession } from "./db.js";
+import { PruneDashboard } from "./prune/ui.js";
 import { registerTools } from "./tools.js";
 
 // ============ Constants ============
 
 /** Delta write tools that count toward session activity */
-const DELTA_WRITE_TOOLS = new Set([
-  "delta_set",
-  "delta_log",
-  "delta_note_create",
-  "delta_note_update",
-]);
+const DELTA_WRITE_TOOLS = new Set(["delta_remember"]);
 
 /** Turns of inactivity before injecting a nudge message */
 const IDLE_THRESHOLD = 4;
@@ -81,6 +77,28 @@ function extractCommitInfo(output: string): string | null {
 
 const deltaExtension: ExtensionFactory = (pi: ExtensionAPI) => {
   registerTools(pi);
+
+  // --- Slash command: /delta-prune ---
+  pi.registerCommand("delta-prune", {
+    description: "Open Delta memory pruning dashboard — analyze and clean up stale/orphaned items",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) {
+        ctx.ui.notify("UI not available", "error");
+        return;
+      }
+
+      const result = await ctx.ui.custom((tui, theme, keybindings, done) => {
+        return new PruneDashboard(tui, theme, keybindings, done);
+      });
+
+      if (result && typeof result === "object" && "pruned" in result) {
+        const pruned = (result as { pruned: number }).pruned;
+        if (pruned > 0) {
+          ctx.ui.notify(`🧹 Pruned ${pruned} items from memory`, "info");
+        }
+      }
+    },
+  });
 
   // --- Session lifecycle ---
   pi.on("session_start", async () => {
@@ -153,7 +171,7 @@ const deltaExtension: ExtensionFactory = (pi: ExtensionAPI) => {
       lastNudgeTurn = turnCount;
       result.message = {
         customType: "delta-nudge",
-        content: `⚠ No memory writes in ${turnsIdle()} turns. If you've made decisions, found bugs, or learned patterns — log them with delta_log or delta_note_create.`,
+        content: `⚠ No memory writes in ${turnsIdle()} turns. If you've made decisions, found bugs, or learned patterns — use delta_remember(content, tags) to persist them.`,
         display: false,
       };
     }
@@ -168,22 +186,13 @@ function buildWelcomeMessage(ctx: ReturnType<typeof getMemoryContext>): string {
   const lines: string[] = [];
 
   lines.push(
-    "🧠 Delta memory loaded. Log discoveries with delta_log, save knowledge with delta_note_create."
+    "🧠 Delta memory loaded. Use delta_remember() to persist knowledge, delta_search() to recall."
   );
   lines.push("");
 
-  if (ctx.indexEntries.length > 0) {
-    const noteCount = ctx.indexEntries.filter((e) => e.source_type === "note").length;
-    const episodeCount = ctx.indexEntries.filter((e) => e.source_type === "episode").length;
-    const kvCount = ctx.indexEntries.filter((e) => e.source_type === "kv").length;
-
-    const parts: string[] = [];
-    if (noteCount > 0) parts.push(`${noteCount} notes`);
-    if (episodeCount > 0) parts.push(`${episodeCount} episodes`);
-    if (kvCount > 0) parts.push(`${kvCount} kv`);
-    if (parts.length > 0) lines.push(`Memory: ${parts.join(", ")}`);
-
-    lines.push("Use delta_index_search(query) to find relevant memories.");
+  if (ctx.total > 0) {
+    lines.push(`Memory: ${ctx.total} memories (${ctx.important.length} high/critical)`);
+    lines.push("Use delta_search(query) to find relevant memories.");
   } else {
     lines.push("Memory is empty — start logging discoveries and decisions.");
   }

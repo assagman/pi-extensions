@@ -1,16 +1,19 @@
-# Delta - Memory for AI Agents
+# Delta — Memory for AI Agents
 
-Persistent memory extension for Pi coding agent using SQLite.
+Persistent memory extension for Pi coding agent. Single unified storage with
+FTS5 full-text search — everything is `content + tags[]`.
 
 ## Features
 
-| Type | Description |
-|------|-------------|
-| **Key-Value** | Simple persistent storage for named values |
-| **Episodic** | Timestamped events/facts with tags and context |
-| **Project Notes** | Persistent context loaded at every session start |
-| **Memory Index** | Full-text search across all memory types |
-| **Memory Injection** | Automatic system prompt with memory context |
+| Feature | Description |
+|---------|-------------|
+| **Unified Memory** | Single `memories` table — no separate KV/episodic/notes |
+| **FTS5 Search** | Full-text search across content, tags, and context |
+| **Tag-Based Classification** | Flexible tags instead of rigid categories |
+| **Importance Levels** | `low`, `normal`, `high`, `critical` |
+| **Auto-Capture** | Git commits automatically logged as memories |
+| **System Prompt Injection** | Memory context injected every turn |
+| **Prune Dashboard** | TUI-based intelligent memory cleanup (`/delta-prune`) |
 
 ## Installation
 
@@ -23,163 +26,164 @@ bun install
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Session Start                          │
-│  Delta injects memory context into system prompt:           │
-│  - Active project notes                                     │
-│  - Memory stats (kv keys, episode count)                    │
-│  - Workflow guidelines                                      │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      Agent Aware Of                         │
-│  - Project context via notes                                │
-│  - What's stored in memory                                  │
-│  - How to use delta tools                                   │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                      Session Start                             │
+│  Delta injects <delta_memory> into system prompt:              │
+│  • Mandatory recall/persist instructions                       │
+│  • Critical Knowledge (high/critical memories, full content)   │
+│  • Memory Map (category counts + sample keywords)              │
+└──────────────────────────┬─────────────────────────────────────┘
+                           │
+                           ▼
+┌────────────────────────────────────────────────────────────────┐
+│                    Agent Operations                             │
+│  delta_remember — persist knowledge with tags + importance      │
+│  delta_search   — FTS5 full-text + tag/importance filtering    │
+│  delta_forget   — delete memory by ID                          │
+│  delta_info     — stats, version, schema                       │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ## Database Location
 
-Data is stored per-project and per-branch:
+Data is stored per-repo (worktree-aware, NOT per-branch):
 
 ```
-~/.local/share/pi-ext-delta/<sanitized-project-path>-<git-branch>/delta.db
+~/.local/share/pi-ext-delta/<repo-id>/delta.db
 ```
 
-This ensures:
-- Data persists across sessions
-- Not tracked by git (user-specific)
-- Branch-aware isolation
+All worktrees of the same repository share one DB.
 
-## Tools (16 total)
+## Tools
 
-### Key-Value Memory
+### Core Operations
 
 | Tool | Description |
 |------|-------------|
-| `delta_get` | Get value by key |
-| `delta_set` | Store key-value pair |
-| `delta_delete` | Delete key |
+| `delta_remember` | Store a memory with content, tags, importance, context |
+| `delta_search` | FTS5 search by query, tags, importance, time, session |
+| `delta_forget` | Delete a memory by ID |
+| `delta_info` | Database location, version, stats, schema dump |
 
-### Episodic Memory
-
-| Tool | Description |
-|------|-------------|
-| `delta_log` | Log event/fact with timestamp, context, tags |
-| `delta_recall` | Search past events by query, tags, time, session |
-| `delta_episode_delete` | Delete an episode by ID |
-
-### Project Notes
-
-Notes are loaded into the system prompt at every session start.
-
-| Tool | Description |
-|------|-------------|
-| `delta_note_create` | Create project note (auto-loaded if active) |
-| `delta_note_list` | List notes with filters |
-| `delta_note_update` | Update note, set active=false to archive |
-| `delta_note_delete` | Permanently delete note |
-| `delta_note_get` | Get single note with full content |
-
-**Note Categories:**
-
-| Category | Use Case |
-|----------|----------|
-| `issue` | Known bugs, limitations, workarounds |
-| `convention` | Code style, naming, patterns |
-| `workflow` | Build steps, deployment, testing |
-| `reminder` | Things to remember |
-| `general` | Everything else |
-
-**Importance Levels:** `low`, `normal`, `high`, `critical`
-
-### Memory Index
-
-| Tool | Description |
-|------|-------------|
-| `delta_index_search` | Search across all memory types by keywords |
-| `delta_index_rebuild` | Force rebuild the memory index |
-
-### Info & Diagnostics
-
-| Tool | Description |
-|------|-------------|
-| `delta_info` | Show database location and stats |
-| `delta_version` | Show DB version info |
-| `delta_schema` | Dump complete DDL schema |
-
-## Usage Examples
-
-### Project Notes
+### Usage Examples
 
 ```
-# Create a critical issue note (will be in every prompt)
-delta_note_create \
-  title="Auth rate limiting not implemented" \
-  content="Production auth service has no rate limiting. Add before launch." \
-  category="issue" \
-  importance="critical"
+# Remember a decision
+delta_remember content="Chose PostgreSQL over MySQL — better JSON support"
+               tags=["decision", "database"]
+               importance="high"
 
-# Create a coding convention note
-delta_note_create \
-  title="Error handling pattern" \
-  content="Always use Result<T, E> for fallible operations. Never throw." \
-  category="convention"
+# Remember a bug
+delta_remember content="Race condition in worker pool — use mutex"
+               tags=["bug", "concurrency"]
+               context="src/worker.ts"
 
-# Archive a note (won't be loaded anymore)
-delta_note_update id=1 active=false
+# Remember a convention
+delta_remember content="All error handling uses Result<T,E> pattern"
+               tags=["convention", "error-handling"]
 
-# List all active notes
-delta_note_list activeOnly=true
+# Search by content
+delta_search query="PostgreSQL"
+
+# Search by tags
+delta_search tags=["decision"]
+
+# Search with filters
+delta_search query="auth" tags=["bug"] importance="critical"
+
+# Forget a memory
+delta_forget id=42
 ```
 
-### Key-Value
-
-```
-delta_set key="pref:test_framework" value="vitest"
-delta_get key="pref:test_framework"
-delta_delete key="pref:test_framework"
-```
-
-### Episodic
-
-```
-delta_log content="Chose React for frontend" context="architecture" tags=["decision"]
-delta_log content="Found race condition in auth" tags=["bug", "auth"]
-delta_recall tags=["decision"] limit=10
-delta_recall query="auth" sessionOnly=true
-```
-
-### Memory Index
-
-```
-delta_index_search query="auth"
-delta_index_rebuild
-```
-
-## Schemas
-
-### Project Note
+## Memory Schema
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | int | Auto-generated ID |
-| `title` | string | Note title (required) |
-| `content` | string | Note content, markdown supported |
-| `category` | enum | issue, convention, workflow, reminder, general |
-| `importance` | enum | low, normal, high, critical |
-| `active` | bool | If true, loaded at session start |
-| `created_at` | timestamp | Creation time |
+| `content` | string | Memory content (required) |
+| `tags` | string[] | Classification tags (JSON array) |
+| `importance` | enum | `low`, `normal`, `high`, `critical` |
+| `context` | string? | File path, task ref, etc. |
+| `session_id` | string? | Session that created it |
+| `created_at` | timestamp | Creation time (epoch ms) |
 | `updated_at` | timestamp | Last update time |
+| `last_accessed` | timestamp | Last search access time |
+
+## Tag Conventions
+
+Tags classify memories into awareness categories:
+
+| Tag | Use Case |
+|-----|----------|
+| `decision` | Architecture, design, technology choices |
+| `bug`, `gotcha` | Bugs, pitfalls, workarounds |
+| `convention`, `approach` | Code patterns, methodology |
+| `workflow` | Build, deploy, test processes |
+| `exploration` | Experiments (pair with `outcome:success/failure`) |
+| `issue`, `reminder` | Known problems, things to remember |
+| `architecture` | System design, component relationships |
+| `commit`, `auto-captured` | Git commits (auto-logged) |
+
+**Importance levels:** `high`/`critical` memories are auto-loaded into the
+system prompt every turn. Use sparingly for must-know project knowledge.
 
 ## System Prompt Injection
 
-Delta automatically injects a `<delta_memory>` block into the system prompt containing:
+Delta injects a `<delta_memory>` block every turn containing:
 
-1. **Mandatory Workflow** — recall-first, save-discoveries guidelines
-2. **Memory Index** — summary of notes and episodes with tags
-3. **Fetch instructions** — how to retrieve full content
+1. **Mandatory instructions** — recall-before-work, persist-after-decisions
+2. **Critical Knowledge** — full content of high/critical importance memories
+3. **Memory Map** — awareness categories with counts and sample keywords
 
-This ensures the agent is always aware of project context without manual loading.
+## Auto-Capture
+
+Git commits are automatically detected and stored:
+- Triggered on `git commit` via Bash tool result
+- Stored with tags `["commit", "auto-captured"]`
+- Includes branch, hash, message, and file stats
+
+## Memory Maintenance: /delta-prune
+
+TUI dashboard for intelligent memory cleanup.
+
+### Detection
+
+| Reason | Condition |
+|--------|-----------|
+| `stale` | Never accessed or age > 30 days |
+| `orphaned_path` | References non-existent files |
+| `orphaned_branch` | References non-existent branches |
+| `old_session` | From a previous session + somewhat stale |
+| `low_importance` | Low importance + stale > 14 days |
+| `duplicate` | >80% content similarity |
+| `low_content` | Content < 10 chars (likely junk) |
+
+### Scoring
+
+`score = importance_weight × recency × access_frequency` (0–100)
+
+Items with `score < 30` + a prune reason become candidates.
+
+### Controls
+
+| Key | Action |
+|-----|--------|
+| `j/k` | Navigate |
+| `space` | Toggle selection |
+| `a/n` | Select all / deselect all |
+| `Enter/l` | View details |
+| `d` | Delete selected |
+| `q/Esc` | Exit |
+
+## Migration
+
+Delta v4 automatically migrates v3 databases:
+
+| v3 Source | v4 Mapping |
+|-----------|------------|
+| `episodes` | content, tags, context, session_id preserved |
+| `project_notes` | title+content merged, category → tag, active=0 → "archived" tag |
+| `kv` | "key: value" content, `["kv", key]` tags |
+| `memory_index` | Dropped (FTS5 replaces it) |
+
+All v3 tables are dropped after migration.

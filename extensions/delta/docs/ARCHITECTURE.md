@@ -1,8 +1,9 @@
-# Delta Architecture
+# Delta v4 Architecture
 
 ## Overview
 
-Delta is a persistent memory extension for Pi coding agent that provides SQLite-backed storage for tasks, notes, key-value pairs, and episodic events.
+Delta is a persistent memory extension for Pi coding agent. A single unified
+`memories` table with FTS5 full-text search replaces the v3 multi-table design.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -11,221 +12,232 @@ Delta is a persistent memory extension for Pi coding agent that provides SQLite-
 │  │                    System Prompt                               │  │
 │  │  ┌─────────────────────────────────────────────────────────┐  │  │
 │  │  │  <delta_memory>                                          │  │  │
-│  │  │  • Active project notes                                  │  │  │
-│  │  │  • Task overview (status counts + active tasks)          │  │  │
-│  │  │  • Memory stats (kv keys, episode count)                 │  │  │
-│  │  │  • Workflow guidelines                                   │  │  │
+│  │  │  • Mandatory recall/persist instructions                 │  │  │
+│  │  │  • Critical Knowledge (high/critical memories)           │  │  │
+│  │  │  • Memory Map (category counts + keywords)               │  │  │
 │  │  │  </delta_memory>                                         │  │  │
 │  │  └─────────────────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                              │                                      │
 │                              ▼                                      │
 │  ┌───────────────────────────────────────────────────────────────┐  │
-│  │                    Delta Tools (16)                           │  │
+│  │                    Delta Tools                                │  │
 │  │                                                               │  │
-│  │  KV Store        Tasks           Notes           Episodic     │  │
-│  │  ─────────       ─────           ─────           ────────     │  │
-│  │  delta_get       delta_task_*    delta_note_*    delta_log    │  │
-│  │  delta_set       (5 tools)       (5 tools)       delta_recall │  │
-│  │  delta_delete                                                 │  │
+│  │  delta_remember    — persist knowledge                        │  │
+│  │  delta_search      — FTS5 full-text + tag/importance filter   │  │
+│  │  delta_forget      — delete memory by ID                      │  │
+│  │  delta_info        — stats, version, schema dump              │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                              │                                      │
 │                              ▼                                      │
 │  ┌───────────────────────────────────────────────────────────────┐  │
-│  │                    SQLite Database                            │  │
-│  │  ~/.local/share/pi-ext-delta/<project>-<branch>/delta.db     │  │
+│  │                    SQLite Database                             │  │
+│  │  ~/.local/share/pi-ext-delta/<repo-id>/delta.db               │  │
 │  │                                                               │  │
-│  │  ┌─────────┐ ┌──────────┐ ┌─────────┐ ┌───────────────┐      │  │
-│  │  │   kv    │ │ episodes │ │  tasks  │ │ project_notes │      │  │
-│  │  └─────────┘ └──────────┘ └─────────┘ └───────────────┘      │  │
+│  │  ┌────────────────┐   ┌──────────────────────┐                │  │
+│  │  │   memories     │──▶│  memories_fts (FTS5)  │                │  │
+│  │  │   (unified)    │   │  (full-text index)    │                │  │
+│  │  └────────────────┘   └──────────────────────┘                │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Module Structure
 
-| File | LOC | Purpose |
-|------|-----|---------|
-| `index.ts` | ~170 | Extension entry, event handlers, prompt builders |
-| `db.ts` | ~890 | SQLite operations, schema, queries |
-| `tools.ts` | ~490 | Tool definitions, TypeBox schemas |
-| `db.test.ts` | ~320 | Database unit tests (vitest) |
-
-## Data Flow
-
-### Session Start
-
 ```
-┌────────────────────┐
-│  Pi Session Start  │
-└─────────┬──────────┘
-          │
-          ▼
-┌─────────────────────────────┐
-│  before_agent_start event   │
-└─────────┬───────────────────┘
-          │
-          ▼
-┌─────────────────────────────┐
-│  getMemoryContext()         │
-│  • Load active notes        │
-│  • Get task summary         │
-│  • Count KV keys            │
-│  • Count episodes           │
-└─────────┬───────────────────┘
-          │
-          ▼
-┌─────────────────────────────┐
-│  buildMemoryPrompt()        │
-│  • Format as XML block      │
-│  • Inject into systemPrompt │
-└─────────────────────────────┘
+delta/
+├── src/
+│   ├── index.ts          # Extension entry, events, prompt injection
+│   ├── db.ts             # SQLite: schema, migration, CRUD, FTS5, prompt
+│   ├── tools.ts          # Tool definitions (Phase 2: rewrite pending)
+│   ├── db.test.ts        # 96 db tests (vitest)
+│   └── prune/
+│       ├── analyzer.ts   # Prune analysis + scoring
+│       ├── detector.ts   # File path / branch ref detection
+│       ├── types.ts      # Prune types + config
+│       ├── ui.ts         # TUI dashboard component
+│       └── analyzer.test.ts  # 17 prune tests
+├── docs/
+│   ├── README.md
+│   └── ARCHITECTURE.md
+├── skill/
+│   └── SKILL.md          # Agent skill doc (prompt injection guide)
+├── install.sh
+├── uninstall.sh
+├── package.json
+├── tsconfig.json
+└── vitest.config.ts
 ```
 
-### Tool Execution
+| File | Lines | Purpose |
+|------|------:|---------|
+| `db.ts` | 895 | Schema, migration, CRUD, FTS5 search, prompt building |
+| `index.ts` | 208 | Extension factory, event handlers, git commit auto-capture |
+| `tools.ts` | 406 | Tool definitions (v3 — Phase 2 rewrite pending) |
+| `db.test.ts` | 1158 | 96 tests: schema, CRUD, FTS5, migration, edge cases |
+| `prune/` | 1451 | Prune module: analyzer, detector, types, TUI, tests |
 
-```
-┌──────────────────────┐
-│  Agent calls tool    │
-│  e.g. delta_task_*   │
-└─────────┬────────────┘
-          │
-          ▼
-┌──────────────────────┐
-│  tools.ts handler    │
-│  • Validate params   │
-│  • Call db function  │
-└─────────┬────────────┘
-          │
-          ▼
-┌──────────────────────┐
-│  db.ts operation     │
-│  • Execute SQL       │
-│  • Return result     │
-└─────────┬────────────┘
-          │
-          ▼
-┌──────────────────────┐
-│  Format response     │
-│  • Return to agent   │
-└──────────────────────┘
-```
-
-## Database Schema
+## Database Schema (v4)
 
 ### Tables
 
 ```sql
--- Key-Value Store (simple persistent storage)
-kv (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+-- Unified memory storage
+memories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content TEXT NOT NULL,                    -- memory content
+  tags TEXT,                                -- JSON array of strings
+  importance TEXT NOT NULL DEFAULT 'normal', -- low|normal|high|critical
+  context TEXT,                             -- file path, task ref, etc.
+  session_id TEXT,                          -- session that created it
+  created_at INTEGER NOT NULL,              -- epoch ms
+  updated_at INTEGER NOT NULL,              -- epoch ms
+  last_accessed INTEGER NOT NULL DEFAULT 0  -- epoch ms (0 = never)
 )
 
--- Episodic Memory (timestamped events)
-episodes (
-  id INTEGER PRIMARY KEY,
-  content TEXT NOT NULL,
-  context TEXT,           -- optional: file, task, etc.
-  tags TEXT,              -- JSON array
-  timestamp INTEGER NOT NULL,
-  session_id TEXT         -- links to specific session
-)
-
--- Task Management
-tasks (
-  id INTEGER PRIMARY KEY,
-  title TEXT NOT NULL,
-  description TEXT,
-  status TEXT DEFAULT 'todo',    -- todo|in_progress|blocked|done|cancelled
-  priority TEXT DEFAULT 'medium', -- low|medium|high|critical
-  scope TEXT DEFAULT 'project',   -- session|project
-  tags TEXT,                      -- JSON array
-  parent_id INTEGER,              -- self-reference for subtasks
-  created_at INTEGER,
-  updated_at INTEGER,
-  completed_at INTEGER,
-  session_id TEXT
-)
-
--- Project Notes (persistent context)
-project_notes (
-  id INTEGER PRIMARY KEY,
-  title TEXT NOT NULL,
-  content TEXT NOT NULL,
-  category TEXT DEFAULT 'general', -- issue|convention|workflow|reminder|general
-  importance TEXT DEFAULT 'normal', -- low|normal|high|critical
-  active INTEGER DEFAULT 1,         -- 1=loaded at session start
-  created_at INTEGER,
-  updated_at INTEGER
+-- FTS5 full-text index (external content, synced via triggers)
+memories_fts USING fts5(
+  content,                    -- indexed from memories.content
+  tags,                       -- indexed from memories.tags
+  context,                    -- indexed from memories.context
+  content=memories,           -- external content table
+  content_rowid=id            -- rowid mapping
 )
 ```
 
 ### Indexes
 
 ```sql
-idx_episodes_timestamp ON episodes(timestamp)
-idx_episodes_session ON episodes(session_id)
-idx_tasks_status ON tasks(status)
-idx_tasks_scope ON tasks(scope)
-idx_tasks_session ON tasks(session_id)
-idx_tasks_parent ON tasks(parent_id)
-idx_notes_category ON project_notes(category)
-idx_notes_active ON project_notes(active)
-idx_notes_importance ON project_notes(importance)
+idx_memories_importance ON memories(importance)
+idx_memories_session    ON memories(session_id)
+idx_memories_created    ON memories(created_at)
+idx_memories_updated    ON memories(updated_at)
+```
+
+### FTS5 Sync Triggers
+
+```
+memories_fts_ai  — AFTER INSERT: add to FTS5 index
+memories_fts_ad  — AFTER DELETE: remove from FTS5 index
+memories_fts_au  — AFTER UPDATE: delete old + insert new in FTS5
+```
+
+### Schema Version History
+
+| Version | Changes |
+|--------:|---------|
+| v1 | Original: kv, episodes, tasks, project_notes |
+| v2 | Added memory_index + triggers, dropped task columns |
+| v3 | Removed tasks, added last_accessed, repo-scoped storage |
+| **v4** | **Unified memories table + FTS5, dropped all v3 tables** |
+
+## Data Flow
+
+### Session Lifecycle
+
+```
+session_start ──▶ resetSession()
+                  resetState()
+
+before_agent_start (every turn)
+  │
+  ├──▶ getMemoryContext()
+  │      ├── Load all memories (limit 100, importance-ordered)
+  │      ├── Load important memories (high/critical)
+  │      └── Count total
+  │
+  ├──▶ buildMemoryPrompt()
+  │      ├── Mandatory instructions
+  │      ├── Critical Knowledge (full content of high/critical)
+  │      └── Memory Map (awareness categories + counts)
+  │
+  └──▶ Inject into systemPrompt
+
+tool_result (Bash) ──▶ Auto-capture git commits as memories
+                       tags: ["commit", "auto-captured"]
+
+session_shutdown ──▶ closeDb()
+```
+
+### Search Flow
+
+```
+search(query?, tags?, importance?, ...)
+  │
+  ├── query provided?
+  │   ├── YES ──▶ sanitizeFtsQuery() ──▶ FTS5 MATCH + rank
+  │   │          on error ──▶ LIKE fallback
+  │   └── NO  ──▶ filteredSearch (importance + recency order)
+  │
+  ├── Apply additional filters (tags, importance, since, session)
+  ├── Update last_accessed on results
+  └── Return Memory[]
 ```
 
 ## Storage Location
 
-Database path formula:
 ```
-~/.local/share/pi-ext-delta/<sanitized-cwd>-<git-branch>/delta.db
-```
-
-Example:
-```
-Project: /Users/dev/my-app on branch: feat/auth
-Database: ~/.local/share/pi-ext-delta/Users_dev_my-app-feat_auth/delta.db
+~/.local/share/pi-ext-delta/<repo-id>/delta.db
 ```
 
-Benefits:
-- Per-project isolation
-- Per-branch isolation (separate data per feature branch)
-- Not in git (user-specific data)
-- XDG-compliant location
+Repo ID is derived from the git root directory (worktree-aware):
+- `/Users/dev/my-app` → `Users_dev_my-app`
+- All worktrees of the same repo share the same DB
+
+## Migration v3→v4
+
+```
+v3 Tables          Migration                     v4 Table
+───────────        ──────────                    ─────────
+episodes     ──▶   content, tags, context,       memories
+                    session_id preserved
+                    timestamp → created/updated
+
+project_notes ──▶  title || "\n\n" || content    memories
+                    category → tag
+                    active=0 → "archived" tag
+                    importance preserved
+
+kv           ──▶   "key: value" as content       memories
+                    ["kv", key] as tags
+
+memory_index ──▶   DROPPED (FTS5 replaces it)
+```
+
+After migration: all v3 tables, triggers, and indexes are dropped.
+Defensive `cleanupV3Artifacts()` runs on every init to handle partial migrations.
+
+## Awareness Classification
+
+Memories are classified into awareness categories based on tags:
+
+| Category | Tags |
+|----------|------|
+| Commits | `commit`, `auto-captured` |
+| Decisions | `decision` |
+| Preferences | `preference`, `pref` |
+| Environment | `environment`, `env` |
+| Workflows | `workflow` |
+| Conventions | `convention`, `approach` |
+| Architecture | `architecture` |
+| Issues | `issue`, `bug`, `gotcha`, `reminder` |
+| Explorations | `exploration` |
+| Other | (no matching tags) |
+
+Used by `buildMemoryPrompt()` to generate the Memory Map section.
 
 ## Thread Safety
 
-- SQLite WAL mode enabled (`journal_mode = WAL`)
-- Single database connection per process
-- Synchronous operations (no concurrent access issues)
-
-## Security Considerations
-
-1. **Path Traversal**: `sanitizePath()` + `resolve()` boundary check
-2. **SQL Injection**: Parameterized queries throughout
-3. **Parent Cycle Detection**: Validates task parent references
-
-## Performance Notes
-
-- Git branch cached per cwd (avoids repeated `execSync`)
-- Query limits default to 50 items
-- Indexes on frequently filtered columns
-- WAL mode for better read concurrency
-
-## Extension Events
-
-| Event | Handler |
-|-------|---------|
-| `before_agent_start` | Inject memory context into system prompt |
-| `session_shutdown` | Close database connection |
+- SQLite WAL mode (`PRAGMA journal_mode = WAL`)
+- Single DB connection per process (module-level singleton)
+- Synchronous operations (better-sqlite3)
+- `PRAGMA foreign_keys = ON`
 
 ## Dependencies
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| `better-sqlite3` | ^11.7.0 | Synchronous SQLite driver |
-| `@sinclair/typebox` | ^0.32.15 | Runtime type validation |
+| `better-sqlite3` | ^11.7.0 | Synchronous SQLite with FTS5 support |
+| `@sinclair/typebox` | ^0.32.15 | Runtime type validation for tools |
 | `@mariozechner/pi-coding-agent` | * | Pi extension API |
+| `pi-ext-shared` | local | Repo ID, DB path, SQLite helpers, tool factory |

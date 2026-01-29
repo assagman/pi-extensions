@@ -15,6 +15,7 @@
       "version": "1.0.0",
       "dependencies": {
         "@mariozechner/pi-coding-agent": "*",
+        "@mariozechner/pi-tui": "*",
         "@sinclair/typebox": "^0.32.15",
         "better-sqlite3": "^11.7.0",
         "pi-ext-shared": "../shared/core",
