@@ -229,8 +229,12 @@ export class Dashboard implements Component {
       if (this.focusedPane === "right" && this.cachedDisplayRows.length > 0) {
         const row = this.cachedDisplayRows[this.detailSelectedIndex];
         if (row?.source) {
-          const content = row.source.content;
-          if (content) {
+          // For tools, we can show schema even without content
+          const isTool = row.source.category === "tools";
+          const hasContent = row.source.content;
+          const hasSchema = isTool && this.capturedSchemas?.has(row.source.label);
+
+          if (hasContent || hasSchema) {
             this.contentViewSource = row.source;
             this.contentScrollOffset = 0;
             this._invalidate?.();
@@ -709,6 +713,77 @@ export class Dashboard implements Component {
 
     // Content area
     const contentH = height - 5; // top border + title + separator + bottom border + footer
+
+    // ── Special handling for tool sources ──
+    if (source.category === "tools") {
+      let formatted: string[] = [];
+
+      if (this.capturedSchemas) {
+        const toolName = source.label; // Tool label is the tool name
+        const schema = this.capturedSchemas.get(toolName);
+
+        if (schema) {
+          formatted = this.renderToolSchema(schema, innerW - 2, contentH);
+        } else {
+          // Schema not found - show available schemas for debugging
+          const available = Array.from(this.capturedSchemas.keys()).join(", ");
+          formatted = [
+            red("Schema not found"),
+            "",
+            `Looking for: ${yellow(toolName)}`,
+            "",
+            dim("Available schemas:"),
+            ...available.split(", ").map((name) => `  ${name}`),
+          ];
+        }
+      } else {
+        formatted = [
+          yellow("No schemas captured"),
+          "",
+          dim("Tool schemas are captured from the first API request."),
+          dim("If you're seeing this, schema capture may have failed."),
+        ];
+      }
+
+      const maxScroll = Math.max(0, formatted.length - contentH);
+      this.contentScrollOffset = Math.min(this.contentScrollOffset, maxScroll);
+      const visible = formatted.slice(
+        this.contentScrollOffset,
+        this.contentScrollOffset + contentH
+      );
+
+      for (let i = 0; i < contentH; i++) {
+        if (i < visible.length) {
+          const row = ` ${visible[i]}`;
+          lines.push(`${muted(V)}${fitToWidth(row, innerW)}${muted(V)}`);
+        } else {
+          lines.push(`${muted(V)}${" ".repeat(innerW)}${muted(V)}`);
+        }
+      }
+
+      // Bottom border
+      lines.push(muted(BL + H.repeat(innerW) + BR));
+
+      // Footer
+      const scrollInfo =
+        formatted.length > contentH
+          ? dim(
+              ` ${this.contentScrollOffset + 1}-${Math.min(this.contentScrollOffset + contentH, formatted.length)} of ${formatted.length} lines`
+            )
+          : dim(` ${formatted.length} lines`);
+      const footerKeys = dim("[j/k] scroll  [PgUp/Dn] page  [g] top  [Esc] back");
+      const footerGap = Math.max(
+        1,
+        width - visibleWidth(scrollInfo) - visibleWidth(footerKeys) - 2
+      );
+      lines.push(
+        truncateToWidth(`${scrollInfo}${" ".repeat(footerGap)}${footerKeys} `, width, "…")
+      );
+
+      return lines;
+    }
+
+    // ── Default content rendering ──
     const content = source.content ?? "(no content available)";
     const contentLines = content.split("\n");
 
@@ -752,6 +827,99 @@ export class Dashboard implements Component {
     lines.push(truncateToWidth(`${scrollInfo}${" ".repeat(footerGap)}${footerKeys} `, width, "…"));
 
     return lines;
+  }
+
+  /**
+   * Render a formatted tool schema.
+   */
+  private renderToolSchema(schema: NormalizedToolSchema, width: number, _height: number): string[] {
+    const lines: string[] = [];
+    const indent = "  ";
+
+    // Tool name
+    lines.push(yellow(bold(schema.name)));
+    lines.push("");
+
+    // Description
+    if (schema.description) {
+      lines.push(white("Description:"));
+      const descLines = this.wrapText(schema.description, width - indent.length);
+      for (const line of descLines) {
+        lines.push(indent + dim(line));
+      }
+      lines.push("");
+    }
+
+    // Schema tokens
+    lines.push(white("Token cost: ") + green(schema.tokens.toString()));
+    lines.push("");
+
+    // Parameters
+    const schemaObj = schema.schema as Record<string, unknown>;
+    if (schemaObj && typeof schemaObj === "object") {
+      lines.push(white("Parameters:"));
+
+      const properties = (schemaObj.properties || {}) as Record<string, Record<string, unknown>>;
+      const required = (schemaObj.required || []) as string[];
+
+      if (Object.keys(properties).length === 0) {
+        lines.push(indent + dim("(no parameters)"));
+      } else {
+        for (const [key, value] of Object.entries(properties)) {
+          const isRequired = required.includes(key);
+          const reqBadge = isRequired ? red("[required]") : dim("[optional]");
+          const type = value.type ? dim(`<${value.type}>`) : "";
+
+          lines.push(`${indent}${yellow(key)} ${type} ${reqBadge}`);
+
+          if (value.description) {
+            const descLines = this.wrapText(value.description, width - indent.length * 2);
+            for (const line of descLines) {
+              lines.push(indent + indent + dim(line));
+            }
+          }
+
+          if (value.enum) {
+            const enumStr = `Options: ${value.enum.join(", ")}`;
+            const enumLines = this.wrapText(enumStr, width - indent.length * 2);
+            for (const line of enumLines) {
+              lines.push(indent + indent + muted(line));
+            }
+          }
+
+          lines.push("");
+        }
+      }
+    }
+
+    return lines;
+  }
+
+  /**
+   * Wrap text to fit within specified width.
+   */
+  private wrapText(text: string, width: number): string[] {
+    const words = text.split(/\s+/);
+    const lines: string[] = [];
+    let currentLine = "";
+
+    for (const word of words) {
+      const testLine = currentLine ? `${currentLine} ${word}` : word;
+      if (visibleWidth(testLine) <= width) {
+        currentLine = testLine;
+      } else {
+        if (currentLine) {
+          lines.push(currentLine);
+        }
+        currentLine = word;
+      }
+    }
+
+    if (currentLine) {
+      lines.push(currentLine);
+    }
+
+    return lines.length > 0 ? lines : [""];
   }
 
   // ─────────────────────────────────────────────────────────────────────────
