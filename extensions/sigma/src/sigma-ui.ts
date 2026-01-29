@@ -4,7 +4,7 @@
  * Renders inside DimmedOverlay as a visually rich card with:
  *   - Rounded box border with top→bottom gradient (muted→dim)
  *   - Card background (distinct dark surface)
- *   - Accent-tinted banner header with ？ icon
+ *   - Accent-tinted banner header with sigma icon
  *   - Boxed number badges [1]…[9] for options, [0] for "Type something"
  *   - Bold accent selection indicator (focused option)
  *   - │-prefixed description blocks
@@ -51,6 +51,8 @@ const REVERSE = "\x1b[7m";
 const REVERSE_OFF = "\x1b[27m";
 /** Horizontal content padding (columns) inside card borders. */
 const PAD = 2;
+/** Sigma icon. */
+const ICON = "󱜹";
 
 // ── ANSI helpers ────────────────────────────────────────────────────────────
 
@@ -872,13 +874,13 @@ export function createSigmaUI<
       bannerIcon = "📜";
     } else if (q != null) {
       bannerLabel = q.label;
-      bannerIcon = "？";
+      bannerIcon = ICON;
     } else if (currentTab === questions.length) {
       bannerLabel = "Submit";
       bannerIcon = "✓";
     } else {
       bannerLabel = "Question";
-      bannerIcon = "？";
+      bannerIcon = ICON;
     }
     lines.push(bannerCardLine(bannerLabel, bannerIcon, innerW, borderColorName(row, totalRows)));
     row++;
