@@ -1,406 +1,230 @@
 /**
- * Delta v3 tools — memory operations only (no tasks).
+ * Delta v4 tools — Unified memory API.
  *
- * Tools: 16 total
- *   KV:       delta_get, delta_set, delta_delete (3)
- *   Episodic: delta_log, delta_recall, delta_episode_delete (3)
- *   Notes:    delta_note_create/list/update/delete/get (5)
- *   Index:    delta_index_search, delta_index_rebuild (2)
- *   Info:     delta_info (1)
- *   Version:  delta_version, delta_schema (2)
- *   Total:    16
+ * Tools:
+ * - delta_remember(content, tags, importance, context)
+ * - delta_search(query, tags, importance, limit, since, sessionOnly)
+ * - delta_forget(id)
+ * - delta_info()
+ * - delta_version()
+ * - delta_schema()
  */
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { createTool } from "pi-ext-shared";
 import {
-  type ListNotesOptions,
-  type ProjectNote,
-  type RecallOptions,
-  createNote,
-  deleteEpisode,
-  deleteNote,
+  type Importance,
+  type SearchOptions,
+  forget,
   getDatabaseSchema,
   getDbLocation,
-  getNote,
   getVersionInfo,
-  kvDelete,
-  kvGet,
-  kvSet,
-  listNotes,
-  logEpisode,
-  rebuildIndex,
-  recallEpisodes,
-  searchIndex,
-  updateNote,
+  remember,
+  search,
 } from "./db.js";
 
-// ============ Schemas ============
+// ============ Tool Schemas ============
 
-const GetSchema = Type.Object({
-  key: Type.String({ description: "Key to retrieve" }),
-});
-
-const SetSchema = Type.Object({
-  key: Type.String({ description: "Key to store" }),
-  value: Type.String({ description: "Value to store" }),
-});
-
-const DeleteSchema = Type.Object({
-  key: Type.String({ description: "Key to delete" }),
-});
-
-const LogSchema = Type.Object({
-  content: Type.String({ description: "Event/fact to remember" }),
-  context: Type.Optional(Type.String({ description: "Additional context (e.g., file, task)" })),
-  tags: Type.Optional(
-    Type.Array(Type.String(), {
-      description: "Tags for categorization (e.g., ['decision', 'bug'])",
-    })
-  ),
-});
-
-const RecallSchema = Type.Object({
-  query: Type.Optional(Type.String({ description: "Search term to filter content" })),
-  tags: Type.Optional(Type.Array(Type.String(), { description: "Filter by tags" })),
-  limit: Type.Optional(Type.Number({ description: "Max results (default: 20)" })),
-  sessionOnly: Type.Optional(
-    Type.Boolean({ description: "Only current session (default: false)" })
-  ),
-  since: Type.Optional(Type.Number({ description: "Unix timestamp to filter from" })),
-});
-
-const EpisodeDeleteSchema = Type.Object({
-  id: Type.Number({ description: "Episode ID to delete" }),
-});
-
-const NoteCategoryEnum = Type.Union([
-  Type.Literal("issue"),
-  Type.Literal("convention"),
-  Type.Literal("workflow"),
-  Type.Literal("reminder"),
-  Type.Literal("general"),
-]);
-
-const NoteImportanceEnum = Type.Union([
+const ImportanceEnum = Type.Union([
   Type.Literal("low"),
   Type.Literal("normal"),
   Type.Literal("high"),
   Type.Literal("critical"),
 ]);
 
-const NoteCreateSchema = Type.Object({
-  title: Type.String({ description: "Note title" }),
-  content: Type.String({ description: "Note content (markdown supported)" }),
-  category: Type.Optional(NoteCategoryEnum),
-  importance: Type.Optional(NoteImportanceEnum),
-  active: Type.Optional(
-    Type.Boolean({ description: "Whether note is active (loaded at session start)" })
-  ),
-});
-
-const NoteListSchema = Type.Object({
-  category: Type.Optional(NoteCategoryEnum),
-  importance: Type.Optional(NoteImportanceEnum),
-  activeOnly: Type.Optional(Type.Boolean({ description: "Only active notes (default: false)" })),
-  limit: Type.Optional(Type.Number()),
-});
-
-const NoteUpdateSchema = Type.Object({
-  id: Type.Number({ description: "Note ID to update" }),
-  title: Type.Optional(Type.String()),
-  content: Type.Optional(Type.String()),
-  category: Type.Optional(NoteCategoryEnum),
-  importance: Type.Optional(NoteImportanceEnum),
-  active: Type.Optional(Type.Boolean()),
-});
-
-const NoteDeleteSchema = Type.Object({
-  id: Type.Number({ description: "Note ID to delete" }),
-});
-
-const NoteGetSchema = Type.Object({
-  id: Type.Number({ description: "Note ID to retrieve" }),
-});
-
-const IndexSearchSchema = Type.Object({
-  query: Type.String({ description: "Search term to find in memory index summaries and keywords" }),
-  source_type: Type.Optional(
-    Type.Union([Type.Literal("note"), Type.Literal("episode"), Type.Literal("kv")], {
-      description: "Filter by source type",
+const RememberSchema = Type.Object({
+  content: Type.String({ description: "Memory content to store" }),
+  tags: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Classification tags (e.g., decision, preference, bug, workflow)",
     })
   ),
+  importance: Type.Optional(ImportanceEnum),
+  context: Type.Optional(Type.String({ description: "Additional context or metadata" })),
 });
 
-const IndexRebuildSchema = Type.Object({});
-const InfoSchema = Type.Object({});
-const VersionSchema = Type.Object({});
-const SchemaSchema = Type.Object({});
+const SearchSchema = Type.Object({
+  query: Type.Optional(
+    Type.String({ description: "FTS5 full-text search query (searches content/tags/context)" })
+  ),
+  tags: Type.Optional(
+    Type.Array(Type.String(), { description: "Filter by tags (OR semantics — any match)" })
+  ),
+  importance: Type.Optional(ImportanceEnum),
+  limit: Type.Optional(Type.Number({ description: "Max results (default: 50)" })),
+  since: Type.Optional(
+    Type.Number({ description: "Only memories created after this timestamp (ms)" })
+  ),
+  sessionOnly: Type.Optional(
+    Type.Boolean({ description: "Only memories from current session (default: false)" })
+  ),
+});
 
-// ============ Helpers ============
+const ForgetSchema = Type.Object({
+  id: Type.Number({ description: "Memory ID to delete" }),
+});
 
-function formatNote(note: ProjectNote): string {
-  const date = new Date(note.created_at).toISOString().split("T")[0];
-  const activeStr = note.active ? "active" : "archived";
-  const impStr = note.importance !== "normal" ? ` [${note.importance.toUpperCase()}]` : "";
-  return `#${note.id}${impStr} ${note.title}\n  ${note.category} | ${activeStr} | ${date}\n  ${note.content.substring(0, 100)}${note.content.length > 100 ? "..." : ""}`;
-}
+// ============ Tool Definitions ============
 
-// ============ KV Tools ============
+const deltaRemember = createTool(
+  "delta_remember",
+  "Remember",
+  "Store a new memory. Use after making decisions, discovering bugs, learning patterns, or finding important information. Supports tags for classification and importance levels (low/normal/high/critical).",
+  RememberSchema,
+  (input) => {
+    const id = remember(input.content, {
+      tags: input.tags,
+      importance: input.importance as Importance | undefined,
+      context: input.context,
+    });
 
-const deltaGet = createTool(
-  "delta_get",
-  "Memory Get",
-  "Get a value from persistent key-value memory. Returns null if key doesn't exist.",
-  GetSchema,
-  ({ key }) => {
-    const value = kvGet(key);
-    return value === null ? `Key "${key}" not found` : value;
+    const tagsStr = input.tags && input.tags.length > 0 ? ` {${input.tags.join(", ")}}` : "";
+    const impStr = input.importance ? ` [${input.importance}]` : "";
+    return `✓ Stored memory #${id}${impStr}${tagsStr}`;
   }
 );
 
-const deltaSet = createTool(
-  "delta_set",
-  "Memory Set",
-  "Store a key-value pair in persistent memory. Overwrites if key exists.",
-  SetSchema,
-  ({ key, value }) => {
-    kvSet(key, value);
-    return `Stored "${key}"`;
-  }
-);
+const deltaSearch = createTool(
+  "delta_search",
+  "Search",
+  "Search memories using full-text search and/or structured filters. Returns matching memories with ID, content, tags, importance, and timestamps. Use to recall past decisions, find patterns, or check previous context.",
+  SearchSchema,
+  (input) => {
+    const opts: SearchOptions = {
+      query: input.query,
+      tags: input.tags,
+      importance: input.importance as Importance | undefined,
+      limit: input.limit,
+      since: input.since,
+      sessionOnly: input.sessionOnly,
+    };
 
-const deltaDelete = createTool(
-  "delta_delete",
-  "Memory Delete",
-  "Delete a key from persistent memory.",
-  DeleteSchema,
-  ({ key }) => {
-    const deleted = kvDelete(key);
-    return deleted ? `Deleted "${key}"` : `Key "${key}" not found`;
-  }
-);
+    const results = search(opts);
 
-// ============ Episodic Tools ============
-
-const deltaLog = createTool(
-  "delta_log",
-  "Memory Log",
-  "Log an event, decision, or fact to episodic memory with timestamp. CALL AFTER: making architecture decisions, finding bugs, discovering patterns, encountering gotchas, completing milestones. Use tags like ['decision'], ['bug'], ['pattern'], ['gotcha'].",
-  LogSchema,
-  ({ content, context, tags }) => {
-    const id = logEpisode(content, context, tags);
-    return `Logged episode #${id}`;
-  }
-);
-
-const deltaRecall = createTool(
-  "delta_recall",
-  "Memory Recall",
-  "Search past events in episodic memory. CALL to recall decisions, bugs, patterns from previous sessions. Filter by text query, tags, time range, or current session only.",
-  RecallSchema,
-  (options) => {
-    const episodes = recallEpisodes(options as RecallOptions);
-
-    if (episodes.length === 0) {
-      return "No episodes found matching criteria";
+    if (results.length === 0) {
+      return "No memories found matching your query.";
     }
 
-    const formatted = episodes
-      .map((ep) => {
-        const date = new Date(ep.timestamp).toISOString();
-        const tagsStr = ep.tags.length > 0 ? ` [${ep.tags.join(", ")}]` : "";
-        const ctxStr = ep.context ? ` (${ep.context})` : "";
-        return `#${ep.id} ${date}${tagsStr}${ctxStr}\n  ${ep.content}`;
-      })
-      .join("\n\n");
+    const lines: string[] = [];
+    lines.push(`Found ${results.length} ${results.length === 1 ? "memory" : "memories"}:\n`);
 
-    return `Found ${episodes.length} episodes:\n\n${formatted}`;
+    for (const mem of results) {
+      const impBadge = mem.importance !== "normal" ? ` [${mem.importance.toUpperCase()}]` : "";
+      const tagStr = mem.tags.length > 0 ? ` {${mem.tags.join(", ")}}` : "";
+      const sessionStr = mem.session_id ? "" : " (archived)";
+      const date = new Date(mem.created_at).toISOString().split("T")[0];
+
+      lines.push(`## Memory #${mem.id}${impBadge}${tagStr}${sessionStr}`);
+      lines.push(`Created: ${date}`);
+      if (mem.context) {
+        lines.push(`Context: ${mem.context}`);
+      }
+      lines.push("");
+      lines.push(mem.content);
+      lines.push("");
+      lines.push("---");
+      lines.push("");
+    }
+
+    return lines.join("\n");
   }
 );
 
-const deltaEpisodeDelete = createTool(
-  "delta_episode_delete",
-  "Delete Episode",
-  "Delete an episode from episodic memory by ID.",
-  EpisodeDeleteSchema,
-  ({ id }) => {
-    const deleted = deleteEpisode(id);
-    return deleted ? `Deleted episode #${id}` : `Episode #${id} not found`;
-  }
-);
-
-// ============ Note Tools ============
-
-const deltaNoteCreate = createTool(
-  "delta_note_create",
-  "Create Note",
-  "Create a project note for persistent knowledge. CALL WHEN: you identify a reusable pattern, coding convention, build/deploy workflow, recurring issue, or important reminder. Categories: issue (bugs, workarounds), convention (code patterns, decisions), workflow (build/deploy/test), reminder (common mistakes). Notes marked 'active' are auto-loaded at session start.",
-  NoteCreateSchema,
+const deltaForget = createTool(
+  "delta_forget",
+  "Forget",
+  "Delete a memory by ID. Use to remove outdated, incorrect, or no-longer-relevant memories. Returns success status.",
+  ForgetSchema,
   (input) => {
-    const id = createNote(input);
-    const note = getNote(id);
-    return `Created note #${id}:\n${note ? formatNote(note) : ""}`;
+    const deleted = forget(input.id);
+    if (deleted) {
+      return `✓ Deleted memory #${input.id}`;
+    }
+    return `✗ Memory #${input.id} not found`;
   }
 );
-
-const deltaNoteList = createTool(
-  "delta_note_list",
-  "List Notes",
-  "List project notes with optional filters.",
-  NoteListSchema,
-  (options) => {
-    const notes = listNotes(options as ListNotesOptions);
-    if (notes.length === 0) return "No notes found matching criteria";
-    return `Found ${notes.length} notes:\n\n${notes.map(formatNote).join("\n\n")}`;
-  }
-);
-
-const deltaNoteUpdate = createTool(
-  "delta_note_update",
-  "Update Note",
-  "Update an existing project note. Set active=false to archive.",
-  NoteUpdateSchema,
-  ({ id, ...updates }) => {
-    const updated = updateNote(id, updates);
-    if (!updated) return `Note #${id} not found`;
-    const note = getNote(id);
-    return `Updated note #${id}:\n${note ? formatNote(note) : ""}`;
-  }
-);
-
-const deltaNoteDelete = createTool(
-  "delta_note_delete",
-  "Delete Note",
-  "Permanently delete a project note.",
-  NoteDeleteSchema,
-  ({ id }) => {
-    const deleted = deleteNote(id);
-    return deleted ? `Deleted note #${id}` : `Note #${id} not found`;
-  }
-);
-
-const deltaNoteGet = createTool(
-  "delta_note_get",
-  "Get Note",
-  "Get a single project note by ID with full content.",
-  NoteGetSchema,
-  ({ id }) => {
-    const note = getNote(id);
-    if (!note) return `Note #${id} not found`;
-    const date = new Date(note.created_at).toISOString().split("T")[0];
-    const activeStr = note.active ? "active" : "archived";
-    const impStr = note.importance !== "normal" ? ` [${note.importance.toUpperCase()}]` : "";
-    return `#${note.id}${impStr} ${note.title}\n${note.category} | ${activeStr} | ${date}\n\n${note.content}`;
-  }
-);
-
-// ============ Index Tools ============
-
-const deltaIndexSearch = createTool(
-  "delta_index_search",
-  "Search Memory Index",
-  "Search all memories by keyword. CALL FIRST before starting any new task — check for relevant past decisions, known issues, conventions. Returns entries from notes, episodes, and kv with source references.",
-  IndexSearchSchema,
-  ({ query, source_type }) => {
-    const results = searchIndex(query, source_type);
-    if (results.length === 0) return "No matching memory entries found";
-
-    const prefixMap: Record<string, string> = { note: "N", episode: "E", kv: "K" };
-    const formatted = results
-      .map((e) => {
-        const prefix = prefixMap[e.source_type] || "?";
-        const imp = e.importance !== "normal" ? ` [${e.importance.toUpperCase()}]` : "";
-        const kw = e.keywords ? ` (${e.keywords})` : "";
-        return `[${prefix}${e.source_id}]${imp} ${e.summary}${kw}`;
-      })
-      .join("\n");
-
-    return `Found ${results.length} matching entries:\n\n${formatted}`;
-  }
-);
-
-const deltaIndexRebuild = createTool(
-  "delta_index_rebuild",
-  "Rebuild Memory Index",
-  "Force rebuild the memory index from all source tables. Use if index appears stale or after manual DB edits.",
-  IndexRebuildSchema,
-  () => {
-    const count = rebuildIndex();
-    return `Memory index rebuilt: ${count} entries indexed`;
-  }
-);
-
-// ============ Info & Version Tools ============
 
 const deltaInfo = createTool(
   "delta_info",
   "Memory Info",
-  "Get information about the delta memory database location and stats.",
-  InfoSchema,
-  () => `Database location: ${getDbLocation()}`
+  "Show Delta database location and basic statistics. Use to check where memories are stored or verify database status.",
+  Type.Object({}),
+  () => {
+    const dbPath = getDbLocation();
+    const versionInfo = getVersionInfo();
+    const memories = search({ limit: 1000 }); // Get all for stats
+    const total = memories.length;
+
+    const byCriticality = {
+      critical: memories.filter((m) => m.importance === "critical").length,
+      high: memories.filter((m) => m.importance === "high").length,
+      normal: memories.filter((m) => m.importance === "normal").length,
+      low: memories.filter((m) => m.importance === "low").length,
+    };
+
+    const lines: string[] = [];
+    lines.push("# Delta Memory Database");
+    lines.push("");
+    lines.push(`**Location**: \`${dbPath}\``);
+    lines.push(
+      `**Schema Version**: ${versionInfo.current} ${versionInfo.match ? "✓" : `(shipped: ${versionInfo.shipped})`}`
+    );
+    lines.push("");
+    lines.push(`**Total Memories**: ${total}`);
+    if (total > 0) {
+      lines.push(`- Critical: ${byCriticality.critical}`);
+      lines.push(`- High: ${byCriticality.high}`);
+      lines.push(`- Normal: ${byCriticality.normal}`);
+      lines.push(`- Low: ${byCriticality.low}`);
+    }
+
+    return lines.join("\n");
+  }
 );
 
 const deltaVersion = createTool(
   "delta_version",
-  "DB Version",
-  "Reports the shipped extension DB version alongside the current database's stored version. Shows whether they match or if the DB is outdated. Use to detect schema mismatches before/after upgrades.",
-  VersionSchema,
+  "Schema Version",
+  "Show Delta schema version information. Use to check for schema mismatches or verify migrations.",
+  Type.Object({}),
   () => {
     const info = getVersionInfo();
-    const currentStr =
-      info.current === null ? "unversioned (pre-versioning DB)" : String(info.current);
-    const status = info.match
-      ? "✓ Up to date"
-      : info.current === null
-        ? "⚠ MISMATCH — DB predates versioning system"
-        : info.current < info.shipped
-          ? `⚠ MISMATCH — DB is behind (${info.current} → ${info.shipped})`
-          : `⚠ MISMATCH — DB is ahead (${info.current} > ${info.shipped})`;
+    const lines: string[] = [];
+    lines.push("# Delta Schema Version");
+    lines.push("");
+    lines.push(`**Current**: ${info.current ?? "unknown"}`);
+    lines.push(`**Shipped**: ${info.shipped}`);
+    lines.push(`**Status**: ${info.match ? "✓ Up to date" : "⚠ Version mismatch"}`);
 
-    return [
-      "Database Version Info",
-      `  Shipped (code):  ${info.shipped}`,
-      `  Current (DB):    ${currentStr}`,
-      `  Status:          ${status}`,
-      info.match ? "" : "\nUse delta_schema to inspect current DB structure.",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    if (!info.match) {
+      lines.push("");
+      lines.push(
+        "_Note: Schema version mismatch may indicate incomplete migration or outdated extension._"
+      );
+    }
+
+    return lines.join("\n");
   }
 );
 
 const deltaSchema = createTool(
   "delta_schema",
   "DB Schema",
-  "Dumps the complete DDL schema of the current database — all tables, indexes, triggers, and other objects. For diagnostics and migration planning.",
-  SchemaSchema,
-  () => getDatabaseSchema()
+  "Dump the full database schema (tables, indexes, triggers). Use for debugging or understanding the storage structure.",
+  Type.Object({}),
+  () => {
+    const schema = getDatabaseSchema();
+    return `# Delta Database Schema\n\n\`\`\`sql\n${schema}\n\`\`\``;
+  }
 );
 
-// ============ Export ============
+// ============ Tool Registration ============
 
 export function registerTools(pi: ExtensionAPI): void {
-  // KV
-  pi.registerTool(deltaGet);
-  pi.registerTool(deltaSet);
-  pi.registerTool(deltaDelete);
-  // Episodic
-  pi.registerTool(deltaLog);
-  pi.registerTool(deltaRecall);
-  pi.registerTool(deltaEpisodeDelete);
-  // Notes
-  pi.registerTool(deltaNoteCreate);
-  pi.registerTool(deltaNoteList);
-  pi.registerTool(deltaNoteUpdate);
-  pi.registerTool(deltaNoteDelete);
-  pi.registerTool(deltaNoteGet);
-  // Memory Index
-  pi.registerTool(deltaIndexSearch);
-  pi.registerTool(deltaIndexRebuild);
-  // Info
+  pi.registerTool(deltaRemember);
+  pi.registerTool(deltaSearch);
+  pi.registerTool(deltaForget);
   pi.registerTool(deltaInfo);
-  // Version & Schema
   pi.registerTool(deltaVersion);
   pi.registerTool(deltaSchema);
 }
