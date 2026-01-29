@@ -366,30 +366,23 @@ export function getTaskSummary(): TaskSummary {
 // ============ Prompt Builder ============
 
 export interface PromptOptions {
-  instructions?: boolean;
   summary?: TaskSummary;
 }
 
 export function buildTasksPrompt(options: PromptOptions = {}): string {
-  const includeInstructions = options.instructions !== false;
   const summary = options.summary ?? getTaskSummary();
   const lines: string[] = [];
 
   lines.push("<epsilon_tasks>");
   lines.push("");
-
-  if (includeInstructions) {
-    lines.push("## Task Workflow");
-    lines.push(
-      "1. **ALWAYS create tasks BEFORE acting** — Every work item gets a task via epsilon_task_create before execution begins"
-    );
-    lines.push(
-      "2. **ALWAYS update tasks AFTER acting** — Update status (in_progress/done/blocked), progress, and completion via epsilon_task_update"
-    );
-    lines.push("3. Mark tasks done when complete — no task left behind");
-    lines.push("4. Check **epsilon_task_list** before creating to avoid duplicates");
-    lines.push("");
-  }
+  lines.push("## Task Tracking");
+  lines.push(
+    "Non-trivial changes (2+ files, features, refactors, bug fixes, schema/API) → create task first, set in_progress, mark done when finished."
+  );
+  lines.push(
+    "Trivial changes (single-file typo, formatting, comment) → no task needed. If it grows to 2+ files, create a task then continue."
+  );
+  lines.push("");
 
   const activeCount = summary.todo + summary.in_progress + summary.blocked;
   if (activeCount > 0) {
@@ -412,6 +405,8 @@ export function buildTasksPrompt(options: PromptOptions = {}): string {
   );
   lines.push("");
 
+  lines.push("Create tasks with epsilon_task_create, update with epsilon_task_update.");
+  lines.push("");
   lines.push("</epsilon_tasks>");
 
   return lines.join("\n");
