@@ -280,6 +280,11 @@ class DimmedDialogComponent implements Component {
   /** Exclusion zone (dialog + glow rect). Set on first render. */
   private exZone: { top: number; bot: number; left: number; right: number } | null = null;
 
+  // Scrim row cache (only rebuilt on terminal resize)
+  private cachedScrimRows: string[] = [];
+  private cachedScrimWidth = 0;
+  private cachedScrimHeight = 0;
+
   constructor(tui: TUI, dialog: Component, cfg: ResolvedConfig) {
     this.tui = tui;
     this.dialog = dialog;
@@ -432,6 +437,39 @@ class DimmedDialogComponent implements Component {
     return result + RESET;
   }
 
+  // ── Scrim cache ───────────────────────────────────────────────────────
+
+  private ensureScrimCache(width: number, rows: number): void {
+    if (
+      this.cachedScrimWidth === width &&
+      this.cachedScrimHeight === rows &&
+      this.cachedScrimRows.length > 0
+    ) {
+      return; // Cache is valid
+    }
+
+    const SCRIM = this.scrimEsc;
+    const scrimFull = `${SCRIM}${" ".repeat(width)}${RESET}`;
+
+    // Build star lookup once
+    const starLookup =
+      this.cfg.scrim.stars && this.stars.length > 0 ? this.buildStarLookup(width, rows) : null;
+
+    // Pre-render all scrim rows
+    this.cachedScrimRows = [];
+    for (let r = 0; r < rows; r++) {
+      const rowStars = starLookup?.get(r);
+      if (rowStars && rowStars.length > 0) {
+        this.cachedScrimRows.push(this.renderScrimRowWithStars(width, rowStars));
+      } else {
+        this.cachedScrimRows.push(scrimFull);
+      }
+    }
+
+    this.cachedScrimWidth = width;
+    this.cachedScrimHeight = rows;
+  }
+
   // ── Main render ───────────────────────────────────────────────────────
 
   render(width: number): string[] {
@@ -485,12 +523,8 @@ class DimmedDialogComponent implements Component {
       this.generateStars(rows, width);
     }
 
-    // ── Star lookup ───────────────────────────────────────────────────
-    const starLookup =
-      this.cfg.scrim.stars && this.stars.length > 0 ? this.buildStarLookup(width, rows) : null;
-
-    // ── Precompute scrim fill ─────────────────────────────────────────
-    const scrimFull = `${SCRIM}${" ".repeat(width)}${RESET}`;
+    // ── Cache scrim rows (only rebuilds on resize) ────────────────────
+    this.ensureScrimCache(width, rows);
 
     // ── Glow row bounds ───────────────────────────────────────────────
     const glowRowAbove = glowEnabled ? startRow - 1 : -1;
@@ -532,13 +566,8 @@ class DimmedDialogComponent implements Component {
         continue;
       }
 
-      // ── Scrim rows (with optional stars) ────────────────────────────
-      const rowStars = starLookup?.get(r);
-      if (rowStars && rowStars.length > 0) {
-        result.push(this.renderScrimRowWithStars(width, rowStars));
-      } else {
-        result.push(scrimFull);
-      }
+      // ── Scrim rows (from cache) ─────────────────────────────────────
+      result.push(this.cachedScrimRows[r]);
     }
 
     return result;

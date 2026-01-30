@@ -22,6 +22,9 @@ export interface CommitInfo {
   sha: string;
   shortSha: string;
   subject: string;
+  author?: string;
+  date?: string;
+  body?: string;
   isUncommitted?: boolean;
 }
 
@@ -123,7 +126,9 @@ export class DiffService {
    * @param limit Number of commits to fetch
    */
   async getCommits(skip = 0, limit = 50): Promise<CommitInfo[]> {
-    const format = "%H%x00%h%x00%s"; // full sha, short sha, subject (NUL-separated)
+    // Format: full sha, short sha, subject, author name, author date (ISO), body
+    // Use \x1e (record separator) between commits to avoid splitting on \n\n in bodies
+    const format = "%H%x00%h%x00%s%x00%an%x00%ai%x00%b%x1e";
     const cmd = `git log --format="${format}" --skip=${skip} -n ${limit} -- .`;
 
     try {
@@ -132,10 +137,21 @@ export class DiffService {
         maxBuffer: 1024 * 1024 * 10,
       });
 
-      const lines = stdout.trim().split("\n").filter(Boolean);
-      return lines.map((line) => {
-        const [sha, shortSha, subject] = line.split("\x00");
-        return { sha, shortSha, subject };
+      const records = stdout
+        .trim()
+        .split("\x1e")
+        .filter((r) => r.trim());
+      return records.map((block) => {
+        const [sha, shortSha, subject, author, date, ...bodyParts] = block.trim().split("\x00");
+        const body = bodyParts.join("\x00").trim();
+        return {
+          sha,
+          shortSha,
+          subject,
+          author,
+          date,
+          body: body || undefined,
+        };
       });
     } catch {
       return [];

@@ -27,11 +27,17 @@ theta/
 
 | Item | Detail |
 |------|--------|
-| Command | `/theta` — opens 3-column dashboard |
+| Commands | `/theta` — commit history mode<br>`/theta base..head` — branch comparison mode |
 | Layout | Commits (20%) \| Files (20%) \| Diff (60%) |
+| Search & Filter | `/` key enters search mode, filters all panels<br>Commits: SHA/subject/author/body<br>Files: path<br>Diff: content with highlighting |
+| Match navigation | `n`/`N` for next/prev match, `Ctrl+I` case toggle |
+| Line numbers | Old\|New line numbers shown in diff gutter (8 chars) |
+| Commit metadata | Author, date shown in footer for selected commit |
+| Statistics | Files changed, +additions, -deletions in footer |
 | Commit loading | Dynamic batches of 50, loads more on scroll |
 | Uncommitted | Auto-detected, shown as first entry |
 | Navigation | Vim-style: h/l panels, j/k scroll, PgUp/PgDn fast scroll |
+| Help overlay | `?` key toggles keyboard shortcuts popup |
 | Diff parsing | `@pierre/diffs` library for structured diff metadata |
 | Dependencies | `@mariozechner/pi-tui`, `@pierre/diffs` |
 | Tests | None currently |
