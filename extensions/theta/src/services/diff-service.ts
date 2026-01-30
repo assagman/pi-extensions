@@ -159,36 +159,6 @@ export class DiffService {
   }
 
   /**
-   * Get detailed commit information
-   * @param sha Commit SHA
-   */
-  async getCommitInfo(sha: string): Promise<CommitInfo | null> {
-    const format = "%H%x00%h%x00%s%x00%an%x00%ai%x00%b";
-    const cmd = `git log --format="${format}" -n 1 ${sha}`;
-
-    try {
-      const { stdout } = await execAsync(cmd, {
-        cwd: process.cwd(),
-        maxBuffer: 1024 * 1024,
-      });
-
-      const [fullSha, shortSha, subject, author, date, ...bodyParts] = stdout.trim().split("\x00");
-      const body = bodyParts.join("\x00").trim();
-
-      return {
-        sha: fullSha,
-        shortSha,
-        subject,
-        author,
-        date,
-        body: body || undefined,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  /**
    * Get diff for a single commit (commit vs its parent)
    * @param sha Commit SHA
    * @param file Optional file path to filter

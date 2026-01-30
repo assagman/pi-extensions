@@ -1,19 +1,29 @@
 import { visibleWidth } from "@mariozechner/pi-tui";
 import type { DiffFile } from "../../services/diff-service.js";
 import { padToWidth, truncateStartToWidth } from "../text-utils.js";
-import type { Panel } from "../types.js";
+import type { Panel, PanelComponent } from "../types.js";
 
-export class FilePanel {
+export class FilePanel implements PanelComponent {
   files: DiffFile[] = [];
   filteredFiles: DiffFile[] = [];
   matchIndices: number[] = [];
   index = 0;
   scrollOffset = 0;
+  isFiltered = false;
+
+  get filterMatchCount(): number {
+    return this.isFiltered ? this.filteredFiles.length : 0;
+  }
+
+  get filterCurrentIndex(): number {
+    return this.index;
+  }
 
   applyFilter(query: string, caseSensitive: boolean): void {
     if (!query) {
       this.filteredFiles = this.files;
       this.matchIndices = [];
+      this.isFiltered = false;
       return;
     }
 
@@ -30,19 +40,19 @@ export class FilePanel {
         this.filteredFiles.push(file);
       }
     }
+    this.isFiltered = true;
   }
 
   clearFilter(): void {
     this.filteredFiles = this.files;
     this.matchIndices = [];
+    this.isFiltered = false;
     this.index = 0;
     this.scrollOffset = 0;
   }
 
   getDisplayFiles(): DiffFile[] {
-    return this.filteredFiles.length > 0 || this.matchIndices.length > 0
-      ? this.filteredFiles
-      : this.files;
+    return this.isFiltered ? this.filteredFiles : this.files;
   }
 
   render(

@@ -1,9 +1,9 @@
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { CommitInfo } from "../../services/diff-service.js";
 import { padToWidth } from "../text-utils.js";
-import type { Panel } from "../types.js";
+import type { Panel, PanelComponent } from "../types.js";
 
-export class CommitPanel {
+export class CommitPanel implements PanelComponent {
   commits: CommitInfo[] = [];
   filteredCommits: CommitInfo[] = [];
   matchIndices: number[] = [];
@@ -11,11 +11,21 @@ export class CommitPanel {
   scrollOffset = 0;
   isLoading = false;
   hasMore = true;
+  isFiltered = false;
+
+  get filterMatchCount(): number {
+    return this.isFiltered ? this.filteredCommits.length : 0;
+  }
+
+  get filterCurrentIndex(): number {
+    return this.index;
+  }
 
   applyFilter(query: string, caseSensitive: boolean): void {
     if (!query) {
       this.filteredCommits = this.commits;
       this.matchIndices = [];
+      this.isFiltered = false;
       return;
     }
 
@@ -34,19 +44,19 @@ export class CommitPanel {
         this.filteredCommits.push(commit);
       }
     }
+    this.isFiltered = true;
   }
 
   clearFilter(): void {
     this.filteredCommits = this.commits;
     this.matchIndices = [];
+    this.isFiltered = false;
     this.index = 0;
     this.scrollOffset = 0;
   }
 
   getDisplayCommits(): CommitInfo[] {
-    return this.filteredCommits.length > 0 || this.matchIndices.length > 0
-      ? this.filteredCommits
-      : this.commits;
+    return this.isFiltered ? this.filteredCommits : this.commits;
   }
 
   render(

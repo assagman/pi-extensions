@@ -5,7 +5,7 @@ import { CommitPanel } from "./panels/commit-panel.js";
 import { DiffPanel } from "./panels/diff-panel.js";
 import { FilePanel } from "./panels/file-panel.js";
 import { padToWidth } from "./text-utils.js";
-import { type Panel, UNCOMMITTED_SHA } from "./types.js";
+import { type Panel, type PanelComponent, UNCOMMITTED_SHA } from "./types.js";
 
 const COMMIT_BATCH_SIZE = 50;
 
@@ -13,8 +13,6 @@ interface SearchState {
   active: boolean;
   panel: Panel;
   query: string;
-  matchCount: number;
-  currentMatch: number;
   caseSensitive: boolean;
 }
 
@@ -28,8 +26,6 @@ export class Dashboard implements Component {
     active: false,
     panel: "commits",
     query: "",
-    matchCount: 0,
-    currentMatch: 0,
     caseSensitive: false,
   };
 
@@ -37,6 +33,12 @@ export class Dashboard implements Component {
   private readonly filePanel = new FilePanel();
   private readonly diffPanel = new DiffPanel();
   private readonly diffService = new DiffService();
+
+  private readonly panelMap: Record<Panel, PanelComponent> = {
+    commits: this.commitPanel,
+    files: this.filePanel,
+    diff: this.diffPanel,
+  };
 
   constructor(
     private tui: TUI,
@@ -79,7 +81,7 @@ export class Dashboard implements Component {
         if (this.filePanel.files.length > 0) {
           await this.selectFileBranchMode(0);
         } else {
-          this.diffPanel.content = "No differences between refs.";
+          this.diffPanel.setContent("No differences between refs.");
           this.refresh();
         }
         return;
@@ -107,11 +109,11 @@ export class Dashboard implements Component {
       if (this.commitPanel.commits.length > 0) {
         await this.selectCommit(0);
       } else {
-        this.diffPanel.content = "No commits or changes found.";
+        this.diffPanel.setContent("No commits or changes found.");
         this.refresh();
       }
     } catch {
-      this.diffPanel.content = "Error loading commits.";
+      this.diffPanel.setContent("Error loading commits.");
       this.refresh();
     }
   }
@@ -128,7 +130,7 @@ export class Dashboard implements Component {
     if (!commit) return;
 
     this.selectedCommit = commit;
-    this.diffPanel.content = "Loading...";
+    this.diffPanel.setContent("Loading...");
     this.filePanel.files = [];
     this.refresh();
 
@@ -148,12 +150,12 @@ export class Dashboard implements Component {
       if (this.filePanel.files.length > 0) {
         await this.selectFile(0, commit);
       } else {
-        this.diffPanel.content = "No changes in this commit.";
+        this.diffPanel.setContent("No changes in this commit.");
         this.refresh();
       }
     } catch {
       if (this.commitPanel.index === index) {
-        this.diffPanel.content = "Error loading commit diff.";
+        this.diffPanel.setContent("Error loading commit diff.");
         this.refresh();
       }
     }
@@ -169,7 +171,7 @@ export class Dashboard implements Component {
     const currentCommit = commit || this.commitPanel.commits[this.commitPanel.index];
     if (!currentCommit) return;
 
-    this.diffPanel.content = `Loading diff for ${file.path}...`;
+    this.diffPanel.setContent(`Loading diff for ${file.path}...`);
     this.refresh();
 
     try {
@@ -181,12 +183,12 @@ export class Dashboard implements Component {
         this.filePanel.index === index &&
         this.commitPanel.commits[this.commitPanel.index]?.sha === currentCommit.sha
       ) {
-        this.diffPanel.content = result.raw || "No changes in file.";
+        this.diffPanel.setContent(result.raw || "No changes in file.");
         this.refresh();
       }
     } catch {
       if (this.filePanel.index === index) {
-        this.diffPanel.content = "Error loading diff.";
+        this.diffPanel.setContent("Error loading diff.");
         this.refresh();
       }
     }
@@ -201,7 +203,7 @@ export class Dashboard implements Component {
     const file = this.filePanel.files[index];
     if (!file) return;
 
-    this.diffPanel.content = `Loading diff for ${file.path}...`;
+    this.diffPanel.setContent(`Loading diff for ${file.path}...`);
     this.refresh();
 
     try {
@@ -212,12 +214,12 @@ export class Dashboard implements Component {
       );
 
       if (this.filePanel.index === index) {
-        this.diffPanel.content = result.raw || "No changes in file.";
+        this.diffPanel.setContent(result.raw || "No changes in file.");
         this.refresh();
       }
     } catch {
       if (this.filePanel.index === index) {
-        this.diffPanel.content = "Error loading diff.";
+        this.diffPanel.setContent("Error loading diff.");
         this.refresh();
       }
     }
@@ -252,6 +254,10 @@ export class Dashboard implements Component {
     this.tui.requestRender();
   }
 
+  private get activeSearchPanel(): PanelComponent {
+    return this.panelMap[this.searchState.panel];
+  }
+
   private renderSearchBar(width: number): string {
     if (!this.searchState.active) return "";
 
@@ -260,9 +266,12 @@ export class Dashboard implements Component {
     const cursor = "█";
     const caseSensitiveIndicator = this.searchState.caseSensitive ? " [Aa]" : "";
 
+    const matchCount = this.activeSearchPanel.filterMatchCount;
+    const currentMatch = this.activeSearchPanel.filterCurrentIndex;
+
     let matchInfo = "";
-    if (this.searchState.matchCount > 0) {
-      matchInfo = ` ${this.theme.fg("success", `${this.searchState.currentMatch + 1}/${this.searchState.matchCount} matches`)}`;
+    if (matchCount > 0) {
+      matchInfo = ` ${this.theme.fg("success", `${currentMatch + 1}/${matchCount} matches`)}`;
     } else if (query.length > 0) {
       matchInfo = ` ${this.theme.fg("error", "0 matches")}`;
     }
@@ -424,21 +433,17 @@ export class Dashboard implements Component {
     this.searchState.active = true;
     this.searchState.panel = this.activePanel;
     this.searchState.query = "";
-    this.searchState.matchCount = 0;
-    this.searchState.currentMatch = 0;
     this.refresh();
   }
 
   private exitSearchMode() {
     this.searchState.active = false;
     this.searchState.query = "";
-    this.searchState.matchCount = 0;
-    this.searchState.currentMatch = 0;
 
-    // Clear filters
+    // Clear filters on all panels
     this.commitPanel.clearFilter();
     this.filePanel.clearFilter();
-    this.diffPanel.clearMatches();
+    this.diffPanel.clearFilter();
 
     this.refresh();
   }
@@ -501,33 +506,18 @@ export class Dashboard implements Component {
   }
 
   private applySearch() {
-    const query = this.searchState.query;
-    const caseSensitive = this.searchState.caseSensitive;
-
-    if (this.searchState.panel === "commits") {
-      this.commitPanel.applyFilter(query, caseSensitive);
-      this.searchState.matchCount = this.commitPanel.filteredCommits.length;
-      this.searchState.currentMatch = 0;
-    } else if (this.searchState.panel === "files") {
-      this.filePanel.applyFilter(query, caseSensitive);
-      this.searchState.matchCount = this.filePanel.filteredFiles.length;
-      this.searchState.currentMatch = 0;
-    } else if (this.searchState.panel === "diff") {
-      this.diffPanel.findMatches(query, caseSensitive);
-      this.searchState.matchCount = this.diffPanel.matchPositions.length;
-      this.searchState.currentMatch = this.diffPanel.currentMatchIndex;
-    }
-
+    const { query, caseSensitive } = this.searchState;
+    this.activeSearchPanel.applyFilter(query, caseSensitive);
     this.refresh();
   }
 
   private applySearchFilter() {
     // For commits and files, move selection to first match
-    if (this.searchState.panel === "commits" && this.commitPanel.filteredCommits.length > 0) {
+    if (this.searchState.panel === "commits" && this.commitPanel.filterMatchCount > 0) {
       this.commitPanel.index = 0;
       this.commitPanel.scrollOffset = 0;
       this.selectCommit(0);
-    } else if (this.searchState.panel === "files" && this.filePanel.filteredFiles.length > 0) {
+    } else if (this.searchState.panel === "files" && this.filePanel.filterMatchCount > 0) {
       this.filePanel.index = 0;
       this.filePanel.scrollOffset = 0;
       const selectFn = this.branchMode
@@ -541,17 +531,13 @@ export class Dashboard implements Component {
   private nextSearchMatch() {
     if (this.searchState.panel === "diff") {
       this.diffPanel.nextMatch();
-      this.searchState.currentMatch = this.diffPanel.currentMatchIndex;
       this.refresh();
-    } else if (
-      this.searchState.panel === "commits" &&
-      this.commitPanel.filteredCommits.length > 0
-    ) {
-      const newIndex = (this.commitPanel.index + 1) % this.commitPanel.filteredCommits.length;
+    } else if (this.searchState.panel === "commits" && this.commitPanel.filterMatchCount > 0) {
+      const newIndex = (this.commitPanel.index + 1) % this.commitPanel.filterMatchCount;
       this.commitPanel.index = newIndex;
       this.selectCommit(newIndex);
-    } else if (this.searchState.panel === "files" && this.filePanel.filteredFiles.length > 0) {
-      const newIndex = (this.filePanel.index + 1) % this.filePanel.filteredFiles.length;
+    } else if (this.searchState.panel === "files" && this.filePanel.filterMatchCount > 0) {
+      const newIndex = (this.filePanel.index + 1) % this.filePanel.filterMatchCount;
       this.filePanel.index = newIndex;
       const selectFn = this.branchMode
         ? (idx: number) => this.selectFileBranchMode(idx)
@@ -563,21 +549,17 @@ export class Dashboard implements Component {
   private prevSearchMatch() {
     if (this.searchState.panel === "diff") {
       this.diffPanel.prevMatch();
-      this.searchState.currentMatch = this.diffPanel.currentMatchIndex;
       this.refresh();
-    } else if (
-      this.searchState.panel === "commits" &&
-      this.commitPanel.filteredCommits.length > 0
-    ) {
+    } else if (this.searchState.panel === "commits" && this.commitPanel.filterMatchCount > 0) {
       const newIndex =
-        (this.commitPanel.index - 1 + this.commitPanel.filteredCommits.length) %
-        this.commitPanel.filteredCommits.length;
+        (this.commitPanel.index - 1 + this.commitPanel.filterMatchCount) %
+        this.commitPanel.filterMatchCount;
       this.commitPanel.index = newIndex;
       this.selectCommit(newIndex);
-    } else if (this.searchState.panel === "files" && this.filePanel.filteredFiles.length > 0) {
+    } else if (this.searchState.panel === "files" && this.filePanel.filterMatchCount > 0) {
       const newIndex =
-        (this.filePanel.index - 1 + this.filePanel.filteredFiles.length) %
-        this.filePanel.filteredFiles.length;
+        (this.filePanel.index - 1 + this.filePanel.filterMatchCount) %
+        this.filePanel.filterMatchCount;
       this.filePanel.index = newIndex;
       const selectFn = this.branchMode
         ? (idx: number) => this.selectFileBranchMode(idx)
@@ -593,8 +575,6 @@ export class Dashboard implements Component {
       this.searchState.panel = "files";
     }
     this.searchState.query = "";
-    this.searchState.matchCount = 0;
-    this.searchState.currentMatch = 0;
     this.refresh();
   }
 
@@ -605,8 +585,6 @@ export class Dashboard implements Component {
       this.searchState.panel = "diff";
     }
     this.searchState.query = "";
-    this.searchState.matchCount = 0;
-    this.searchState.currentMatch = 0;
     this.refresh();
   }
 

@@ -1,5 +1,6 @@
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { diffWordsWithSpace } from "diff";
+import type { PanelComponent } from "../types.js";
 
 export interface DiffStats {
   additions: number;
@@ -37,8 +38,8 @@ interface WordHighlight {
   segments: WordSegment[];
 }
 
-export class DiffPanel {
-  content = "Loading...";
+export class DiffPanel implements PanelComponent {
+  private content = "Loading...";
   scrollOffset = 0;
   maxLines = 0;
   totalStats: DiffStats | null = null;
@@ -46,6 +47,14 @@ export class DiffPanel {
   matchPositions: LineMatch[] = [];
   currentMatchIndex = 0;
   enableWordDiff = true;
+
+  get filterMatchCount(): number {
+    return this.matchPositions.length;
+  }
+
+  get filterCurrentIndex(): number {
+    return this.currentMatchIndex;
+  }
   wordHighlights: Map<number, WordHighlight> = new Map();
 
   findMatches(query: string, caseSensitive: boolean): void {
@@ -109,6 +118,14 @@ export class DiffPanel {
     this.currentMatchIndex = 0;
   }
 
+  applyFilter(query: string, caseSensitive: boolean): void {
+    this.findMatches(query, caseSensitive);
+  }
+
+  clearFilter(): void {
+    this.clearMatches();
+  }
+
   setContent(content: string): void {
     this.content = content;
     this.computeWordHighlights();
@@ -116,26 +133,37 @@ export class DiffPanel {
 
   private findModifiedLinePairs(lines: string[]): LinePair[] {
     const pairs: LinePair[] = [];
+    let i = 0;
 
-    for (let i = 0; i < lines.length - 1; i++) {
-      const curr = lines[i];
-      const next = lines[i + 1];
+    while (i < lines.length) {
+      // Collect contiguous deletion lines (excluding --- headers)
+      const deletions: { index: number; text: string }[] = [];
+      while (i < lines.length && lines[i].startsWith("-") && !lines[i].startsWith("---")) {
+        deletions.push({ index: i, text: lines[i].substring(1) });
+        i++;
+      }
 
-      // Check if current is deletion and next is addition
-      // Exclude file headers (---/+++) which also start with -/+
-      if (
-        curr.startsWith("-") &&
-        !curr.startsWith("---") &&
-        next.startsWith("+") &&
-        !next.startsWith("+++")
-      ) {
+      // Collect contiguous addition lines (excluding +++ headers)
+      const additions: { index: number; text: string }[] = [];
+      while (i < lines.length && lines[i].startsWith("+") && !lines[i].startsWith("+++")) {
+        additions.push({ index: i, text: lines[i].substring(1) });
+        i++;
+      }
+
+      // Pair deletions and additions 1:1 (up to the shorter count)
+      const pairCount = Math.min(deletions.length, additions.length);
+      for (let j = 0; j < pairCount; j++) {
         pairs.push({
-          deletionIndex: i,
-          additionIndex: i + 1,
-          deletionLine: curr.substring(1), // Strip '-' prefix
-          additionLine: next.substring(1), // Strip '+' prefix
+          deletionIndex: deletions[j].index,
+          additionIndex: additions[j].index,
+          deletionLine: deletions[j].text,
+          additionLine: additions[j].text,
         });
-        i++; // Skip next line since we paired it
+      }
+
+      // If no block was found, advance past the current line
+      if (deletions.length === 0 && additions.length === 0) {
+        i++;
       }
     }
 
@@ -305,7 +333,15 @@ export class DiffPanel {
 
       // Priority: search highlights > word highlights > normal
       if (matchesOnLine.length > 0) {
-        // Highlight matches in this line
+        // Determine line-type color for non-match segments
+        let lineColor: string;
+        if (l.startsWith("+")) lineColor = "success";
+        else if (l.startsWith("-")) lineColor = "error";
+        else if (l.startsWith("@@")) lineColor = "accent";
+        else if (l.startsWith("diff ") || l.startsWith("index ")) lineColor = "dim";
+        else lineColor = "text";
+
+        // Highlight matches in this line — apply line color per-segment, not globally
         const parts: string[] = [];
         let lastEnd = 0;
 
@@ -315,12 +351,12 @@ export class DiffPanel {
         for (const match of sortedMatches) {
           const isCurrentMatch = this.matchPositions.indexOf(match) === this.currentMatchIndex;
 
-          // Add text before match
+          // Add text before match (with line-type color)
           if (match.startCol > lastEnd) {
-            parts.push(l.substring(lastEnd, match.startCol));
+            parts.push(theme.fg(lineColor, l.substring(lastEnd, match.startCol)));
           }
 
-          // Add highlighted match
+          // Add highlighted match (no line color — match styling only)
           const matchText = l.substring(match.startCol, match.startCol + match.length);
           if (isCurrentMatch) {
             parts.push(theme.bg("selectedBg", theme.fg("accent", matchText)));
@@ -331,24 +367,16 @@ export class DiffPanel {
           lastEnd = match.startCol + match.length;
         }
 
-        // Add remaining text
+        // Add remaining text (with line-type color)
         if (lastEnd < l.length) {
-          parts.push(l.substring(lastEnd));
+          parts.push(theme.fg(lineColor, l.substring(lastEnd)));
         }
 
         const reconstructed = parts.join("");
-        const truncated =
+        styledLine =
           visibleWidth(reconstructed) > contentWidth
             ? truncateToWidth(reconstructed, contentWidth, "…")
             : reconstructed;
-
-        // Apply line color
-        if (l.startsWith("+")) styledLine = theme.fg("success", truncated);
-        else if (l.startsWith("-")) styledLine = theme.fg("error", truncated);
-        else if (l.startsWith("@@")) styledLine = theme.fg("accent", truncated);
-        else if (l.startsWith("diff ") || l.startsWith("index "))
-          styledLine = theme.fg("dim", truncated);
-        else styledLine = theme.fg("text", truncated);
       } else if (wordHighlight) {
         // Word-level highlighting for modified lines
         styledLine = this.renderWordHighlight(wordHighlight, theme, contentWidth);
