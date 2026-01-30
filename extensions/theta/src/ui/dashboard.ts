@@ -9,9 +9,29 @@ import { type Panel, UNCOMMITTED_SHA } from "./types.js";
 
 const COMMIT_BATCH_SIZE = 50;
 
+interface SearchState {
+  active: boolean;
+  panel: Panel;
+  query: string;
+  matchCount: number;
+  currentMatch: number;
+  caseSensitive: boolean;
+}
+
 export class Dashboard implements Component {
   private activePanel: Panel = "commits";
   private contentHeight = 10;
+  private selectedCommit: CommitInfo | null = null;
+  private showHelp = false;
+  private branchMode: { base: string; head: string } | null = null;
+  private searchState: SearchState = {
+    active: false,
+    panel: "commits",
+    query: "",
+    matchCount: 0,
+    currentMatch: 0,
+    caseSensitive: false,
+  };
 
   private readonly commitPanel = new CommitPanel();
   private readonly filePanel = new FilePanel();
@@ -23,8 +43,13 @@ export class Dashboard implements Component {
     // biome-ignore lint/suspicious/noExplicitAny: Theme type not exported from pi-tui
     private theme: any,
     // biome-ignore lint/suspicious/noExplicitAny: Callback result type varies
-    private done: (result: any) => void
+    private done: (result: any) => void,
+    base?: string,
+    head?: string
   ) {
+    if (base && head) {
+      this.branchMode = { base, head };
+    }
     this.init();
   }
 
@@ -32,6 +57,35 @@ export class Dashboard implements Component {
 
   private async init() {
     try {
+      // Branch comparison mode
+      if (this.branchMode) {
+        this.selectedCommit = {
+          sha: "",
+          shortSha: "—",
+          subject: `${this.branchMode.base}..${this.branchMode.head}`,
+        };
+        this.commitPanel.commits = [this.selectedCommit];
+        this.diffPanel.setContent("Loading...");
+        this.refresh();
+
+        const result = await this.diffService.getDiff(this.branchMode.base, this.branchMode.head);
+        this.filePanel.files = result.files;
+        this.diffPanel.totalStats = {
+          additions: result.files.reduce((sum, f) => sum + f.additions, 0),
+          deletions: result.files.reduce((sum, f) => sum + f.deletions, 0),
+          filesChanged: result.files.length,
+        };
+
+        if (this.filePanel.files.length > 0) {
+          await this.selectFileBranchMode(0);
+        } else {
+          this.diffPanel.content = "No differences between refs.";
+          this.refresh();
+        }
+        return;
+      }
+
+      // Normal commit history mode
       const hasUncommitted = await this.diffService.hasUncommittedChanges();
       const commits = await this.diffService.getCommits(0, COMMIT_BATCH_SIZE);
       this.commitPanel.hasMore = commits.length === COMMIT_BATCH_SIZE;
@@ -73,6 +127,7 @@ export class Dashboard implements Component {
     const commit = this.commitPanel.commits[index];
     if (!commit) return;
 
+    this.selectedCommit = commit;
     this.diffPanel.content = "Loading...";
     this.filePanel.files = [];
     this.refresh();
@@ -84,6 +139,11 @@ export class Dashboard implements Component {
 
       if (this.commitPanel.index !== index) return; // stale
       this.filePanel.files = result.files;
+      this.diffPanel.totalStats = {
+        additions: result.files.reduce((sum, f) => sum + f.additions, 0),
+        deletions: result.files.reduce((sum, f) => sum + f.deletions, 0),
+        filesChanged: result.files.length,
+      };
 
       if (this.filePanel.files.length > 0) {
         await this.selectFile(0, commit);
@@ -132,6 +192,37 @@ export class Dashboard implements Component {
     }
   }
 
+  private async selectFileBranchMode(index: number) {
+    if (!this.branchMode) return;
+
+    this.filePanel.index = index;
+    this.diffPanel.scrollOffset = 0;
+
+    const file = this.filePanel.files[index];
+    if (!file) return;
+
+    this.diffPanel.content = `Loading diff for ${file.path}...`;
+    this.refresh();
+
+    try {
+      const result = await this.diffService.getDiff(
+        this.branchMode.base,
+        this.branchMode.head,
+        file.path
+      );
+
+      if (this.filePanel.index === index) {
+        this.diffPanel.content = result.raw || "No changes in file.";
+        this.refresh();
+      }
+    } catch {
+      if (this.filePanel.index === index) {
+        this.diffPanel.content = "Error loading diff.";
+        this.refresh();
+      }
+    }
+  }
+
   private async loadMoreCommits() {
     if (this.commitPanel.isLoading || !this.commitPanel.hasMore) return;
 
@@ -161,7 +252,92 @@ export class Dashboard implements Component {
     this.tui.requestRender();
   }
 
+  private renderSearchBar(width: number): string {
+    if (!this.searchState.active) return "";
+
+    const panelName = this.searchState.panel.toUpperCase();
+    const query = this.searchState.query;
+    const cursor = "█";
+    const caseSensitiveIndicator = this.searchState.caseSensitive ? " [Aa]" : "";
+
+    let matchInfo = "";
+    if (this.searchState.matchCount > 0) {
+      matchInfo = ` ${this.theme.fg("success", `${this.searchState.currentMatch + 1}/${this.searchState.matchCount} matches`)}`;
+    } else if (query.length > 0) {
+      matchInfo = ` ${this.theme.fg("error", "0 matches")}`;
+    }
+
+    const searchPrompt = `Search (${panelName.toLowerCase()}): ${query}${cursor}${caseSensitiveIndicator}${matchInfo}`;
+    const helpText = " [Enter] Apply  [Esc] Cancel  [Ctrl+I] Case  [n/N] Next/Prev  [h/l] Panel";
+
+    const line = this.theme.fg("accent", searchPrompt) + this.theme.fg("dim", helpText);
+    return padToWidth(line, width);
+  }
+
+  private renderHelp(width: number, height: number): string[] {
+    const lines: string[] = [];
+    const helpContent = [
+      "THETA KEYBOARD SHORTCUTS",
+      "",
+      "Navigation:",
+      "  h/l        Switch panel left/right",
+      "  j/k ↓/↑    Move selection / scroll down/up",
+      "  PgUp/PgDn  Fast scroll (20 lines)",
+      "  Ctrl+u/d   Fast scroll (alternative)",
+      "",
+      "Actions:",
+      "  ?          Toggle this help",
+      "  q / Esc    Close dashboard",
+      "",
+      "Panels:",
+      "  COMMITS    Browse commit history",
+      "  FILES      View changed files",
+      "  DIFF       Inspect file diffs",
+      "",
+      "Press any key to close",
+    ];
+
+    const maxLineWidth = Math.max(...helpContent.map((l) => l.length));
+    const boxWidth = Math.min(width - 4, maxLineWidth + 4);
+    const boxHeight = Math.min(height - 2, helpContent.length + 2);
+
+    const startRow = Math.floor((height - boxHeight) / 2);
+    const startCol = Math.floor((width - boxWidth) / 2);
+
+    // Fill with empty lines before box
+    for (let i = 0; i < startRow; i++) {
+      lines.push("");
+    }
+
+    // Top border
+    lines.push(" ".repeat(startCol) + this.theme.fg("accent", `┌${"─".repeat(boxWidth - 2)}┐`));
+
+    // Content
+    for (let i = 0; i < boxHeight - 2 && i < helpContent.length; i++) {
+      const content = helpContent[i] || "";
+      const padded = content.padEnd(boxWidth - 4);
+      lines.push(
+        " ".repeat(startCol) +
+          this.theme.fg("accent", "│ ") +
+          this.theme.fg(content.startsWith(" ") ? "text" : "accent", padded) +
+          this.theme.fg("accent", " │")
+      );
+    }
+
+    // Bottom border
+    lines.push(" ".repeat(startCol) + this.theme.fg("accent", `└${"─".repeat(boxWidth - 2)}┘`));
+
+    return lines;
+  }
+
   render(width: number): string[] {
+    const termRows = this.tui.terminal.rows || 24;
+
+    // Show help overlay if active
+    if (this.showHelp) {
+      return this.renderHelp(width, termRows);
+    }
+
     const commitWidth = Math.floor(width * 0.2);
     const fileWidth = Math.floor(width * 0.2);
     const diffWidth = width - commitWidth - fileWidth - 2;
@@ -183,8 +359,7 @@ export class Dashboard implements Component {
         mkHeader("DIFF", "diff", diffWidth)
     );
 
-    // Content height
-    const termRows = this.tui.terminal.rows || 24;
+    // Content height (termRows already set above for help check)
     this.contentHeight = Math.max(10, termRows - 3);
 
     // Panel contents
@@ -209,25 +384,261 @@ export class Dashboard implements Component {
       lines.push(left + sep + mid + sep + right);
     }
 
-    // Footer
-    const scrollInfo =
-      this.diffPanel.maxLines > this.contentHeight
-        ? ` (${this.diffPanel.scrollOffset + 1}-${Math.min(this.diffPanel.scrollOffset + this.contentHeight, this.diffPanel.maxLines)}/${this.diffPanel.maxLines})`
+    // Footer - Commit metadata line
+    if (this.selectedCommit && !this.selectedCommit.isUncommitted) {
+      const author = this.selectedCommit.author || "Unknown";
+      const date = this.selectedCommit.date
+        ? new Date(this.selectedCommit.date).toLocaleDateString()
         : "";
-    const loadingIndicator = this.commitPanel.isLoading ? " [loading...]" : "";
-    lines.push(
-      this.theme.fg(
-        "dim",
-        ` [h/l] Panel  [j/k] Navigate  [PgUp/PgDn] Fast  [q] Quit${scrollInfo}${loadingIndicator}`
-      )
-    );
+      const metaLine = ` ${author}${date ? ` · ${date}` : ""}`;
+      lines.push(this.theme.fg("dim", padToWidth(metaLine, width)));
+    }
+
+    // Footer - Search bar or Stats and keybindings
+    if (this.searchState.active) {
+      lines.push(this.renderSearchBar(width));
+    } else {
+      const scrollInfo =
+        this.diffPanel.maxLines > this.contentHeight
+          ? ` ${this.diffPanel.scrollOffset + 1}-${Math.min(this.diffPanel.scrollOffset + this.contentHeight, this.diffPanel.maxLines)}/${this.diffPanel.maxLines}`
+          : "";
+      const stats = this.diffPanel.totalStats
+        ? ` ${this.diffPanel.totalStats.filesChanged} files · ${this.theme.fg("success", `+${this.diffPanel.totalStats.additions}`)} ${this.theme.fg("error", `-${this.diffPanel.totalStats.deletions}`)}`
+        : "";
+      const loadingIndicator = this.commitPanel.isLoading ? " [loading...]" : "";
+      const keybinds = "[h/l] Panel [j/k] Nav [PgUp/Dn] Fast [/] Search [?] Help [q] Quit";
+
+      lines.push(
+        this.theme.fg("dim", ` ${keybinds}`) +
+          stats +
+          this.theme.fg("dim", scrollInfo + loadingIndicator)
+      );
+    }
 
     return lines;
+  }
+
+  // ── Search handling ─────────────────────────────────────────────────
+
+  private enterSearchMode() {
+    this.searchState.active = true;
+    this.searchState.panel = this.activePanel;
+    this.searchState.query = "";
+    this.searchState.matchCount = 0;
+    this.searchState.currentMatch = 0;
+    this.refresh();
+  }
+
+  private exitSearchMode() {
+    this.searchState.active = false;
+    this.searchState.query = "";
+    this.searchState.matchCount = 0;
+    this.searchState.currentMatch = 0;
+
+    // Clear filters
+    this.commitPanel.clearFilter();
+    this.filePanel.clearFilter();
+    this.diffPanel.clearMatches();
+
+    this.refresh();
+  }
+
+  private handleSearchInput(data: string) {
+    // Exit search mode
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+      this.exitSearchMode();
+      return;
+    }
+
+    // Toggle case sensitivity
+    if (matchesKey(data, "ctrl+i")) {
+      this.searchState.caseSensitive = !this.searchState.caseSensitive;
+      this.applySearch();
+      return;
+    }
+
+    // Apply filter (for commits/files)
+    if (matchesKey(data, "return")) {
+      this.applySearchFilter();
+      return;
+    }
+
+    // Navigate matches
+    if (matchesKey(data, "n")) {
+      this.nextSearchMatch();
+      return;
+    }
+    if (data === "N") {
+      this.prevSearchMatch();
+      return;
+    }
+
+    // Switch panel during search
+    if (matchesKey(data, "h")) {
+      this.switchSearchPanelLeft();
+      return;
+    }
+    if (matchesKey(data, "l")) {
+      this.switchSearchPanelRight();
+      return;
+    }
+
+    // Backspace
+    if (matchesKey(data, "backspace")) {
+      if (this.searchState.query.length > 0) {
+        this.searchState.query = this.searchState.query.slice(0, -1);
+        this.applySearch();
+      }
+      return;
+    }
+
+    // Regular text input
+    if (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) <= 126) {
+      this.searchState.query += data;
+      this.applySearch();
+      return;
+    }
+  }
+
+  private applySearch() {
+    const query = this.searchState.query;
+    const caseSensitive = this.searchState.caseSensitive;
+
+    if (this.searchState.panel === "commits") {
+      this.commitPanel.applyFilter(query, caseSensitive);
+      this.searchState.matchCount = this.commitPanel.filteredCommits.length;
+      this.searchState.currentMatch = 0;
+    } else if (this.searchState.panel === "files") {
+      this.filePanel.applyFilter(query, caseSensitive);
+      this.searchState.matchCount = this.filePanel.filteredFiles.length;
+      this.searchState.currentMatch = 0;
+    } else if (this.searchState.panel === "diff") {
+      this.diffPanel.findMatches(query, caseSensitive);
+      this.searchState.matchCount = this.diffPanel.matchPositions.length;
+      this.searchState.currentMatch = this.diffPanel.currentMatchIndex;
+    }
+
+    this.refresh();
+  }
+
+  private applySearchFilter() {
+    // For commits and files, move selection to first match
+    if (this.searchState.panel === "commits" && this.commitPanel.filteredCommits.length > 0) {
+      this.commitPanel.index = 0;
+      this.commitPanel.scrollOffset = 0;
+      this.selectCommit(0);
+    } else if (this.searchState.panel === "files" && this.filePanel.filteredFiles.length > 0) {
+      this.filePanel.index = 0;
+      this.filePanel.scrollOffset = 0;
+      const selectFn = this.branchMode
+        ? (idx: number) => this.selectFileBranchMode(idx)
+        : (idx: number) => this.selectFile(idx);
+      selectFn(0);
+    }
+    this.refresh();
+  }
+
+  private nextSearchMatch() {
+    if (this.searchState.panel === "diff") {
+      this.diffPanel.nextMatch();
+      this.searchState.currentMatch = this.diffPanel.currentMatchIndex;
+      this.refresh();
+    } else if (
+      this.searchState.panel === "commits" &&
+      this.commitPanel.filteredCommits.length > 0
+    ) {
+      const newIndex = (this.commitPanel.index + 1) % this.commitPanel.filteredCommits.length;
+      this.commitPanel.index = newIndex;
+      this.selectCommit(newIndex);
+    } else if (this.searchState.panel === "files" && this.filePanel.filteredFiles.length > 0) {
+      const newIndex = (this.filePanel.index + 1) % this.filePanel.filteredFiles.length;
+      this.filePanel.index = newIndex;
+      const selectFn = this.branchMode
+        ? (idx: number) => this.selectFileBranchMode(idx)
+        : (idx: number) => this.selectFile(idx);
+      selectFn(newIndex);
+    }
+  }
+
+  private prevSearchMatch() {
+    if (this.searchState.panel === "diff") {
+      this.diffPanel.prevMatch();
+      this.searchState.currentMatch = this.diffPanel.currentMatchIndex;
+      this.refresh();
+    } else if (
+      this.searchState.panel === "commits" &&
+      this.commitPanel.filteredCommits.length > 0
+    ) {
+      const newIndex =
+        (this.commitPanel.index - 1 + this.commitPanel.filteredCommits.length) %
+        this.commitPanel.filteredCommits.length;
+      this.commitPanel.index = newIndex;
+      this.selectCommit(newIndex);
+    } else if (this.searchState.panel === "files" && this.filePanel.filteredFiles.length > 0) {
+      const newIndex =
+        (this.filePanel.index - 1 + this.filePanel.filteredFiles.length) %
+        this.filePanel.filteredFiles.length;
+      this.filePanel.index = newIndex;
+      const selectFn = this.branchMode
+        ? (idx: number) => this.selectFileBranchMode(idx)
+        : (idx: number) => this.selectFile(idx);
+      selectFn(newIndex);
+    }
+  }
+
+  private switchSearchPanelLeft() {
+    if (this.searchState.panel === "files") {
+      this.searchState.panel = "commits";
+    } else if (this.searchState.panel === "diff") {
+      this.searchState.panel = "files";
+    }
+    this.searchState.query = "";
+    this.searchState.matchCount = 0;
+    this.searchState.currentMatch = 0;
+    this.refresh();
+  }
+
+  private switchSearchPanelRight() {
+    if (this.searchState.panel === "commits") {
+      this.searchState.panel = "files";
+    } else if (this.searchState.panel === "files") {
+      this.searchState.panel = "diff";
+    }
+    this.searchState.query = "";
+    this.searchState.matchCount = 0;
+    this.searchState.currentMatch = 0;
+    this.refresh();
   }
 
   // ── Input handling ──────────────────────────────────────────────────
 
   handleInput(data: string) {
+    // Toggle help overlay
+    if (matchesKey(data, "?")) {
+      this.showHelp = !this.showHelp;
+      this.refresh();
+      return;
+    }
+
+    // Close help overlay with any key
+    if (this.showHelp) {
+      this.showHelp = false;
+      this.refresh();
+      return;
+    }
+
+    // Search mode input handling
+    if (this.searchState.active) {
+      this.handleSearchInput(data);
+      return;
+    }
+
+    // Enter search mode
+    if (matchesKey(data, "/")) {
+      this.enterSearchMode();
+      return;
+    }
+
     if (matchesKey(data, "q") || matchesKey(data, "escape")) {
       this.done(null);
       return;
@@ -259,6 +670,9 @@ export class Dashboard implements Component {
   }
 
   private navCommits(down: boolean, up: boolean, pgDown: boolean, pgUp: boolean) {
+    // Disable commit navigation in branch mode
+    if (this.branchMode) return;
+
     const len = this.commitPanel.commits.length;
     if (len === 0) return;
 
@@ -290,22 +704,26 @@ export class Dashboard implements Component {
     const len = this.filePanel.files.length;
     if (len === 0) return;
 
+    const selectFn = this.branchMode
+      ? (idx: number) => this.selectFileBranchMode(idx)
+      : (idx: number) => this.selectFile(idx);
+
     if (down && this.filePanel.index < len - 1) {
-      this.selectFile(this.filePanel.index + 1);
+      selectFn(this.filePanel.index + 1);
       return;
     }
     if (up && this.filePanel.index > 0) {
-      this.selectFile(this.filePanel.index - 1);
+      selectFn(this.filePanel.index - 1);
       return;
     }
     if (pgDown) {
       const n = Math.min(this.filePanel.index + 20, len - 1);
-      if (n !== this.filePanel.index) this.selectFile(n);
+      if (n !== this.filePanel.index) selectFn(n);
       return;
     }
     if (pgUp) {
       const p = Math.max(0, this.filePanel.index - 20);
-      if (p !== this.filePanel.index) this.selectFile(p);
+      if (p !== this.filePanel.index) selectFn(p);
       return;
     }
   }
