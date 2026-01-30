@@ -332,7 +332,7 @@ export class App implements Component {
       "",
       "Actions:",
       "  ?          Toggle this help",
-      "  Ctrl+S     Toggle SBS / Unified diff view",
+      "  u          Toggle SBS / Unified diff view",
       "  q / Esc    Close dashboard",
       "",
       "Panels:",
@@ -469,7 +469,7 @@ export class App implements Component {
         : "";
       const loadingIndicator = this.commitPanel.isLoading ? " [loading...]" : "";
       const keybinds =
-        "[h/l] Panel [j/k] Nav [PgUp/Dn] ½Page [^S] View [/] Search [?] Help [q] Quit";
+        "[h/l] Panel [j/k] Nav [PgUp/Dn] ½Page [u] View [/] Search [?] Help [q] Quit";
 
       lines.push(
         this.theme.fg("dim", ` ${keybinds}`) +
@@ -656,7 +656,7 @@ export class App implements Component {
       return;
     }
 
-    if (matchesKey(data, "ctrl+s")) {
+    if (matchesKey(data, "u")) {
       this.diffPanel.toggleViewMode();
       this.refresh();
       return;

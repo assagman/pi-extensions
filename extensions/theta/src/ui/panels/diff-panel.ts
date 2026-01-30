@@ -5,7 +5,7 @@
  *   SBS (side-by-side): OLD (left) │ NEW (right) + scrollbar gutter
  *   Unified:            old│new line nums + single full-width column + scrollbar gutter
  *
- * Toggle: Ctrl+S (via App.handleInput → diffPanel.toggleViewMode())
+ * Toggle: u (via App.handleInput → diffPanel.toggleViewMode())
  *
  * Rendering pipeline:
  *   1. setContent(): parse raw lines → SideBySideRow[] + UnifiedRow[] + word-diffs + detect lang
