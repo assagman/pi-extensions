@@ -332,12 +332,13 @@ export class App implements Component {
       "",
       "Actions:",
       "  ?          Toggle this help",
+      "  Ctrl+S     Toggle SBS / Unified diff view",
       "  q / Esc    Close dashboard",
       "",
       "Panels:",
       "  COMMITS    Browse commit history",
       "  FILES      View changed files",
-      "  DIFF       Inspect file diffs (side-by-side)",
+      "  DIFF       Inspect file diffs (SBS or Unified)",
       "",
       "Press any key to close",
     ];
@@ -423,7 +424,10 @@ export class App implements Component {
     // ── Diff Header ──────────────────────────────────────────────
     const diffActive = this.activePanel === "diff";
     const currentFile = this.filePanel.getDisplayFiles()[this.filePanel.index];
-    const filePath = currentFile ? ` DIFF · ${currentFile.path}` : " DIFF";
+    const modeLabel = this.diffPanel.viewMode === "sbs" ? "SBS" : "UNI";
+    const filePath = currentFile
+      ? ` DIFF · ${currentFile.path} [${modeLabel}]`
+      : ` DIFF [${modeLabel}]`;
     const diffHeader = this.theme.fg(diffActive ? "accent" : "dim", padToWidth(filePath, width));
     lines.push(diffActive ? this.theme.bg("selectedBg", diffHeader) : diffHeader);
 
@@ -465,7 +469,7 @@ export class App implements Component {
         : "";
       const loadingIndicator = this.commitPanel.isLoading ? " [loading...]" : "";
       const keybinds =
-        "[h/l] Panel [j/k] Nav [PgUp/Dn] ½Page [Home/End] Jump [/] Search [?] Help [q] Quit";
+        "[h/l] Panel [j/k] Nav [PgUp/Dn] ½Page [^S] View [/] Search [?] Help [q] Quit";
 
       lines.push(
         this.theme.fg("dim", ` ${keybinds}`) +
@@ -649,6 +653,12 @@ export class App implements Component {
 
     if (matchesKey(data, "/")) {
       this.enterSearchMode();
+      return;
+    }
+
+    if (matchesKey(data, "ctrl+s")) {
+      this.diffPanel.toggleViewMode();
+      this.refresh();
       return;
     }
 

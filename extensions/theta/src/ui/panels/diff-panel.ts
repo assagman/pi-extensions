@@ -1,16 +1,20 @@
 /**
- * DiffPanel — Side-by-side diff viewer with syntax highlighting.
+ * DiffPanel — Dual-mode diff viewer with syntax highlighting.
  *
- * Layout: OLD (left) │ NEW (right) + scrollbar gutter
+ * Modes:
+ *   SBS (side-by-side): OLD (left) │ NEW (right) + scrollbar gutter
+ *   Unified:            old│new line nums + single full-width column + scrollbar gutter
+ *
+ * Toggle: Ctrl+S (via App.handleInput → diffPanel.toggleViewMode())
  *
  * Rendering pipeline:
- *   1. setContent(): parse raw lines → SideBySideRow[] + word-diffs + detect language
- *   2. precomputeStyles(): for each row, produce styled ANSI string with:
+ *   1. setContent(): parse raw lines → SideBySideRow[] + UnifiedRow[] + word-diffs + detect lang
+ *   2. precomputeStyles()/precomputeUnifiedStyles(): per-row styled ANSI strings with:
  *      - Syntax-highlighted code (keyword/string/comment/type/function colors)
  *      - Line backgrounds (red for deletions, green for additions)
  *      - Word-diff backgrounds (brighter red/green for changed words)
  *   3. render(): viewport slice of pre-computed lines + scrollbar gutter
- *   4. Search: dynamic re-render with match highlights overlaid
+ *   4. Search: dynamic re-render with match highlights overlaid (both modes)
  */
 
 import { visibleWidth } from "@mariozechner/pi-tui";
@@ -79,6 +83,19 @@ interface WordHighlight {
 /** Line type determines background coloring. */
 type LineType = "deletion" | "addition" | "context";
 
+/** Unified-mode row — 1:1 mapping from raw diff lines. */
+interface UnifiedRow {
+  type: "header" | "context" | "deletion" | "addition";
+  text: string;
+  oldLineNum?: number;
+  newLineNum?: number;
+  rawIndex: number;
+  headerText?: string;
+}
+
+/** Unified mode line-number width: old(3) + sep(1) + new(3) + space(1) = 8 */
+const UNIFIED_NUM_W = LINE_NUM_W * 2;
+
 // ── DiffPanel ─────────────────────────────────────────────────────────────
 
 export class DiffPanel implements PanelComponent {
@@ -89,6 +106,7 @@ export class DiffPanel implements PanelComponent {
   totalStats: DiffStats | null = null;
   showLineNumbers = true;
   enableWordDiff = true;
+  viewMode: "sbs" | "unified" = "sbs";
 
   // ── Language ────────────────────────────────────────────────────────
   private language = "text";
@@ -103,12 +121,15 @@ export class DiffPanel implements PanelComponent {
   private cachedRawLines: string[] = [];
   private sbsRows: SideBySideRow[] = [];
   private rawLineToSbsRow: number[] = [];
+  private unifiedRows: UnifiedRow[] = [];
   private wordHighlightsByLine: (WordHighlight | undefined)[] = [];
 
   // ── Pre-computed styled lines ───────────────────────────────────────
   private precomputedLines: string[] = [];
   private precomputedLeftW = 0;
   private precomputedRightW = 0;
+  private precomputedTotalW = 0;
+  private precomputedViewMode: "sbs" | "unified" = "sbs";
   private precomputedTheme: ThemeLike = null;
   private blankLine = "";
   private stylesDirty = true;
@@ -147,6 +168,10 @@ export class DiffPanel implements PanelComponent {
     this.language = this.detectLanguageFromContent();
     this.computeWordHighlights();
     this.parseSideBySide();
+    this.parseUnified();
+
+    // Set maxLines for current mode (precomputation will refine)
+    this.maxLines = this.viewMode === "unified" ? this.unifiedRows.length : this.sbsRows.length;
   }
 
   // ── Language detection ──────────────────────────────────────────────
@@ -281,23 +306,117 @@ export class DiffPanel implements PanelComponent {
     this.maxLines = rows.length;
   }
 
+  // ── Unified parsing ─────────────────────────────────────────────────
+
+  private parseUnified(): void {
+    const lines = this.cachedRawLines;
+    const rows: UnifiedRow[] = [];
+
+    let oldLineNum = 0;
+    let newLineNum = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      if (line.startsWith("@@ ")) {
+        const hunkMatch = line.match(/^@@ -(\d+),?\d* \+(\d+),?\d* @@/);
+        if (hunkMatch) {
+          oldLineNum = Number.parseInt(hunkMatch[1], 10);
+          newLineNum = Number.parseInt(hunkMatch[2], 10);
+        }
+        rows.push({ type: "header", text: line, rawIndex: i, headerText: line });
+        continue;
+      }
+
+      if (
+        line.startsWith("diff ") ||
+        line.startsWith("index ") ||
+        line.startsWith("--- ") ||
+        line.startsWith("+++ ") ||
+        line.startsWith("Binary ") ||
+        line.startsWith("new file") ||
+        line.startsWith("deleted file") ||
+        line.startsWith("rename") ||
+        line.startsWith("similarity") ||
+        line.startsWith("old mode") ||
+        line.startsWith("new mode")
+      ) {
+        rows.push({ type: "header", text: line, rawIndex: i, headerText: line });
+        continue;
+      }
+
+      if (line.startsWith("-") && !line.startsWith("---")) {
+        rows.push({
+          type: "deletion",
+          text: line.substring(1),
+          oldLineNum: oldLineNum++,
+          rawIndex: i,
+        });
+        continue;
+      }
+
+      if (line.startsWith("+") && !line.startsWith("+++")) {
+        rows.push({
+          type: "addition",
+          text: line.substring(1),
+          newLineNum: newLineNum++,
+          rawIndex: i,
+        });
+        continue;
+      }
+
+      if (line.startsWith(" ")) {
+        rows.push({
+          type: "context",
+          text: line.substring(1),
+          oldLineNum: oldLineNum++,
+          newLineNum: newLineNum++,
+          rawIndex: i,
+        });
+        continue;
+      }
+
+      // Fallback: treat as header
+      rows.push({ type: "header", text: line, rawIndex: i, headerText: line });
+    }
+
+    this.unifiedRows = rows;
+  }
+
   // ── Pre-computation engine ──────────────────────────────────────────
 
   private ensurePrecomputedStyles(leftWidth: number, rightWidth: number, theme: ThemeLike): void {
-    if (
-      !this.stylesDirty &&
-      leftWidth === this.precomputedLeftW &&
-      rightWidth === this.precomputedRightW &&
-      theme === this.precomputedTheme
-    ) {
-      return;
+    const modeChanged = this.viewMode !== this.precomputedViewMode;
+
+    if (this.viewMode === "unified") {
+      const totalW = leftWidth + 1 + rightWidth; // = full width minus gutter
+      if (
+        !this.stylesDirty &&
+        !modeChanged &&
+        totalW === this.precomputedTotalW &&
+        theme === this.precomputedTheme
+      ) {
+        return;
+      }
+      this.precomputeUnifiedStyles(totalW, theme);
+    } else {
+      if (
+        !this.stylesDirty &&
+        !modeChanged &&
+        leftWidth === this.precomputedLeftW &&
+        rightWidth === this.precomputedRightW &&
+        theme === this.precomputedTheme
+      ) {
+        return;
+      }
+      this.precomputeStyles(leftWidth, rightWidth, theme);
     }
-    this.precomputeStyles(leftWidth, rightWidth, theme);
   }
 
   private precomputeStyles(leftWidth: number, rightWidth: number, theme: ThemeLike): void {
     this.precomputedLeftW = leftWidth;
     this.precomputedRightW = rightWidth;
+    this.precomputedViewMode = "sbs";
     this.precomputedTheme = theme;
     this.stylesDirty = false;
 
@@ -313,6 +432,70 @@ export class DiffPanel implements PanelComponent {
     this.renderVersion++;
     this.renderCacheKey = "";
     this.cachedRenderOutput = [];
+  }
+
+  // ── Unified pre-computation ──────────────────────────────────────────
+
+  private precomputeUnifiedStyles(totalW: number, theme: ThemeLike): void {
+    this.precomputedTotalW = totalW;
+    this.precomputedViewMode = "unified";
+    this.precomputedTheme = theme;
+    this.stylesDirty = false;
+
+    this.blankLine = " ".repeat(totalW);
+
+    this.precomputedLines = new Array(this.unifiedRows.length);
+    for (let i = 0; i < this.unifiedRows.length; i++) {
+      this.precomputedLines[i] = this.precomputeUnifiedLine(i, totalW, theme);
+    }
+
+    this.maxLines = this.precomputedLines.length;
+    this.renderVersion++;
+    this.renderCacheKey = "";
+    this.cachedRenderOutput = [];
+  }
+
+  private precomputeUnifiedLine(rowIdx: number, totalW: number, theme: ThemeLike): string {
+    const row = this.unifiedRows[rowIdx];
+
+    if (row.type === "header") {
+      return this.renderHeaderLine(row.headerText || row.text, totalW, theme);
+    }
+
+    const lineNumW = this.showLineNumbers ? UNIFIED_NUM_W : 0;
+    const contentW = Math.max(1, totalW - lineNumW);
+
+    const lineType: LineType =
+      row.type === "deletion" ? "deletion" : row.type === "addition" ? "addition" : "context";
+    const lineBg =
+      lineType === "deletion" ? DIFF_BG.deletion : lineType === "addition" ? DIFF_BG.addition : "";
+
+    // ── Line numbers: "NNN│NNN " ─────────────────────────────────
+    let lineNumStr = "";
+    if (this.showLineNumbers) {
+      const oldNum = row.oldLineNum !== undefined ? String(row.oldLineNum).padStart(3) : "   ";
+      const newNum = row.newLineNum !== undefined ? String(row.newLineNum).padStart(3) : "   ";
+      lineNumStr = `${lineBg}${DIM_FG}${oldNum}│${newNum} `;
+    }
+
+    // ── Content with syntax highlighting + word-diff ─────────────
+    const tokens = tokenizeLine(row.text, this.language);
+    const wordHL = this.wordHighlightsByLine[row.rawIndex];
+    const wordBg =
+      lineType === "deletion"
+        ? DIFF_BG.wordDeletion
+        : lineType === "addition"
+          ? DIFF_BG.wordAddition
+          : "";
+
+    let content: string;
+    if (wordHL && wordHL.segments.length > 0) {
+      content = this.renderTokensWithWordDiff(tokens, wordHL.segments, lineBg, wordBg, contentW);
+    } else {
+      content = this.renderTokens(tokens, lineBg, contentW);
+    }
+
+    return lineNumStr + content;
   }
 
   // ── Single-line pre-computation ─────────────────────────────────────
@@ -341,8 +524,14 @@ export class DiffPanel implements PanelComponent {
   }
 
   private renderSbsHeader(row: SideBySideRow, totalWidth: number, theme: ThemeLike): string {
-    const text = row.headerText || "";
+    return this.renderHeaderLine(row.headerText || "", totalWidth, theme);
+  }
 
+  /**
+   * Shared header renderer for both SBS and unified modes.
+   * Hunk headers (@@ …) get accent color with dash rulers; others are dim.
+   */
+  private renderHeaderLine(text: string, totalWidth: number, theme: ThemeLike): string {
     if (text.startsWith("@@")) {
       const vw = visibleWidth(text);
       const available = totalWidth - vw - 2;
@@ -595,6 +784,18 @@ export class DiffPanel implements PanelComponent {
     }
   }
 
+  // ── View mode toggle ─────────────────────────────────────────────────
+
+  toggleViewMode(): void {
+    this.viewMode = this.viewMode === "sbs" ? "unified" : "sbs";
+    this.stylesDirty = true;
+    this.scrollOffset = 0;
+    this.maxLines = this.viewMode === "unified" ? this.unifiedRows.length : this.sbsRows.length;
+    this.renderVersion++;
+    this.renderCacheKey = "";
+    this.cachedRenderOutput = [];
+  }
+
   // ── Scroll clamping ─────────────────────────────────────────────────
 
   clampScroll(contentHeight: number): void {
@@ -648,7 +849,13 @@ export class DiffPanel implements PanelComponent {
 
     const match = this.matchPositions[matchIndex];
     const ch = this.lastContentHeight;
-    const targetRow = this.rawLineToSbsRow[match.lineIndex] ?? match.lineIndex;
+
+    // In unified mode, raw line index maps 1:1 to rows
+    const targetRow =
+      this.viewMode === "unified"
+        ? match.lineIndex
+        : (this.rawLineToSbsRow[match.lineIndex] ?? match.lineIndex);
+
     const halfPage = Math.floor(ch / 2);
     const maxScroll = Math.max(0, this.maxLines - ch);
     this.scrollOffset = Math.max(0, Math.min(targetRow - halfPage, maxScroll));
@@ -888,6 +1095,51 @@ export class DiffPanel implements PanelComponent {
     return this.padStyled(parts.join(""), maxWidth);
   }
 
+  // ── Unified search rendering ──────────────────────────────────────────
+
+  /**
+   * Render a unified-mode row with search highlighting overlaid on syntax.
+   */
+  private renderUnifiedLineWithSearch(rowIdx: number, totalW: number, theme: ThemeLike): string {
+    const row = this.unifiedRows[rowIdx];
+
+    if (row.type === "header") {
+      const matches = this.matchesByRawLine[row.rawIndex];
+      if (matches && matches.length > 0) {
+        const text = row.headerText || row.text;
+        const color = text.startsWith("@@") ? "accent" : "dim";
+        return this.renderSearchHighlightedText(text, matches, 0, totalW, color, theme);
+      }
+      return this.precomputedLines[rowIdx];
+    }
+
+    const matches = this.matchesByRawLine[row.rawIndex];
+    if (!matches || matches.length === 0) {
+      return this.precomputedLines[rowIdx];
+    }
+
+    // Render with search highlighting
+    const lineNumW = this.showLineNumbers ? UNIFIED_NUM_W : 0;
+    const contentW = Math.max(1, totalW - lineNumW);
+
+    const lineType: LineType =
+      row.type === "deletion" ? "deletion" : row.type === "addition" ? "addition" : "context";
+    const lineBg =
+      lineType === "deletion" ? DIFF_BG.deletion : lineType === "addition" ? DIFF_BG.addition : "";
+
+    let lineNumStr = "";
+    if (this.showLineNumbers) {
+      const oldNum = row.oldLineNum !== undefined ? String(row.oldLineNum).padStart(3) : "   ";
+      const newNum = row.newLineNum !== undefined ? String(row.newLineNum).padStart(3) : "   ";
+      lineNumStr = `${lineBg}${DIM_FG}${oldNum}│${newNum} `;
+    }
+
+    const tokens = tokenizeLine(row.text, this.language);
+    const content = this.renderTokensWithSearch(tokens, row.text, matches, lineBg, contentW, theme);
+
+    return lineNumStr + content;
+  }
+
   // ── Rendering helpers ───────────────────────────────────────────────
 
   private padStyled(text: string, width: number): string {
@@ -912,7 +1164,7 @@ export class DiffPanel implements PanelComponent {
     const maxScroll = Math.max(0, this.maxLines - contentHeight);
     this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
 
-    const cacheKey = `${width}|${contentHeight}|${leftWidth}|${rightWidth}|${this.scrollOffset}|${this.renderVersion}|${this.currentMatchIndex}`;
+    const cacheKey = `${this.viewMode}|${width}|${contentHeight}|${leftWidth}|${rightWidth}|${this.scrollOffset}|${this.renderVersion}|${this.currentMatchIndex}`;
     if (cacheKey === this.renderCacheKey && this.cachedRenderOutput.length > 0) {
       return this.cachedRenderOutput;
     }
@@ -921,6 +1173,8 @@ export class DiffPanel implements PanelComponent {
     const hasMatches = this.matchPositions.length > 0;
     const gutterThumb = theme.fg("dim", "█");
     const gutterSpace = " ";
+    const isUnified = this.viewMode === "unified";
+    const contentW = width - 1; // content area excluding gutter
 
     const result = new Array<string>(contentHeight);
 
@@ -931,7 +1185,11 @@ export class DiffPanel implements PanelComponent {
       if (lineIdx >= this.maxLines) {
         result[i] = this.blankLine + gutter;
       } else if (hasMatches) {
-        result[i] = this.renderSbsLineWithSearch(lineIdx, leftWidth, rightWidth, theme) + gutter;
+        if (isUnified) {
+          result[i] = this.renderUnifiedLineWithSearch(lineIdx, contentW, theme) + gutter;
+        } else {
+          result[i] = this.renderSbsLineWithSearch(lineIdx, leftWidth, rightWidth, theme) + gutter;
+        }
       } else {
         result[i] = this.precomputedLines[lineIdx] + gutter;
       }
