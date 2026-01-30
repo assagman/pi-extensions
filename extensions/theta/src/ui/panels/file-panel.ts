@@ -5,8 +5,45 @@ import type { Panel } from "../types.js";
 
 export class FilePanel {
   files: DiffFile[] = [];
+  filteredFiles: DiffFile[] = [];
+  matchIndices: number[] = [];
   index = 0;
   scrollOffset = 0;
+
+  applyFilter(query: string, caseSensitive: boolean): void {
+    if (!query) {
+      this.filteredFiles = this.files;
+      this.matchIndices = [];
+      return;
+    }
+
+    const needle = caseSensitive ? query : query.toLowerCase();
+    this.filteredFiles = [];
+    this.matchIndices = [];
+
+    for (let idx = 0; idx < this.files.length; idx++) {
+      const file = this.files[idx];
+      const path = caseSensitive ? file.path : file.path.toLowerCase();
+
+      if (path.includes(needle)) {
+        this.matchIndices.push(this.filteredFiles.length);
+        this.filteredFiles.push(file);
+      }
+    }
+  }
+
+  clearFilter(): void {
+    this.filteredFiles = this.files;
+    this.matchIndices = [];
+    this.index = 0;
+    this.scrollOffset = 0;
+  }
+
+  getDisplayFiles(): DiffFile[] {
+    return this.filteredFiles.length > 0 || this.matchIndices.length > 0
+      ? this.filteredFiles
+      : this.files;
+  }
 
   render(
     width: number,
@@ -25,7 +62,8 @@ export class FilePanel {
       this.scrollOffset = this.index - visibleCount + 1;
     }
 
-    const visible = this.files.slice(this.scrollOffset, this.scrollOffset + visibleCount);
+    const displayFiles = this.getDisplayFiles();
+    const visible = displayFiles.slice(this.scrollOffset, this.scrollOffset + visibleCount);
 
     for (let i = 0; i < visible.length; i++) {
       const file = visible[i];
