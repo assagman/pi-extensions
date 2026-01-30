@@ -873,14 +873,14 @@ export class Dashboard implements Component {
           lines.push(`${indent}${yellow(key)} ${type} ${reqBadge}`);
 
           if (value.description) {
-            const descLines = this.wrapText(value.description, width - indent.length * 2);
+            const descLines = this.wrapText(String(value.description), width - indent.length * 2);
             for (const line of descLines) {
               lines.push(indent + indent + dim(line));
             }
           }
 
           if (value.enum) {
-            const enumStr = `Options: ${value.enum.join(", ")}`;
+            const enumStr = `Options: ${(value.enum as string[]).join(", ")}`;
             const enumLines = this.wrapText(enumStr, width - indent.length * 2);
             for (const line of enumLines) {
               lines.push(indent + indent + muted(line));
