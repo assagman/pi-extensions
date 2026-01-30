@@ -263,21 +263,22 @@ export class DiffPanel implements PanelComponent {
     theme: any,
     maxWidth: number
   ): string {
-    const baseColor = highlight.type === "deletion" ? "error" : "success";
+    const fgColor = highlight.type === "deletion" ? "error" : "success";
+    const bgColor = highlight.type === "deletion" ? "toolErrorBg" : "toolSuccessBg";
     const parts: string[] = [];
 
     // Add prefix (+/-)
     const prefix = highlight.type === "deletion" ? "-" : "+";
-    parts.push(theme.fg(baseColor, prefix));
+    parts.push(theme.fg(fgColor, prefix));
 
     // Add segments with selective highlighting
     for (const segment of highlight.segments) {
       if (segment.highlight) {
-        // Highlighted changed portion (inverse for emphasis)
-        parts.push(theme.bg(baseColor, theme.fg("text", segment.text)));
+        // Highlighted changed portion — bg tint for emphasis
+        parts.push(theme.bg(bgColor, theme.fg("text", segment.text)));
       } else {
         // Normal unchanged portion
-        parts.push(theme.fg(baseColor, segment.text));
+        parts.push(theme.fg(fgColor, segment.text));
       }
     }
 
