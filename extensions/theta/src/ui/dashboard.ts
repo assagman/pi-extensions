@@ -137,7 +137,7 @@ export class Dashboard implements Component {
     this.filePanel.scrollOffset = 0;
     this.diffPanel.scrollOffset = 0;
 
-    const commit = this.commitPanel.commits[index];
+    const commit = this.commitPanel.getDisplayCommits()[index];
     if (!commit) return;
 
     this.selectedCommit = commit;
@@ -177,10 +177,10 @@ export class Dashboard implements Component {
     this.filePanel.index = index;
     this.diffPanel.scrollOffset = 0;
 
-    const file = this.filePanel.files[index];
+    const file = this.filePanel.getDisplayFiles()[index];
     if (!file) return;
 
-    const currentCommit = commit || this.commitPanel.commits[this.commitPanel.index];
+    const currentCommit = commit || this.commitPanel.getDisplayCommits()[this.commitPanel.index];
     if (!currentCommit) return;
 
     this.diffPanel.setContent(`Loading diff for ${file.path}...`);
@@ -193,7 +193,7 @@ export class Dashboard implements Component {
 
       if (
         this.filePanel.index === index &&
-        this.commitPanel.commits[this.commitPanel.index]?.sha === currentCommit.sha
+        this.commitPanel.getDisplayCommits()[this.commitPanel.index]?.sha === currentCommit.sha
       ) {
         this.diffPanel.setContent(result.raw || "No changes in file.");
         this.refresh();
@@ -213,7 +213,7 @@ export class Dashboard implements Component {
     this.filePanel.index = index;
     this.diffPanel.scrollOffset = 0;
 
-    const file = this.filePanel.files[index];
+    const file = this.filePanel.getDisplayFiles()[index];
     if (!file) return;
 
     this.diffPanel.setContent(`Loading diff for ${file.path}...`);
@@ -679,7 +679,7 @@ export class Dashboard implements Component {
     // Disable commit navigation in branch mode
     if (this.branchMode) return;
 
-    const len = this.commitPanel.commits.length;
+    const len = this.commitPanel.getDisplayCommits().length;
     if (len === 0) return;
 
     const halfPage = Math.max(1, Math.floor(this.contentHeight / 2));
@@ -727,7 +727,7 @@ export class Dashboard implements Component {
     home: boolean,
     end: boolean
   ) {
-    const len = this.filePanel.files.length;
+    const len = this.filePanel.getDisplayFiles().length;
     if (len === 0) return;
 
     const halfPage = Math.max(1, Math.floor(this.contentHeight / 2));
