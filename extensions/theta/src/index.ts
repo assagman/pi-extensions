@@ -6,8 +6,8 @@
  */
 
 import type { ExtensionAPI, ExtensionFactory } from "@mariozechner/pi-coding-agent";
+import { DimmedOverlay } from "./overlay.js";
 import { Dashboard } from "./ui/dashboard.js";
-import { DimmedOverlay } from "./ui/dimmed-overlay.js";
 
 // ─── Extension ──────────────────────────────────────────────────────────────
 

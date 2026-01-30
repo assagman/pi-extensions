@@ -14,15 +14,13 @@
     "extensions": ["./dist/index.js"]
   },
   "dependencies": {
-    "@mariozechner/pi-ai": "^0.50.3",
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
     "@pierre/diffs": "^1.0.8",
-    "@sinclair/typebox": "0.32.35",
-    "diff": "^8.0.2"
+    "diff": "^8.0.2",
+    "shared-tui": "file:../shared/tui"
   },
   "devDependencies": {
-    "@types/diff": "^5.2.3",
     "@types/node": "^25.0.10",
     "typescript": "^5"
   }
