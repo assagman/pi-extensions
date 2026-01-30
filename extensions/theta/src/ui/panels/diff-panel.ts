@@ -1,23 +1,31 @@
 /**
- * DiffPanel — Side-by-side diff viewer with pre-computed styled lines.
+ * DiffPanel — Side-by-side diff viewer with syntax highlighting.
  *
  * Layout: OLD (left) │ NEW (right) + scrollbar gutter
  *
- * Performance strategy:
- *   1. On setContent(): parse raw lines → SideBySideRow[] + compute word-diffs
- *   2. On first render (or width/theme change): pre-compute ALL styled rows
- *   3. On scroll: viewport = array slice of pre-computed lines + scrollbar gutter
- *      → O(viewportHeight) lookups, zero per-line styling
- *   4. Search highlighting: applied dynamically only for rows with matches
+ * Rendering pipeline:
+ *   1. setContent(): parse raw lines → SideBySideRow[] + word-diffs + detect language
+ *   2. precomputeStyles(): for each row, produce styled ANSI string with:
+ *      - Syntax-highlighted code (keyword/string/comment/type/function colors)
+ *      - Line backgrounds (red for deletions, green for additions)
+ *      - Word-diff backgrounds (brighter red/green for changed words)
+ *   3. render(): viewport slice of pre-computed lines + scrollbar gutter
+ *   4. Search: dynamic re-render with match highlights overlaid
  */
 
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { diffWordsWithSpace } from "diff";
+import {
+  DIFF_BG,
+  DIM_FG,
+  RESET,
+  SYNTAX_FG,
+  type Token,
+  detectLanguage,
+  tokenizeLine,
+} from "../syntax.js";
 import { padToWidth, scrollbarThumbPos } from "../text-utils.js";
 import type { PanelComponent, ThemeLike } from "../types.js";
-
-/** ANSI SGR reset — ensures no color bleed after styled text. */
-const RESET = "\x1b[0m";
 
 /** Line-number column width: 3 digits + 1 space. */
 const LINE_NUM_W = 4;
@@ -40,9 +48,7 @@ interface SideBySideRow {
   new?: SideBySideLine;
   type: "context" | "change" | "header";
   headerText?: string;
-  /** Raw line index for the old/header side. */
   rawOldIndex?: number;
-  /** Raw line index for the new side. */
   rawNewIndex?: number;
 }
 
@@ -70,6 +76,9 @@ interface WordHighlight {
   segments: WordSegment[];
 }
 
+/** Line type determines background coloring. */
+type LineType = "deletion" | "addition" | "context";
+
 // ── DiffPanel ─────────────────────────────────────────────────────────────
 
 export class DiffPanel implements PanelComponent {
@@ -81,6 +90,9 @@ export class DiffPanel implements PanelComponent {
   showLineNumbers = true;
   enableWordDiff = true;
 
+  // ── Language ────────────────────────────────────────────────────────
+  private language = "text";
+
   // ── Search state ────────────────────────────────────────────────────
   matchPositions: LineMatch[] = [];
   private matchesByRawLine: LineMatch[][] = [];
@@ -90,7 +102,6 @@ export class DiffPanel implements PanelComponent {
   // ── Parsed data ─────────────────────────────────────────────────────
   private cachedRawLines: string[] = [];
   private sbsRows: SideBySideRow[] = [];
-  /** Map raw line index → SBS row index (for search navigation). */
   private rawLineToSbsRow: number[] = [];
   private wordHighlightsByLine: (WordHighlight | undefined)[] = [];
 
@@ -133,20 +144,31 @@ export class DiffPanel implements PanelComponent {
     this.renderCacheKey = "";
     this.cachedRenderOutput = [];
 
+    this.language = this.detectLanguageFromContent();
     this.computeWordHighlights();
     this.parseSideBySide();
   }
 
-  // ── Side-by-side parsing ────────────────────────────────────────────
+  // ── Language detection ──────────────────────────────────────────────
 
   /**
-   * Parse unified diff lines into SideBySideRow[].
-   *
-   * Algorithm:
-   *   - Context lines → same text on both sides
-   *   - Consecutive - then + lines → paired as change block
-   *   - @@ / diff / index / etc → header rows spanning both columns
+   * Auto-detect language from diff headers (+++ b/path or diff --git).
    */
+  private detectLanguageFromContent(): string {
+    for (const line of this.cachedRawLines) {
+      if (line.startsWith("+++ b/")) {
+        return detectLanguage(line.substring(6));
+      }
+      if (line.startsWith("diff --git")) {
+        const match = line.match(/b\/(.+)$/);
+        if (match) return detectLanguage(match[1]);
+      }
+    }
+    return "text";
+  }
+
+  // ── Side-by-side parsing ────────────────────────────────────────────
+
   private parseSideBySide(): void {
     const lines = this.cachedRawLines;
     const rows: SideBySideRow[] = [];
@@ -159,7 +181,6 @@ export class DiffPanel implements PanelComponent {
     while (i < lines.length) {
       const line = lines[i];
 
-      // Hunk header
       if (line.startsWith("@@ ")) {
         const hunkMatch = line.match(/^@@ -(\d+),?\d* \+(\d+),?\d* @@/);
         if (hunkMatch) {
@@ -173,7 +194,6 @@ export class DiffPanel implements PanelComponent {
         continue;
       }
 
-      // Other header lines
       if (
         line.startsWith("diff ") ||
         line.startsWith("index ") ||
@@ -194,7 +214,6 @@ export class DiffPanel implements PanelComponent {
         continue;
       }
 
-      // Deletion block (possibly followed by addition block)
       if (line.startsWith("-")) {
         const deletions: { rawIndex: number; text: string; lineNum: number }[] = [];
         while (i < lines.length && lines[i].startsWith("-") && !lines[i].startsWith("---")) {
@@ -226,7 +245,6 @@ export class DiffPanel implements PanelComponent {
         continue;
       }
 
-      // Pure addition (no preceding deletion)
       if (line.startsWith("+")) {
         const rowIdx = rows.length;
         rows.push({
@@ -239,7 +257,6 @@ export class DiffPanel implements PanelComponent {
         continue;
       }
 
-      // Context line (starts with space)
       if (line.startsWith(" ")) {
         const rowIdx = rows.length;
         rows.push({
@@ -254,7 +271,6 @@ export class DiffPanel implements PanelComponent {
         continue;
       }
 
-      // Unknown / empty line → header
       const rowIdx = rows.length;
       rows.push({ type: "header", headerText: line, rawOldIndex: i });
       this.rawLineToSbsRow[i] = rowIdx;
@@ -285,7 +301,7 @@ export class DiffPanel implements PanelComponent {
     this.precomputedTheme = theme;
     this.stylesDirty = false;
 
-    const spanW = leftWidth + 1 + rightWidth; // full content width (no gutter)
+    const spanW = leftWidth + 1 + rightWidth;
     this.blankLine = " ".repeat(spanW);
 
     this.precomputedLines = new Array(this.sbsRows.length);
@@ -314,27 +330,22 @@ export class DiffPanel implements PanelComponent {
     }
 
     const sep = theme.fg("dim", "│");
-    const oldColor = row.type === "change" && row.old ? "error" : "text";
-    const newColor = row.type === "change" && row.new ? "success" : "text";
 
-    const oldStr = this.renderSbsSide(row.old, row.rawOldIndex, leftWidth, oldColor, false, theme);
-    const newStr = this.renderSbsSide(row.new, row.rawNewIndex, rightWidth, newColor, false, theme);
+    const oldType: LineType = row.type === "change" && row.old ? "deletion" : "context";
+    const newType: LineType = row.type === "change" && row.new ? "addition" : "context";
+
+    const oldStr = this.renderSyntaxSide(row.old, row.rawOldIndex, leftWidth, oldType);
+    const newStr = this.renderSyntaxSide(row.new, row.rawNewIndex, rightWidth, newType);
 
     return oldStr + sep + newStr;
   }
 
-  /**
-   * Render a header row spanning both columns.
-   * Hunk headers (@@ ... @@) are centered between dashes.
-   * Other headers are left-aligned and dimmed.
-   */
   private renderSbsHeader(row: SideBySideRow, totalWidth: number, theme: ThemeLike): string {
     const text = row.headerText || "";
 
     if (text.startsWith("@@")) {
-      // Center hunk header between dashes: ─── @@ ... @@ ───
       const vw = visibleWidth(text);
-      const available = totalWidth - vw - 2; // 2 for spaces around text
+      const available = totalWidth - vw - 2;
       if (available > 0) {
         const leftDash = Math.floor(available / 2);
         const rightDash = available - leftDash;
@@ -347,106 +358,149 @@ export class DiffPanel implements PanelComponent {
     return theme.fg("dim", padToWidth(text, totalWidth));
   }
 
+  // ── Syntax-highlighted side rendering ───────────────────────────────
+
   /**
-   * Render one side (old or new) of a SBS row.
-   * Handles line numbers, word-diff, and optionally search highlighting.
+   * Render one side of a SBS row with syntax highlighting and diff backgrounds.
+   *
+   * Output structure: [lineBg][dimLineNum][syntaxContent + wordDiffBg][padding][RESET]
    */
-  private renderSbsSide(
+  private renderSyntaxSide(
     line: SideBySideLine | undefined,
     rawIndex: number | undefined,
     sideWidth: number,
-    lineColor: string,
-    withSearch: boolean,
-    theme: ThemeLike
+    lineType: LineType
   ): string {
     const lineNumW = this.showLineNumbers ? LINE_NUM_W : 0;
     const contentW = Math.max(1, sideWidth - lineNumW);
+    const lineBg =
+      lineType === "deletion" ? DIFF_BG.deletion : lineType === "addition" ? DIFF_BG.addition : "";
 
     if (!line) {
-      return padToWidth("", sideWidth);
+      // Empty side — just spaces (no background for empty slots)
+      return " ".repeat(sideWidth);
     }
 
-    // Line number
+    // ── Line number with background ───────────────────────────────
     let lineNumStr = "";
     if (this.showLineNumbers) {
       lineNumStr =
         line.lineNum !== undefined
-          ? theme.fg("dim", `${String(line.lineNum).padStart(3)} `)
-          : theme.fg("dim", "    ");
+          ? `${lineBg}${DIM_FG}${String(line.lineNum).padStart(3)} `
+          : `${lineBg}${DIM_FG}    `;
     }
 
-    // Content
-    let content: string;
+    // ── Content with syntax highlighting ──────────────────────────
+    const tokens = tokenizeLine(line.text, this.language);
+    const wordHL = rawIndex !== undefined ? this.wordHighlightsByLine[rawIndex] : undefined;
+    const wordBg =
+      lineType === "deletion"
+        ? DIFF_BG.wordDeletion
+        : lineType === "addition"
+          ? DIFF_BG.wordAddition
+          : "";
 
-    if (withSearch && rawIndex !== undefined) {
-      const matches = this.matchesByRawLine[rawIndex];
-      if (matches && matches.length > 0) {
-        content = this.renderSearchHighlightedText(
-          line.text,
-          matches,
-          1, // colOffset: skip prefix char in raw line
-          contentW,
-          lineColor,
-          theme
-        );
-      } else {
-        content = this.renderSideContent(line.text, rawIndex, contentW, lineColor, theme);
-      }
+    let content: string;
+    if (wordHL && wordHL.segments.length > 0) {
+      content = this.renderTokensWithWordDiff(tokens, wordHL.segments, lineBg, wordBg, contentW);
     } else {
-      content = this.renderSideContent(line.text, rawIndex, contentW, lineColor, theme);
+      content = this.renderTokens(tokens, lineBg, contentW);
     }
 
     return lineNumStr + content;
   }
 
   /**
-   * Render content for one side — applies word-diff or plain color.
+   * Render syntax tokens with a uniform line background. No word-diff.
    */
-  private renderSideContent(
-    text: string,
-    rawIndex: number | undefined,
-    contentW: number,
-    lineColor: string,
-    theme: ThemeLike
-  ): string {
-    const wordHL = rawIndex !== undefined ? this.wordHighlightsByLine[rawIndex] : undefined;
-    if (wordHL) {
-      return this.padStyled(this.renderSbsWordHighlight(wordHL, contentW, theme), contentW);
-    }
-    return theme.fg(lineColor, padToWidth(text, contentW));
-  }
-
-  // ── Word-diff rendering ─────────────────────────────────────────────
-
-  /**
-   * Render word-highlighted text for side-by-side display.
-   * Segments are in text-space (prefix already stripped).
-   */
-  private renderSbsWordHighlight(
-    highlight: WordHighlight,
-    maxWidth: number,
-    theme: ThemeLike
-  ): string {
-    const fgColor = highlight.type === "deletion" ? "error" : "success";
-    const bgColor = highlight.type === "deletion" ? "toolErrorBg" : "toolSuccessBg";
-    const parts: string[] = [];
+  private renderTokens(tokens: Token[], lineBg: string, maxWidth: number): string {
+    let result = lineBg;
     let col = 0;
 
-    for (const segment of highlight.segments) {
+    for (const token of tokens) {
       if (col >= maxWidth) break;
       const remaining = maxWidth - col;
-      const text =
-        segment.text.length > remaining ? segment.text.substring(0, remaining) : segment.text;
-
-      if (segment.highlight) {
-        parts.push(theme.bg(bgColor, theme.fg("text", text)));
-      } else {
-        parts.push(theme.fg(fgColor, text));
-      }
+      const text = token.text.length > remaining ? token.text.substring(0, remaining) : token.text;
+      result += SYNTAX_FG[token.type] + text;
       col += text.length;
     }
 
-    return parts.join("");
+    // Pad to width with line background
+    if (col < maxWidth) {
+      result += lineBg + " ".repeat(maxWidth - col);
+    }
+    result += RESET;
+    return result;
+  }
+
+  /**
+   * Merge syntax tokens with word-diff segments.
+   *
+   * Walks both lists in lockstep — at each character position:
+   *   fg = syntax token color
+   *   bg = word-diff highlighted ? wordBg : lineBg
+   */
+  private renderTokensWithWordDiff(
+    tokens: Token[],
+    wordSegments: WordSegment[],
+    lineBg: string,
+    wordBg: string,
+    maxWidth: number
+  ): string {
+    let result = "";
+    let col = 0;
+
+    let tIdx = 0;
+    let tOff = 0;
+    let wIdx = 0;
+    let wOff = 0;
+
+    while (tIdx < tokens.length && wIdx < wordSegments.length && col < maxWidth) {
+      const token = tokens[tIdx];
+      const seg = wordSegments[wIdx];
+
+      const tRemain = token.text.length - tOff;
+      const wRemain = seg.text.length - wOff;
+      const maxRemain = maxWidth - col;
+      const chunkLen = Math.min(tRemain, wRemain, maxRemain);
+
+      const fgCode = SYNTAX_FG[token.type];
+      const bgCode = seg.highlight ? wordBg : lineBg;
+      const text = token.text.substring(tOff, tOff + chunkLen);
+
+      result += bgCode + fgCode + text;
+      col += chunkLen;
+
+      tOff += chunkLen;
+      wOff += chunkLen;
+
+      if (tOff >= token.text.length) {
+        tIdx++;
+        tOff = 0;
+      }
+      if (wOff >= seg.text.length) {
+        wIdx++;
+        wOff = 0;
+      }
+    }
+
+    // Remaining tokens (word segments exhausted)
+    while (tIdx < tokens.length && col < maxWidth) {
+      const token = tokens[tIdx];
+      const text = tOff > 0 ? token.text.substring(tOff) : token.text;
+      const truncated = text.length > maxWidth - col ? text.substring(0, maxWidth - col) : text;
+      result += lineBg + SYNTAX_FG[token.type] + truncated;
+      col += truncated.length;
+      tIdx++;
+      tOff = 0;
+    }
+
+    // Pad
+    if (col < maxWidth) {
+      result += lineBg + " ".repeat(maxWidth - col);
+    }
+    result += RESET;
+    return result;
   }
 
   // ── Word-diff computation ───────────────────────────────────────────
@@ -594,8 +648,6 @@ export class DiffPanel implements PanelComponent {
 
     const match = this.matchPositions[matchIndex];
     const ch = this.lastContentHeight;
-
-    // Map raw line index → SBS row index
     const targetRow = this.rawLineToSbsRow[match.lineIndex] ?? match.lineIndex;
     const halfPage = Math.floor(ch / 2);
     const maxScroll = Math.max(0, this.maxLines - ch);
@@ -633,16 +685,163 @@ export class DiffPanel implements PanelComponent {
     this.clearMatches();
   }
 
-  // ── Search rendering helpers ────────────────────────────────────────
+  // ── Search rendering ────────────────────────────────────────────────
 
   /**
-   * Render text with search match highlighting.
+   * Render a SBS row with search highlighting overlaid on syntax.
    *
-   * @param text      Displayed text (prefix-stripped for diff content)
-   * @param matches   Matches from matchesByRawLine for the raw line
-   * @param colOffset Column offset (1 for prefix-stripped lines, 0 for headers)
-   * @param maxWidth  Maximum visible width to render
-   * @param lineColor Base color for non-matched text
+   * Non-matched regions: syntax fg + line bg (like precomputed)
+   * Matched regions: high-contrast theme fg/bg (overrides syntax for visibility)
+   */
+  private renderSbsLineWithSearch(
+    rowIdx: number,
+    leftWidth: number,
+    rightWidth: number,
+    theme: ThemeLike
+  ): string {
+    const row = this.sbsRows[rowIdx];
+
+    if (row.type === "header") {
+      const rawIdx = row.rawOldIndex;
+      if (rawIdx !== undefined) {
+        const matches = this.matchesByRawLine[rawIdx];
+        if (matches && matches.length > 0) {
+          const totalW = leftWidth + 1 + rightWidth;
+          const text = row.headerText || "";
+          const color = text.startsWith("@@") ? "accent" : "dim";
+          return this.renderSearchHighlightedText(text, matches, 0, totalW, color, theme);
+        }
+      }
+      return this.precomputedLines[rowIdx];
+    }
+
+    const sep = theme.fg("dim", "│");
+
+    const oldType: LineType = row.type === "change" && row.old ? "deletion" : "context";
+    const newType: LineType = row.type === "change" && row.new ? "addition" : "context";
+
+    const hasOldMatch =
+      row.rawOldIndex !== undefined && this.matchesByRawLine[row.rawOldIndex]?.length > 0;
+    const hasNewMatch =
+      row.rawNewIndex !== undefined && this.matchesByRawLine[row.rawNewIndex]?.length > 0;
+
+    const oldStr =
+      hasOldMatch && row.rawOldIndex !== undefined
+        ? this.renderSearchSide(row.old, row.rawOldIndex, leftWidth, oldType, theme)
+        : this.renderSyntaxSide(row.old, row.rawOldIndex, leftWidth, oldType);
+    const newStr =
+      hasNewMatch && row.rawNewIndex !== undefined
+        ? this.renderSearchSide(row.new, row.rawNewIndex, rightWidth, newType, theme)
+        : this.renderSyntaxSide(row.new, row.rawNewIndex, rightWidth, newType);
+
+    return oldStr + sep + newStr;
+  }
+
+  /**
+   * Render one side with search highlighting.
+   * Uses syntax highlighting for non-matched regions, theme for matches.
+   */
+  private renderSearchSide(
+    line: SideBySideLine | undefined,
+    rawIndex: number,
+    sideWidth: number,
+    lineType: LineType,
+    theme: ThemeLike
+  ): string {
+    const lineNumW = this.showLineNumbers ? LINE_NUM_W : 0;
+    const contentW = Math.max(1, sideWidth - lineNumW);
+    const lineBg =
+      lineType === "deletion" ? DIFF_BG.deletion : lineType === "addition" ? DIFF_BG.addition : "";
+
+    if (!line) return " ".repeat(sideWidth);
+
+    // Line number
+    let lineNumStr = "";
+    if (this.showLineNumbers) {
+      lineNumStr =
+        line.lineNum !== undefined
+          ? `${lineBg}${DIM_FG}${String(line.lineNum).padStart(3)} `
+          : `${lineBg}${DIM_FG}    `;
+    }
+
+    // Build content with syntax + search highlight overlay
+    const tokens = tokenizeLine(line.text, this.language);
+    const matches = this.matchesByRawLine[rawIndex] || [];
+    const content = this.renderTokensWithSearch(
+      tokens,
+      line.text,
+      matches,
+      lineBg,
+      contentW,
+      theme
+    );
+
+    return lineNumStr + content;
+  }
+
+  /**
+   * Render syntax tokens with search match overlay.
+   *
+   * Walks tokens and match regions together:
+   *   - Non-matched: syntax fg + lineBg
+   *   - Matched: theme highlight fg/bg (high contrast, overrides syntax)
+   */
+  private renderTokensWithSearch(
+    tokens: Token[],
+    fullText: string,
+    matches: LineMatch[],
+    lineBg: string,
+    maxWidth: number,
+    _theme: ThemeLike
+  ): string {
+    // Build a match bitmap: for each char position, is it in a match?
+    // Also track which match index for current-match highlighting.
+    const sorted = [...matches].sort((a, b) => a.startCol - b.startCol);
+    const matchAt: (LineMatch | null)[] = new Array(fullText.length).fill(null);
+    for (const match of sorted) {
+      const start = Math.max(0, match.startCol - 1); // -1 for prefix offset
+      const end = Math.min(fullText.length, match.startCol + match.length - 1);
+      for (let c = start; c < end; c++) {
+        matchAt[c] = match;
+      }
+    }
+
+    let result = "";
+    let col = 0;
+    let textPos = 0;
+
+    for (const token of tokens) {
+      if (col >= maxWidth) break;
+
+      for (let ti = 0; ti < token.text.length && col < maxWidth; ti++) {
+        const m = textPos < matchAt.length ? matchAt[textPos] : null;
+
+        if (m) {
+          const isCurrent = this.matchIndexMap.get(m) === this.currentMatchIndex;
+          if (isCurrent) {
+            result += "\x1b[48;2;80;80;0m\x1b[38;2;255;255;100m"; // bright yellow
+          } else {
+            result += "\x1b[48;2;60;60;0m\x1b[38;2;200;200;80m"; // dim yellow
+          }
+        } else {
+          result += lineBg + SYNTAX_FG[token.type];
+        }
+        result += token.text[ti];
+
+        col++;
+        textPos++;
+      }
+    }
+
+    if (col < maxWidth) {
+      result += lineBg + " ".repeat(maxWidth - col);
+    }
+    result += RESET;
+    return result;
+  }
+
+  /**
+   * Render text with search highlighting (for headers, uses theme).
    */
   private renderSearchHighlightedText(
     text: string,
@@ -689,71 +888,12 @@ export class DiffPanel implements PanelComponent {
     return this.padStyled(parts.join(""), maxWidth);
   }
 
-  /**
-   * Render a SBS row with search highlighting (called when search is active).
-   */
-  private renderSbsLineWithSearch(
-    rowIdx: number,
-    leftWidth: number,
-    rightWidth: number,
-    theme: ThemeLike
-  ): string {
-    const row = this.sbsRows[rowIdx];
-
-    if (row.type === "header") {
-      // Check for matches on the header's raw line
-      const rawIdx = row.rawOldIndex;
-      if (rawIdx !== undefined) {
-        const matches = this.matchesByRawLine[rawIdx];
-        if (matches && matches.length > 0) {
-          const totalW = leftWidth + 1 + rightWidth;
-          const text = row.headerText || "";
-          const color = text.startsWith("@@") ? "accent" : "dim";
-          return this.renderSearchHighlightedText(text, matches, 0, totalW, color, theme);
-        }
-      }
-      return this.precomputedLines[rowIdx];
-    }
-
-    const sep = theme.fg("dim", "│");
-    const oldColor = row.type === "change" && row.old ? "error" : "text";
-    const newColor = row.type === "change" && row.new ? "success" : "text";
-
-    const hasOldMatch =
-      row.rawOldIndex !== undefined && this.matchesByRawLine[row.rawOldIndex]?.length > 0;
-    const hasNewMatch =
-      row.rawNewIndex !== undefined && this.matchesByRawLine[row.rawNewIndex]?.length > 0;
-
-    const oldStr = this.renderSbsSide(
-      row.old,
-      row.rawOldIndex,
-      leftWidth,
-      oldColor,
-      hasOldMatch,
-      theme
-    );
-    const newStr = this.renderSbsSide(
-      row.new,
-      row.rawNewIndex,
-      rightWidth,
-      newColor,
-      hasNewMatch,
-      theme
-    );
-
-    return oldStr + sep + newStr;
-  }
-
   // ── Rendering helpers ───────────────────────────────────────────────
 
-  /**
-   * Pad styled text to exact visible width, inserting ANSI reset before
-   * padding spaces so trailing colors never bleed.
-   */
   private padStyled(text: string, width: number): string {
     const vw = visibleWidth(text);
     if (vw >= width) return text;
-    return text + RESET + " ".repeat(width - vw);
+    return `${text}${RESET}${" ".repeat(width - vw)}`;
   }
 
   // ── Main render ─────────────────────────────────────────────────────
@@ -767,20 +907,16 @@ export class DiffPanel implements PanelComponent {
   ): string[] {
     this.lastContentHeight = contentHeight;
 
-    // Ensure pre-computed styles are up-to-date
     this.ensurePrecomputedStyles(leftWidth, rightWidth, theme);
 
-    // Clamp scroll
     const maxScroll = Math.max(0, this.maxLines - contentHeight);
     this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
 
-    // ── Render cache — skip if inputs unchanged ─────────────────────
     const cacheKey = `${width}|${contentHeight}|${leftWidth}|${rightWidth}|${this.scrollOffset}|${this.renderVersion}|${this.currentMatchIndex}`;
     if (cacheKey === this.renderCacheKey && this.cachedRenderOutput.length > 0) {
       return this.cachedRenderOutput;
     }
 
-    // ── Build viewport ──────────────────────────────────────────────
     const thumbPos = scrollbarThumbPos(this.scrollOffset, this.maxLines, contentHeight);
     const hasMatches = this.matchPositions.length > 0;
     const gutterThumb = theme.fg("dim", "█");
