@@ -34,6 +34,16 @@ export class Dashboard implements Component {
   private readonly diffPanel = new DiffPanel();
   private readonly diffService = new DiffService();
 
+  // Deferred diff scroll batching — coalesces rapid j/k into one render
+  private pendingScrollDelta = 0;
+  private pendingScrollTarget: number | null = null;
+  private scrollFlushScheduled = false;
+
+  private cancelPendingScroll(): void {
+    this.pendingScrollDelta = 0;
+    this.pendingScrollTarget = null;
+  }
+
   private readonly panelMap: Record<Panel, PanelComponent> = {
     commits: this.commitPanel,
     files: this.filePanel,
@@ -66,12 +76,12 @@ export class Dashboard implements Component {
           shortSha: "—",
           subject: `${this.branchMode.base}..${this.branchMode.head}`,
         };
-        this.commitPanel.commits = [this.selectedCommit];
+        this.commitPanel.setCommits([this.selectedCommit]);
         this.diffPanel.setContent("Loading...");
         this.refresh();
 
         const result = await this.diffService.getDiff(this.branchMode.base, this.branchMode.head);
-        this.filePanel.files = result.files;
+        this.filePanel.setFiles(result.files);
         this.diffPanel.totalStats = {
           additions: result.files.reduce((sum, f) => sum + f.additions, 0),
           deletions: result.files.reduce((sum, f) => sum + f.deletions, 0),
@@ -93,7 +103,7 @@ export class Dashboard implements Component {
       this.commitPanel.hasMore = commits.length === COMMIT_BATCH_SIZE;
 
       if (hasUncommitted) {
-        this.commitPanel.commits = [
+        this.commitPanel.setCommits([
           {
             sha: UNCOMMITTED_SHA,
             shortSha: "———",
@@ -101,9 +111,9 @@ export class Dashboard implements Component {
             isUncommitted: true,
           },
           ...commits,
-        ];
+        ]);
       } else {
-        this.commitPanel.commits = commits;
+        this.commitPanel.setCommits(commits);
       }
 
       if (this.commitPanel.commits.length > 0) {
@@ -121,6 +131,7 @@ export class Dashboard implements Component {
   // ── Selection ───────────────────────────────────────────────────────
 
   private async selectCommit(index: number) {
+    this.cancelPendingScroll();
     this.commitPanel.index = index;
     this.filePanel.index = 0;
     this.filePanel.scrollOffset = 0;
@@ -131,7 +142,7 @@ export class Dashboard implements Component {
 
     this.selectedCommit = commit;
     this.diffPanel.setContent("Loading...");
-    this.filePanel.files = [];
+    this.filePanel.setFiles([]);
     this.refresh();
 
     try {
@@ -140,7 +151,7 @@ export class Dashboard implements Component {
         : await this.diffService.getCommitDiff(commit.sha);
 
       if (this.commitPanel.index !== index) return; // stale
-      this.filePanel.files = result.files;
+      this.filePanel.setFiles(result.files);
       this.diffPanel.totalStats = {
         additions: result.files.reduce((sum, f) => sum + f.additions, 0),
         deletions: result.files.reduce((sum, f) => sum + f.deletions, 0),
@@ -162,6 +173,7 @@ export class Dashboard implements Component {
   }
 
   private async selectFile(index: number, commit?: CommitInfo) {
+    this.cancelPendingScroll();
     this.filePanel.index = index;
     this.diffPanel.scrollOffset = 0;
 
@@ -197,6 +209,7 @@ export class Dashboard implements Component {
   private async selectFileBranchMode(index: number) {
     if (!this.branchMode) return;
 
+    this.cancelPendingScroll();
     this.filePanel.index = index;
     this.diffPanel.scrollOffset = 0;
 
@@ -239,7 +252,7 @@ export class Dashboard implements Component {
 
       const newCommits = await this.diffService.getCommits(skip, COMMIT_BATCH_SIZE);
       this.commitPanel.hasMore = newCommits.length === COMMIT_BATCH_SIZE;
-      this.commitPanel.commits.push(...newCommits);
+      this.commitPanel.addCommits(newCommits);
     } finally {
       this.commitPanel.isLoading = false;
       this.refresh();
@@ -291,8 +304,9 @@ export class Dashboard implements Component {
       "Navigation:",
       "  h/l        Switch panel left/right",
       "  j/k ↓/↑    Move selection / scroll down/up",
-      "  PgUp/PgDn  Fast scroll (20 lines)",
-      "  Ctrl+u/d   Fast scroll (alternative)",
+      "  PgUp/PgDn  Half-page scroll",
+      "  Ctrl+u/d   Half-page scroll (alt)",
+      "  Home/End   Jump to first/last",
       "",
       "Actions:",
       "  ?          Toggle this help",
@@ -386,9 +400,13 @@ export class Dashboard implements Component {
     );
     const diffLines = this.diffPanel.render(diffWidth, this.contentHeight, this.theme);
 
+    // Pre-compute fallback padding (avoids re-allocating identical strings per row)
+    const emptyCommit = padToWidth("", commitWidth);
+    const emptyFile = padToWidth("", fileWidth);
+
     for (let i = 0; i < this.contentHeight; i++) {
-      const left = commitLines[i] || padToWidth("", commitWidth);
-      const mid = fileLines[i] || padToWidth("", fileWidth);
+      const left = commitLines[i] || emptyCommit;
+      const mid = fileLines[i] || emptyFile;
       const right = diffLines[i] || "";
       lines.push(left + sep + mid + sep + right);
     }
@@ -415,7 +433,8 @@ export class Dashboard implements Component {
         ? ` ${this.diffPanel.totalStats.filesChanged} files · ${this.theme.fg("success", `+${this.diffPanel.totalStats.additions}`)} ${this.theme.fg("error", `-${this.diffPanel.totalStats.deletions}`)}`
         : "";
       const loadingIndicator = this.commitPanel.isLoading ? " [loading...]" : "";
-      const keybinds = "[h/l] Panel [j/k] Nav [PgUp/Dn] Fast [/] Search [?] Help [q] Quit";
+      const keybinds =
+        "[h/l] Panel [j/k] Nav [PgUp/Dn] ½Page [Home/End] Jump [/] Search [?] Help [q] Quit";
 
       lines.push(
         this.theme.fg("dim", ` ${keybinds}`) +
@@ -641,19 +660,41 @@ export class Dashboard implements Component {
     const up = matchesKey(data, "k") || matchesKey(data, "up");
     const pgDown = matchesKey(data, "pageDown") || matchesKey(data, "ctrl+d");
     const pgUp = matchesKey(data, "pageUp") || matchesKey(data, "ctrl+u");
+    const home = matchesKey(data, "home");
+    const end = matchesKey(data, "end");
 
-    if (this.activePanel === "commits") this.navCommits(down, up, pgDown, pgUp);
-    else if (this.activePanel === "files") this.navFiles(down, up, pgDown, pgUp);
-    else this.navDiff(down, up, pgDown, pgUp);
+    if (this.activePanel === "commits") this.navCommits(down, up, pgDown, pgUp, home, end);
+    else if (this.activePanel === "files") this.navFiles(down, up, pgDown, pgUp, home, end);
+    else this.navDiff(down, up, pgDown, pgUp, home, end);
   }
 
-  private navCommits(down: boolean, up: boolean, pgDown: boolean, pgUp: boolean) {
+  private navCommits(
+    down: boolean,
+    up: boolean,
+    pgDown: boolean,
+    pgUp: boolean,
+    home: boolean,
+    end: boolean
+  ) {
     // Disable commit navigation in branch mode
     if (this.branchMode) return;
 
     const len = this.commitPanel.commits.length;
     if (len === 0) return;
 
+    const halfPage = Math.max(1, Math.floor(this.contentHeight / 2));
+
+    if (home) {
+      if (this.commitPanel.index !== 0) this.selectCommit(0);
+      return;
+    }
+    if (end) {
+      if (this.commitPanel.index !== len - 1) {
+        this.selectCommit(len - 1);
+        if (this.commitPanel.hasMore) this.loadMoreCommits();
+      }
+      return;
+    }
     if (down && this.commitPanel.index < len - 1) {
       this.selectCommit(this.commitPanel.index + 1);
       if (this.commitPanel.index >= len - 5 && this.commitPanel.hasMore) this.loadMoreCommits();
@@ -664,7 +705,7 @@ export class Dashboard implements Component {
       return;
     }
     if (pgDown) {
-      const next = Math.min(this.commitPanel.index + 20, len - 1);
+      const next = Math.min(this.commitPanel.index + halfPage, len - 1);
       if (next !== this.commitPanel.index) {
         this.selectCommit(next);
         if (next >= len - 5 && this.commitPanel.hasMore) this.loadMoreCommits();
@@ -672,20 +713,36 @@ export class Dashboard implements Component {
       return;
     }
     if (pgUp) {
-      const prev = Math.max(0, this.commitPanel.index - 20);
+      const prev = Math.max(0, this.commitPanel.index - halfPage);
       if (prev !== this.commitPanel.index) this.selectCommit(prev);
       return;
     }
   }
 
-  private navFiles(down: boolean, up: boolean, pgDown: boolean, pgUp: boolean) {
+  private navFiles(
+    down: boolean,
+    up: boolean,
+    pgDown: boolean,
+    pgUp: boolean,
+    home: boolean,
+    end: boolean
+  ) {
     const len = this.filePanel.files.length;
     if (len === 0) return;
 
+    const halfPage = Math.max(1, Math.floor(this.contentHeight / 2));
     const selectFn = this.branchMode
       ? (idx: number) => this.selectFileBranchMode(idx)
       : (idx: number) => this.selectFile(idx);
 
+    if (home) {
+      if (this.filePanel.index !== 0) selectFn(0);
+      return;
+    }
+    if (end) {
+      if (this.filePanel.index !== len - 1) selectFn(len - 1);
+      return;
+    }
     if (down && this.filePanel.index < len - 1) {
       selectFn(this.filePanel.index + 1);
       return;
@@ -695,39 +752,86 @@ export class Dashboard implements Component {
       return;
     }
     if (pgDown) {
-      const n = Math.min(this.filePanel.index + 20, len - 1);
+      const n = Math.min(this.filePanel.index + halfPage, len - 1);
       if (n !== this.filePanel.index) selectFn(n);
       return;
     }
     if (pgUp) {
-      const p = Math.max(0, this.filePanel.index - 20);
+      const p = Math.max(0, this.filePanel.index - halfPage);
       if (p !== this.filePanel.index) selectFn(p);
       return;
     }
   }
 
-  private navDiff(down: boolean, up: boolean, pgDown: boolean, pgUp: boolean) {
-    const maxScroll = Math.max(0, this.diffPanel.maxLines - this.contentHeight);
+  /**
+   * Queue a diff scroll change. Actual scrollOffset update is deferred via
+   * setImmediate so that rapid j/k repeats arriving in the same event-loop
+   * I/O phase are coalesced into a single render frame.
+   *
+   * Between the key event and the flush, pi-tui's automatic requestRender
+   * fires but sees an unchanged scrollOffset → doRender detects identical
+   * output → zero terminal I/O (effectively a free no-op).
+   */
+  private navDiff(
+    down: boolean,
+    up: boolean,
+    pgDown: boolean,
+    pgUp: boolean,
+    home: boolean,
+    end: boolean
+  ) {
+    const halfPage = Math.max(1, Math.floor(this.contentHeight / 2));
 
-    if (down && this.diffPanel.scrollOffset < maxScroll) {
-      this.diffPanel.scrollOffset++;
-      this.refresh();
+    if (home) {
+      this.pendingScrollTarget = 0;
+      this.pendingScrollDelta = 0;
+    } else if (end) {
+      this.pendingScrollTarget = Number.MAX_SAFE_INTEGER; // sentinel for "scroll to end"
+      this.pendingScrollDelta = 0;
+    } else if (down) {
+      this.pendingScrollDelta += 1;
+    } else if (up) {
+      this.pendingScrollDelta -= 1;
+    } else if (pgDown) {
+      this.pendingScrollDelta += halfPage;
+    } else if (pgUp) {
+      this.pendingScrollDelta -= halfPage;
+    } else {
       return;
     }
-    if (up && this.diffPanel.scrollOffset > 0) {
-      this.diffPanel.scrollOffset--;
-      this.refresh();
-      return;
+
+    if (!this.scrollFlushScheduled) {
+      this.scrollFlushScheduled = true;
+      setImmediate(() => {
+        this.scrollFlushScheduled = false;
+        this.flushDiffScroll();
+      });
     }
-    if (pgDown) {
-      this.diffPanel.scrollOffset = Math.min(this.diffPanel.scrollOffset + 20, maxScroll);
-      this.refresh();
-      return;
+  }
+
+  /** Apply accumulated scroll deltas and render once. */
+  private flushDiffScroll() {
+    const maxScroll = Math.max(0, this.diffPanel.maxLines - this.contentHeight);
+    const oldOffset = this.diffPanel.scrollOffset;
+
+    if (this.pendingScrollTarget !== null) {
+      // Handle "end" sentinel - compute actual max at flush time
+      if (this.pendingScrollTarget === Number.MAX_SAFE_INTEGER) {
+        this.diffPanel.scrollOffset = maxScroll;
+      } else {
+        this.diffPanel.scrollOffset = this.pendingScrollTarget;
+      }
+      this.pendingScrollTarget = null;
     }
-    if (pgUp) {
-      this.diffPanel.scrollOffset = Math.max(0, this.diffPanel.scrollOffset - 20);
+
+    this.diffPanel.scrollOffset += this.pendingScrollDelta;
+    this.pendingScrollDelta = 0;
+
+    // Clamp to valid range
+    this.diffPanel.scrollOffset = Math.max(0, Math.min(this.diffPanel.scrollOffset, maxScroll));
+
+    if (this.diffPanel.scrollOffset !== oldOffset) {
       this.refresh();
-      return;
     }
   }
 }
