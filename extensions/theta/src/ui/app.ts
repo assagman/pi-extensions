@@ -1,11 +1,26 @@
+/**
+ * App — Main application controller for the Theta code review dashboard.
+ *
+ * 2-band layout:
+ *   Top band:    COMMITS (left ~50%) │ FILES (right ~50%)
+ *   Bottom band: Side-by-side DIFF (old │ new, full width)
+ *
+ * Performance characteristics:
+ *   - DimmedOverlay eliminated: ~50% less per-frame work
+ *   - DiffPanel uses pre-computed styled lines: scroll = array slice
+ *   - Scroll coalescing: rapid j/k batched into single render frame
+ *   - Per-panel render caches: unchanged panels skip rendering
+ */
+
 import type { Component, TUI } from "@mariozechner/pi-tui";
 import { matchesKey } from "@mariozechner/pi-tui";
 import { type CommitInfo, DiffService } from "../services/diff-service.js";
+import { type Layout, calculateLayout } from "./layout.js";
 import { CommitPanel } from "./panels/commit-panel.js";
 import { DiffPanel } from "./panels/diff-panel.js";
 import { FilePanel } from "./panels/file-panel.js";
 import { padToWidth } from "./text-utils.js";
-import { type Panel, type PanelComponent, UNCOMMITTED_SHA } from "./types.js";
+import { type Panel, type PanelComponent, type ThemeLike, UNCOMMITTED_SHA } from "./types.js";
 
 const COMMIT_BATCH_SIZE = 50;
 
@@ -16,12 +31,11 @@ interface SearchState {
   caseSensitive: boolean;
 }
 
-export class Dashboard implements Component {
+export class App implements Component {
   private activePanel: Panel = "commits";
-  private contentHeight = 10;
-  private selectedCommit: CommitInfo | null = null;
   private showHelp = false;
   private branchMode: { base: string; head: string } | null = null;
+  private layout: Layout;
   private searchState: SearchState = {
     active: false,
     panel: "commits",
@@ -34,15 +48,11 @@ export class Dashboard implements Component {
   private readonly diffPanel = new DiffPanel();
   private readonly diffService = new DiffService();
 
-  // Deferred diff scroll batching — coalesces rapid j/k into one render
+  // Deferred diff scroll batching
   private pendingScrollDelta = 0;
   private pendingScrollTarget: number | null = null;
   private scrollFlushScheduled = false;
-
-  private cancelPendingScroll(): void {
-    this.pendingScrollDelta = 0;
-    this.pendingScrollTarget = null;
-  }
+  private destroyed = false;
 
   private readonly panelMap: Record<Panel, PanelComponent> = {
     commits: this.commitPanel,
@@ -50,10 +60,20 @@ export class Dashboard implements Component {
     diff: this.diffPanel,
   };
 
+  /** Derive selected commit from panel state. */
+  private get selectedCommit(): CommitInfo | null {
+    const commits = this.commitPanel.getDisplayCommits();
+    return commits[this.commitPanel.index] ?? null;
+  }
+
+  private cancelPendingScroll(): void {
+    this.pendingScrollDelta = 0;
+    this.pendingScrollTarget = null;
+  }
+
   constructor(
     private tui: TUI,
-    // biome-ignore lint/suspicious/noExplicitAny: Theme type not exported from pi-tui
-    private theme: any,
+    private theme: ThemeLike,
     // biome-ignore lint/suspicious/noExplicitAny: Callback result type varies
     private done: (result: any) => void,
     base?: string,
@@ -62,6 +82,7 @@ export class Dashboard implements Component {
     if (base && head) {
       this.branchMode = { base, head };
     }
+    this.layout = calculateLayout(tui.terminal.columns, tui.terminal.rows);
     this.init();
   }
 
@@ -69,14 +90,13 @@ export class Dashboard implements Component {
 
   private async init() {
     try {
-      // Branch comparison mode
       if (this.branchMode) {
-        this.selectedCommit = {
+        const branchCommit: CommitInfo = {
           sha: "",
           shortSha: "—",
           subject: `${this.branchMode.base}..${this.branchMode.head}`,
         };
-        this.commitPanel.setCommits([this.selectedCommit]);
+        this.commitPanel.setCommits([branchCommit]);
         this.diffPanel.setContent("Loading...");
         this.refresh();
 
@@ -140,7 +160,6 @@ export class Dashboard implements Component {
     const commit = this.commitPanel.getDisplayCommits()[index];
     if (!commit) return;
 
-    this.selectedCommit = commit;
     this.diffPanel.setContent("Loading...");
     this.filePanel.setFiles([]);
     this.refresh();
@@ -150,7 +169,7 @@ export class Dashboard implements Component {
         ? await this.diffService.getDiff()
         : await this.diffService.getCommitDiff(commit.sha);
 
-      if (this.commitPanel.index !== index) return; // stale
+      if (this.commitPanel.index !== index) return;
       this.filePanel.setFiles(result.files);
       this.diffPanel.totalStats = {
         additions: result.files.reduce((sum, f) => sum + f.additions, 0),
@@ -296,6 +315,9 @@ export class Dashboard implements Component {
     return padToWidth(line, width);
   }
 
+  /**
+   * Render help overlay centered on screen.
+   */
   private renderHelp(width: number, height: number): string[] {
     const lines: string[] = [];
     const helpContent = [
@@ -315,7 +337,7 @@ export class Dashboard implements Component {
       "Panels:",
       "  COMMITS    Browse commit history",
       "  FILES      View changed files",
-      "  DIFF       Inspect file diffs",
+      "  DIFF       Inspect file diffs (side-by-side)",
       "",
       "Press any key to close",
     ];
@@ -327,15 +349,12 @@ export class Dashboard implements Component {
     const startRow = Math.floor((height - boxHeight) / 2);
     const startCol = Math.floor((width - boxWidth) / 2);
 
-    // Fill with empty lines before box
     for (let i = 0; i < startRow; i++) {
       lines.push("");
     }
 
-    // Top border
     lines.push(" ".repeat(startCol) + this.theme.fg("accent", `┌${"─".repeat(boxWidth - 2)}┐`));
 
-    // Content
     for (let i = 0; i < boxHeight - 2 && i < helpContent.length; i++) {
       const content = helpContent[i] || "";
       const padded = content.padEnd(boxWidth - 4);
@@ -347,7 +366,6 @@ export class Dashboard implements Component {
       );
     }
 
-    // Bottom border
     lines.push(" ".repeat(startCol) + this.theme.fg("accent", `└${"─".repeat(boxWidth - 2)}┘`));
 
     return lines;
@@ -356,62 +374,73 @@ export class Dashboard implements Component {
   render(width: number): string[] {
     const termRows = this.tui.terminal.rows || 24;
 
-    // Show help overlay if active
     if (this.showHelp) {
       return this.renderHelp(width, termRows);
     }
 
-    const commitWidth = Math.floor(width * 0.2);
-    const fileWidth = Math.floor(width * 0.2);
-    const diffWidth = width - commitWidth - fileWidth - 2;
-    const sep = this.theme.fg("dim", "│");
+    // Recompute layout for current dimensions
+    this.layout = calculateLayout(width, termRows);
+    const { commits, files } = this.layout;
+    const topSep = this.theme.fg("dim", "│");
 
     const lines: string[] = [];
 
-    // Header
-    const mkHeader = (label: string, panel: Panel, w: number) =>
+    // ── Top Header: COMMITS │ FILES ───────────────────────────────
+    const mkTopHeader = (label: string, panel: Panel, w: number) =>
       this.activePanel === panel
         ? this.theme.bg("selectedBg", this.theme.fg("accent", padToWidth(` ${label}`, w)))
         : this.theme.fg("dim", padToWidth(` ${label}`, w));
 
     lines.push(
-      mkHeader("COMMITS", "commits", commitWidth) +
-        sep +
-        mkHeader("FILES", "files", fileWidth) +
-        sep +
-        mkHeader("DIFF", "diff", diffWidth)
+      mkTopHeader("COMMITS", "commits", commits.width) +
+        topSep +
+        mkTopHeader("FILES", "files", files.width)
     );
 
-    // Content height (termRows already set above for help check)
-    this.contentHeight = Math.max(10, termRows - 3);
-
-    // Panel contents
+    // ── Top Content: Commits │ Files ──────────────────────────────
     const commitLines = this.commitPanel.render(
-      commitWidth,
-      this.contentHeight,
+      commits.width,
+      this.layout.topContentHeight,
       this.activePanel,
       this.theme
     );
     const fileLines = this.filePanel.render(
-      fileWidth,
-      this.contentHeight,
+      files.width,
+      this.layout.topContentHeight,
       this.activePanel,
       this.theme
     );
-    const diffLines = this.diffPanel.render(diffWidth, this.contentHeight, this.theme);
 
-    // Pre-compute fallback padding (avoids re-allocating identical strings per row)
-    const emptyCommit = padToWidth("", commitWidth);
-    const emptyFile = padToWidth("", fileWidth);
+    const emptyCommit = padToWidth("", commits.width);
+    const emptyFile = padToWidth("", files.width);
 
-    for (let i = 0; i < this.contentHeight; i++) {
+    for (let i = 0; i < this.layout.topContentHeight; i++) {
       const left = commitLines[i] || emptyCommit;
       const mid = fileLines[i] || emptyFile;
-      const right = diffLines[i] || "";
-      lines.push(left + sep + mid + sep + right);
+      lines.push(left + topSep + mid);
     }
 
-    // Footer - Commit metadata line
+    // ── Diff Header ──────────────────────────────────────────────
+    const diffActive = this.activePanel === "diff";
+    const currentFile = this.filePanel.getDisplayFiles()[this.filePanel.index];
+    const filePath = currentFile ? ` DIFF · ${currentFile.path}` : " DIFF";
+    const diffHeader = this.theme.fg(diffActive ? "accent" : "dim", padToWidth(filePath, width));
+    lines.push(diffActive ? this.theme.bg("selectedBg", diffHeader) : diffHeader);
+
+    // ── Diff Content (side-by-side) ──────────────────────────────
+    const diffLines = this.diffPanel.render(
+      width,
+      this.layout.diffContentHeight,
+      this.theme,
+      this.layout.diffLeftWidth,
+      this.layout.diffRightWidth
+    );
+
+    for (let i = 0; i < this.layout.diffContentHeight; i++) {
+      lines.push(diffLines[i] || "");
+    }
+
+    // ── Footer: Commit metadata ──────────────────────────────────
     if (this.selectedCommit && !this.selectedCommit.isUncommitted) {
       const author = this.selectedCommit.author || "Unknown";
       const date = this.selectedCommit.date
@@ -419,15 +448,17 @@ export class Dashboard implements Component {
         : "";
       const metaLine = ` ${author}${date ? ` · ${date}` : ""}`;
       lines.push(this.theme.fg("dim", padToWidth(metaLine, width)));
+    } else {
+      lines.push(padToWidth("", width));
     }
 
-    // Footer - Search bar or Stats and keybindings
+    // ── Footer: Search bar or stats ──────────────────────────────
     if (this.searchState.active) {
       lines.push(this.renderSearchBar(width));
     } else {
       const scrollInfo =
-        this.diffPanel.maxLines > this.contentHeight
-          ? ` ${this.diffPanel.scrollOffset + 1}-${Math.min(this.diffPanel.scrollOffset + this.contentHeight, this.diffPanel.maxLines)}/${this.diffPanel.maxLines}`
+        this.diffPanel.maxLines > this.layout.diffContentHeight
+          ? ` ${this.diffPanel.scrollOffset + 1}-${Math.min(this.diffPanel.scrollOffset + this.layout.diffContentHeight, this.diffPanel.maxLines)}/${this.diffPanel.maxLines}`
           : "";
       const stats = this.diffPanel.totalStats
         ? ` ${this.diffPanel.totalStats.filesChanged} files · ${this.theme.fg("success", `+${this.diffPanel.totalStats.additions}`)} ${this.theme.fg("error", `-${this.diffPanel.totalStats.deletions}`)}`
@@ -458,36 +489,29 @@ export class Dashboard implements Component {
   private exitSearchMode() {
     this.searchState.active = false;
     this.searchState.query = "";
-
-    // Clear filters on all panels
     this.commitPanel.clearFilter();
     this.filePanel.clearFilter();
     this.diffPanel.clearFilter();
-
     this.refresh();
   }
 
   private handleSearchInput(data: string) {
-    // Exit search mode
     if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
       this.exitSearchMode();
       return;
     }
 
-    // Toggle case sensitivity
     if (matchesKey(data, "ctrl+i")) {
       this.searchState.caseSensitive = !this.searchState.caseSensitive;
       this.applySearch();
       return;
     }
 
-    // Apply filter (for commits/files)
     if (matchesKey(data, "return")) {
       this.applySearchFilter();
       return;
     }
 
-    // Navigate matches
     if (matchesKey(data, "n")) {
       this.nextSearchMatch();
       return;
@@ -497,7 +521,6 @@ export class Dashboard implements Component {
       return;
     }
 
-    // Switch panel during search
     if (matchesKey(data, "h")) {
       this.switchSearchPanelLeft();
       return;
@@ -507,7 +530,6 @@ export class Dashboard implements Component {
       return;
     }
 
-    // Backspace
     if (matchesKey(data, "backspace")) {
       if (this.searchState.query.length > 0) {
         this.searchState.query = this.searchState.query.slice(0, -1);
@@ -516,7 +538,6 @@ export class Dashboard implements Component {
       return;
     }
 
-    // Regular text input
     if (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) <= 126) {
       this.searchState.query += data;
       this.applySearch();
@@ -531,7 +552,6 @@ export class Dashboard implements Component {
   }
 
   private applySearchFilter() {
-    // For commits and files, move selection to first match
     if (this.searchState.panel === "commits" && this.commitPanel.filterMatchCount > 0) {
       this.commitPanel.index = 0;
       this.commitPanel.scrollOffset = 0;
@@ -610,38 +630,35 @@ export class Dashboard implements Component {
   // ── Input handling ──────────────────────────────────────────────────
 
   handleInput(data: string) {
-    // Toggle help overlay
     if (matchesKey(data, "?")) {
       this.showHelp = !this.showHelp;
       this.refresh();
       return;
     }
 
-    // Close help overlay with any key
     if (this.showHelp) {
       this.showHelp = false;
       this.refresh();
       return;
     }
 
-    // Search mode input handling
     if (this.searchState.active) {
       this.handleSearchInput(data);
       return;
     }
 
-    // Enter search mode
     if (matchesKey(data, "/")) {
       this.enterSearchMode();
       return;
     }
 
     if (matchesKey(data, "q") || matchesKey(data, "escape")) {
+      this.destroyed = true;
       this.done(null);
       return;
     }
 
-    // Panel switching: h/l
+    // Panel switching
     if (matchesKey(data, "h")) {
       if (this.activePanel === "files") this.activePanel = "commits";
       else if (this.activePanel === "diff") this.activePanel = "files";
@@ -676,13 +693,12 @@ export class Dashboard implements Component {
     home: boolean,
     end: boolean
   ) {
-    // Disable commit navigation in branch mode
     if (this.branchMode) return;
 
     const len = this.commitPanel.getDisplayCommits().length;
     if (len === 0) return;
 
-    const halfPage = Math.max(1, Math.floor(this.contentHeight / 2));
+    const halfPage = Math.max(1, Math.floor(this.layout.topContentHeight / 2));
 
     if (home) {
       if (this.commitPanel.index !== 0) this.selectCommit(0);
@@ -730,7 +746,7 @@ export class Dashboard implements Component {
     const len = this.filePanel.getDisplayFiles().length;
     if (len === 0) return;
 
-    const halfPage = Math.max(1, Math.floor(this.contentHeight / 2));
+    const halfPage = Math.max(1, Math.floor(this.layout.topContentHeight / 2));
     const selectFn = this.branchMode
       ? (idx: number) => this.selectFileBranchMode(idx)
       : (idx: number) => this.selectFile(idx);
@@ -764,13 +780,8 @@ export class Dashboard implements Component {
   }
 
   /**
-   * Queue a diff scroll change. Actual scrollOffset update is deferred via
-   * setImmediate so that rapid j/k repeats arriving in the same event-loop
-   * I/O phase are coalesced into a single render frame.
-   *
-   * Between the key event and the flush, pi-tui's automatic requestRender
-   * fires but sees an unchanged scrollOffset → doRender detects identical
-   * output → zero terminal I/O (effectively a free no-op).
+   * Queue diff scroll. Actual offset update is deferred via setImmediate
+   * so rapid j/k are coalesced into a single render frame.
    */
   private navDiff(
     down: boolean,
@@ -780,13 +791,13 @@ export class Dashboard implements Component {
     home: boolean,
     end: boolean
   ) {
-    const halfPage = Math.max(1, Math.floor(this.contentHeight / 2));
+    const halfPage = Math.max(1, Math.floor(this.layout.diffContentHeight / 2));
 
     if (home) {
       this.pendingScrollTarget = 0;
       this.pendingScrollDelta = 0;
     } else if (end) {
-      this.pendingScrollTarget = Number.MAX_SAFE_INTEGER; // sentinel for "scroll to end"
+      this.pendingScrollTarget = Number.MAX_SAFE_INTEGER;
       this.pendingScrollDelta = 0;
     } else if (down) {
       this.pendingScrollDelta += 1;
@@ -811,11 +822,11 @@ export class Dashboard implements Component {
 
   /** Apply accumulated scroll deltas and render once. */
   private flushDiffScroll() {
-    const maxScroll = Math.max(0, this.diffPanel.maxLines - this.contentHeight);
+    if (this.destroyed) return;
+    const maxScroll = Math.max(0, this.diffPanel.maxLines - this.layout.diffContentHeight);
     const oldOffset = this.diffPanel.scrollOffset;
 
     if (this.pendingScrollTarget !== null) {
-      // Handle "end" sentinel - compute actual max at flush time
       if (this.pendingScrollTarget === Number.MAX_SAFE_INTEGER) {
         this.diffPanel.scrollOffset = maxScroll;
       } else {
@@ -827,7 +838,6 @@ export class Dashboard implements Component {
     this.diffPanel.scrollOffset += this.pendingScrollDelta;
     this.pendingScrollDelta = 0;
 
-    // Clamp to valid range
     this.diffPanel.scrollOffset = Math.max(0, Math.min(this.diffPanel.scrollOffset, maxScroll));
 
     if (this.diffPanel.scrollOffset !== oldOffset) {

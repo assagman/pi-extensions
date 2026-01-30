@@ -1,6 +1,6 @@
 import type { CommitInfo } from "../../services/diff-service.js";
 import { padToWidth, scrollbarThumbPos, wrapLine } from "../text-utils.js";
-import type { Panel, PanelComponent } from "../types.js";
+import type { Panel, PanelComponent, ThemeLike } from "../types.js";
 
 export class CommitPanel implements PanelComponent {
   commits: CommitInfo[] = [];
@@ -12,6 +12,10 @@ export class CommitPanel implements PanelComponent {
   hasMore = true;
   isFiltered = false;
   private dataVersion = 0;
+
+  /** Pre-computed searchable text per commit (avoids string concat per keystroke). */
+  private searchableTexts: string[] = [];
+  private searchableTextsLower: string[] = [];
 
   /** Total visual lines after wrapping (set during render). */
   totalVisualLines = 0;
@@ -28,6 +32,17 @@ export class CommitPanel implements PanelComponent {
     return this.index;
   }
 
+  /** Build searchable text for a single commit. */
+  private static buildSearchText(c: CommitInfo): string {
+    return `${c.sha} ${c.shortSha} ${c.subject} ${c.author || ""} ${c.body || ""}`;
+  }
+
+  /** Rebuild the pre-computed search index for all commits. */
+  private rebuildSearchIndex(): void {
+    this.searchableTexts = this.commits.map(CommitPanel.buildSearchText);
+    this.searchableTextsLower = this.searchableTexts.map((t) => t.toLowerCase());
+  }
+
   setCommits(commits: CommitInfo[]): void {
     this.commits = commits;
     this.filteredCommits = [];
@@ -38,10 +53,17 @@ export class CommitPanel implements PanelComponent {
     this.dataVersion++;
     this.renderCacheKey = "";
     this.cachedRenderOutput = [];
+    this.rebuildSearchIndex();
   }
 
   addCommits(commits: CommitInfo[]): void {
     this.commits.push(...commits);
+    // Incrementally extend the search index for appended commits
+    for (const c of commits) {
+      const text = CommitPanel.buildSearchText(c);
+      this.searchableTexts.push(text);
+      this.searchableTextsLower.push(text.toLowerCase());
+    }
     this.dataVersion++;
     this.renderCacheKey = "";
     this.cachedRenderOutput = [];
@@ -56,18 +78,14 @@ export class CommitPanel implements PanelComponent {
     }
 
     const needle = caseSensitive ? query : query.toLowerCase();
+    const texts = caseSensitive ? this.searchableTexts : this.searchableTextsLower;
     this.filteredCommits = [];
     this.matchIndices = [];
 
     for (let idx = 0; idx < this.commits.length; idx++) {
-      const commit = this.commits[idx];
-      const haystack = caseSensitive
-        ? `${commit.sha} ${commit.shortSha} ${commit.subject} ${commit.author || ""} ${commit.body || ""}`
-        : `${commit.sha} ${commit.shortSha} ${commit.subject} ${commit.author || ""} ${commit.body || ""}`.toLowerCase();
-
-      if (haystack.includes(needle)) {
+      if (texts[idx].includes(needle)) {
         this.matchIndices.push(this.filteredCommits.length);
-        this.filteredCommits.push(commit);
+        this.filteredCommits.push(this.commits[idx]);
       }
     }
     this.isFiltered = true;
@@ -102,13 +120,7 @@ export class CommitPanel implements PanelComponent {
     }
   }
 
-  render(
-    width: number,
-    contentHeight: number,
-    activePanel: Panel,
-    // biome-ignore lint/suspicious/noExplicitAny: Theme type not exported from pi-tui
-    theme: any
-  ): string[] {
+  render(width: number, contentHeight: number, activePanel: Panel, theme: ThemeLike): string[] {
     const displayCommits = this.getDisplayCommits();
 
     // Always reserve 1 char for scrollbar gutter — eliminates width oscillation

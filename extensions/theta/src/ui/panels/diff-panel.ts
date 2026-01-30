@@ -1,10 +1,28 @@
+/**
+ * DiffPanel — Side-by-side diff viewer with pre-computed styled lines.
+ *
+ * Layout: OLD (left) │ NEW (right) + scrollbar gutter
+ *
+ * Performance strategy:
+ *   1. On setContent(): parse raw lines → SideBySideRow[] + compute word-diffs
+ *   2. On first render (or width/theme change): pre-compute ALL styled rows
+ *   3. On scroll: viewport = array slice of pre-computed lines + scrollbar gutter
+ *      → O(viewportHeight) lookups, zero per-line styling
+ *   4. Search highlighting: applied dynamically only for rows with matches
+ */
+
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { diffWordsWithSpace } from "diff";
-import { padToWidth, scrollbarThumbPos, wrapLine } from "../text-utils.js";
-import type { PanelComponent } from "../types.js";
+import { padToWidth, scrollbarThumbPos } from "../text-utils.js";
+import type { PanelComponent, ThemeLike } from "../types.js";
 
 /** ANSI SGR reset — ensures no color bleed after styled text. */
 const RESET = "\x1b[0m";
+
+/** Line-number column width: 3 digits + 1 space. */
+const LINE_NUM_W = 4;
+
+// ── Types ─────────────────────────────────────────────────────────────────
 
 export interface DiffStats {
   additions: number;
@@ -12,10 +30,20 @@ export interface DiffStats {
   filesChanged: number;
 }
 
-interface LineInfo {
+interface SideBySideLine {
   text: string;
-  oldLineNum?: number;
-  newLineNum?: number;
+  lineNum?: number;
+}
+
+interface SideBySideRow {
+  old?: SideBySideLine;
+  new?: SideBySideLine;
+  type: "context" | "change" | "header";
+  headerText?: string;
+  /** Raw line index for the old/header side. */
+  rawOldIndex?: number;
+  /** Raw line index for the new side. */
+  rawNewIndex?: number;
 }
 
 interface LineMatch {
@@ -42,54 +70,45 @@ interface WordHighlight {
   segments: WordSegment[];
 }
 
-/**
- * A single visual (on-screen) line produced by wrapping a raw diff line.
- * Carries enough metadata to support search-highlight + word-diff rendering.
- */
-interface VisualLine {
-  /** Index into the raw-lines array. */
-  rawIndex: number;
-  /** Starting character offset in the raw line text. */
-  colStart: number;
-  /** Ending character offset (exclusive) in the raw line text. */
-  colEnd: number;
-  /** The substring of raw text for this visual line. */
-  text: string;
-  /** Whether this is the first visual line of the raw line (gets line numbers). */
-  isFirst: boolean;
-  /** Parsed line info (for line numbers). */
-  lineInfo: LineInfo;
-}
+// ── DiffPanel ─────────────────────────────────────────────────────────────
 
 export class DiffPanel implements PanelComponent {
+  // ── Content state ───────────────────────────────────────────────────
   private content = "Loading...";
   scrollOffset = 0;
   maxLines = 0;
   totalStats: DiffStats | null = null;
   showLineNumbers = true;
+  enableWordDiff = true;
+
+  // ── Search state ────────────────────────────────────────────────────
   matchPositions: LineMatch[] = [];
   private matchesByRawLine: LineMatch[][] = [];
   currentMatchIndex = 0;
-  enableWordDiff = true;
+  private matchIndexMap = new Map<LineMatch, number>();
+
+  // ── Parsed data ─────────────────────────────────────────────────────
+  private cachedRawLines: string[] = [];
+  private sbsRows: SideBySideRow[] = [];
+  /** Map raw line index → SBS row index (for search navigation). */
+  private rawLineToSbsRow: number[] = [];
   private wordHighlightsByLine: (WordHighlight | undefined)[] = [];
 
-  /** Last contentHeight seen during render — used by scrollToMatch. */
-  private lastContentHeight = 20;
-  /** Incremental scroll optimization state. */
-  private lastScrollOffset = -1;
-  private lastWidth = 0;
-  private lastRenderVersion = -1;
-  /** Cached wrapping state. */
-  private cachedWidth = 0;
-  private cachedVisualLines: VisualLine[] = [];
-  private cachedLineInfos: LineInfo[] = [];
-  /** Cached raw lines — avoids content.split("\n") on every render frame. */
-  private cachedRawLines: string[] = [];
+  // ── Pre-computed styled lines ───────────────────────────────────────
+  private precomputedLines: string[] = [];
+  private precomputedLeftW = 0;
+  private precomputedRightW = 0;
+  private precomputedTheme: ThemeLike = null;
+  private blankLine = "";
+  private stylesDirty = true;
 
-  /** Render output cache — avoids re-rendering when inputs haven't changed. */
+  // ── Render cache ────────────────────────────────────────────────────
+  private lastContentHeight = 20;
   private renderVersion = 0;
-  private cachedRenderOutput: string[] = [];
   private renderCacheKey = "";
+  private cachedRenderOutput: string[] = [];
+
+  // ── PanelComponent (search interface) ───────────────────────────────
 
   get filterMatchCount(): number {
     return this.matchPositions.length;
@@ -106,186 +125,328 @@ export class DiffPanel implements PanelComponent {
     this.scrollOffset = 0;
     this.cachedRawLines = content.split("\n");
     this.matchesByRawLine = [];
+    this.matchIndexMap = new Map();
+    this.matchPositions = [];
+    this.currentMatchIndex = 0;
+    this.stylesDirty = true;
     this.renderVersion++;
+    this.renderCacheKey = "";
+    this.cachedRenderOutput = [];
+
     this.computeWordHighlights();
-
-    // Eagerly recompute wrapping if we know the panel width from a prior render.
-    // This ensures maxLines is accurate BEFORE the next nav call (prevents "stuck").
-    if (this.cachedWidth > 0) {
-      this.recomputeWrapping(this.cachedWidth);
-    } else {
-      // First call — no width known yet. Use raw line count as estimate.
-      this.cachedVisualLines = [];
-      this.cachedLineInfos = [];
-      this.maxLines = this.cachedRawLines.length;
-    }
+    this.parseSideBySide();
   }
 
-  private invalidateCache(): void {
-    this.cachedWidth = 0;
-    this.cachedVisualLines = [];
-    this.cachedLineInfos = [];
-  }
-
-  // ── Wrapping cache ──────────────────────────────────────────────────
+  // ── Side-by-side parsing ────────────────────────────────────────────
 
   /**
-   * Ensure the visual-line cache is up-to-date for the given panel width.
-   * Called at the start of render() and also from scrollToMatch (with the
-   * last known width) so navigation works between renders.
+   * Parse unified diff lines into SideBySideRow[].
+   *
+   * Algorithm:
+   *   - Context lines → same text on both sides
+   *   - Consecutive - then + lines → paired as change block
+   *   - @@ / diff / index / etc → header rows spanning both columns
    */
-  private ensureCache(width: number): void {
-    if (width === this.cachedWidth && this.cachedVisualLines.length > 0) return;
-    this.recomputeWrapping(width);
-  }
+  private parseSideBySide(): void {
+    const lines = this.cachedRawLines;
+    const rows: SideBySideRow[] = [];
+    this.rawLineToSbsRow = new Array(lines.length).fill(-1);
 
-  private recomputeWrapping(width: number): void {
-    this.cachedWidth = width;
-    const lineNumWidth = this.showLineNumbers ? 8 : 0;
-    const contentWidth = Math.max(1, width - lineNumWidth);
+    let oldLineNum = 0;
+    let newLineNum = 0;
+    let i = 0;
 
-    // Parse line numbers once
-    this.cachedLineInfos = this.showLineNumbers
-      ? this.parseLineNumbers(this.cachedRawLines)
-      : this.cachedRawLines.map((text) => ({ text }));
+    while (i < lines.length) {
+      const line = lines[i];
 
-    // Wrap each raw line
-    const visual: VisualLine[] = [];
-    for (let ri = 0; ri < this.cachedLineInfos.length; ri++) {
-      const info = this.cachedLineInfos[ri];
-      const wrapped = wrapLine(info.text, contentWidth);
-      let colStart = 0;
-      for (let wi = 0; wi < wrapped.length; wi++) {
-        const colEnd = colStart + wrapped[wi].length;
-        visual.push({
-          rawIndex: ri,
-          colStart,
-          colEnd,
-          text: wrapped[wi],
-          isFirst: wi === 0,
-          lineInfo: info,
-        });
-        colStart = colEnd;
+      // Hunk header
+      if (line.startsWith("@@ ")) {
+        const hunkMatch = line.match(/^@@ -(\d+),?\d* \+(\d+),?\d* @@/);
+        if (hunkMatch) {
+          oldLineNum = Number.parseInt(hunkMatch[1], 10);
+          newLineNum = Number.parseInt(hunkMatch[2], 10);
+        }
+        const rowIdx = rows.length;
+        rows.push({ type: "header", headerText: line, rawOldIndex: i });
+        this.rawLineToSbsRow[i] = rowIdx;
+        i++;
+        continue;
       }
+
+      // Other header lines
+      if (
+        line.startsWith("diff ") ||
+        line.startsWith("index ") ||
+        line.startsWith("--- ") ||
+        line.startsWith("+++ ") ||
+        line.startsWith("Binary ") ||
+        line.startsWith("new file") ||
+        line.startsWith("deleted file") ||
+        line.startsWith("rename") ||
+        line.startsWith("similarity") ||
+        line.startsWith("old mode") ||
+        line.startsWith("new mode")
+      ) {
+        const rowIdx = rows.length;
+        rows.push({ type: "header", headerText: line, rawOldIndex: i });
+        this.rawLineToSbsRow[i] = rowIdx;
+        i++;
+        continue;
+      }
+
+      // Deletion block (possibly followed by addition block)
+      if (line.startsWith("-")) {
+        const deletions: { rawIndex: number; text: string; lineNum: number }[] = [];
+        while (i < lines.length && lines[i].startsWith("-") && !lines[i].startsWith("---")) {
+          deletions.push({ rawIndex: i, text: lines[i].substring(1), lineNum: oldLineNum++ });
+          i++;
+        }
+
+        const additions: { rawIndex: number; text: string; lineNum: number }[] = [];
+        while (i < lines.length && lines[i].startsWith("+") && !lines[i].startsWith("+++")) {
+          additions.push({ rawIndex: i, text: lines[i].substring(1), lineNum: newLineNum++ });
+          i++;
+        }
+
+        const maxLen = Math.max(deletions.length, additions.length);
+        for (let j = 0; j < maxLen; j++) {
+          const del = deletions[j];
+          const add = additions[j];
+          const rowIdx = rows.length;
+          rows.push({
+            type: "change",
+            old: del ? { text: del.text, lineNum: del.lineNum } : undefined,
+            new: add ? { text: add.text, lineNum: add.lineNum } : undefined,
+            rawOldIndex: del?.rawIndex,
+            rawNewIndex: add?.rawIndex,
+          });
+          if (del) this.rawLineToSbsRow[del.rawIndex] = rowIdx;
+          if (add) this.rawLineToSbsRow[add.rawIndex] = rowIdx;
+        }
+        continue;
+      }
+
+      // Pure addition (no preceding deletion)
+      if (line.startsWith("+")) {
+        const rowIdx = rows.length;
+        rows.push({
+          type: "change",
+          new: { text: line.substring(1), lineNum: newLineNum++ },
+          rawNewIndex: i,
+        });
+        this.rawLineToSbsRow[i] = rowIdx;
+        i++;
+        continue;
+      }
+
+      // Context line (starts with space)
+      if (line.startsWith(" ")) {
+        const rowIdx = rows.length;
+        rows.push({
+          type: "context",
+          old: { text: line.substring(1), lineNum: oldLineNum++ },
+          new: { text: line.substring(1), lineNum: newLineNum++ },
+          rawOldIndex: i,
+          rawNewIndex: i,
+        });
+        this.rawLineToSbsRow[i] = rowIdx;
+        i++;
+        continue;
+      }
+
+      // Unknown / empty line → header
+      const rowIdx = rows.length;
+      rows.push({ type: "header", headerText: line, rawOldIndex: i });
+      this.rawLineToSbsRow[i] = rowIdx;
+      i++;
     }
 
-    this.cachedVisualLines = visual;
-    this.maxLines = visual.length;
+    this.sbsRows = rows;
+    this.maxLines = rows.length;
   }
 
-  // ── Scroll clamping ─────────────────────────────────────────────────
+  // ── Pre-computation engine ──────────────────────────────────────────
 
-  /** Clamp scrollOffset to valid range. Call after any mutation. */
-  clampScroll(contentHeight: number): void {
-    const maxScroll = Math.max(0, this.maxLines - contentHeight);
-    this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
-  }
-
-  // ── Search ──────────────────────────────────────────────────────────
-
-  findMatches(query: string, caseSensitive: boolean): void {
-    this.matchPositions = [];
-    this.matchesByRawLine = [];
-    if (!query) {
-      this.renderVersion++;
+  private ensurePrecomputedStyles(leftWidth: number, rightWidth: number, theme: ThemeLike): void {
+    if (
+      !this.stylesDirty &&
+      leftWidth === this.precomputedLeftW &&
+      rightWidth === this.precomputedRightW &&
+      theme === this.precomputedTheme
+    ) {
       return;
     }
+    this.precomputeStyles(leftWidth, rightWidth, theme);
+  }
 
-    // Pre-allocate the index array
-    for (let i = 0; i < this.cachedRawLines.length; i++) {
-      this.matchesByRawLine[i] = [];
+  private precomputeStyles(leftWidth: number, rightWidth: number, theme: ThemeLike): void {
+    this.precomputedLeftW = leftWidth;
+    this.precomputedRightW = rightWidth;
+    this.precomputedTheme = theme;
+    this.stylesDirty = false;
+
+    const spanW = leftWidth + 1 + rightWidth; // full content width (no gutter)
+    this.blankLine = " ".repeat(spanW);
+
+    this.precomputedLines = new Array(this.sbsRows.length);
+    for (let i = 0; i < this.sbsRows.length; i++) {
+      this.precomputedLines[i] = this.precomputeSbsLine(i, leftWidth, rightWidth, theme);
     }
 
-    const needle = caseSensitive ? query : query.toLowerCase();
-
-    for (let i = 0; i < this.cachedRawLines.length; i++) {
-      const line = caseSensitive ? this.cachedRawLines[i] : this.cachedRawLines[i].toLowerCase();
-      let startIndex = 0;
-
-      while (true) {
-        const index = line.indexOf(needle, startIndex);
-        if (index === -1) break;
-        const m: LineMatch = {
-          lineIndex: i,
-          startCol: index,
-          length: query.length,
-        };
-        this.matchPositions.push(m);
-        this.matchesByRawLine[i].push(m);
-        startIndex = index + 1;
-      }
-    }
-
-    this.currentMatchIndex = 0;
+    this.maxLines = this.precomputedLines.length;
     this.renderVersion++;
-    if (this.matchPositions.length > 0) {
-      this.scrollToMatch(0);
+    this.renderCacheKey = "";
+    this.cachedRenderOutput = [];
+  }
+
+  // ── Single-line pre-computation ─────────────────────────────────────
+
+  private precomputeSbsLine(
+    rowIdx: number,
+    leftWidth: number,
+    rightWidth: number,
+    theme: ThemeLike
+  ): string {
+    const row = this.sbsRows[rowIdx];
+
+    if (row.type === "header") {
+      return this.renderSbsHeader(row, leftWidth + 1 + rightWidth, theme);
     }
+
+    const sep = theme.fg("dim", "│");
+    const oldColor = row.type === "change" && row.old ? "error" : "text";
+    const newColor = row.type === "change" && row.new ? "success" : "text";
+
+    const oldStr = this.renderSbsSide(row.old, row.rawOldIndex, leftWidth, oldColor, false, theme);
+    const newStr = this.renderSbsSide(row.new, row.rawNewIndex, rightWidth, newColor, false, theme);
+
+    return oldStr + sep + newStr;
   }
 
   /**
-   * Scroll viewport to center a search match.
-   * Uses the wrapping cache to find the correct visual line position.
+   * Render a header row spanning both columns.
+   * Hunk headers (@@ ... @@) are centered between dashes.
+   * Other headers are left-aligned and dimmed.
    */
-  scrollToMatch(matchIndex: number): void {
-    if (matchIndex < 0 || matchIndex >= this.matchPositions.length) return;
-    this.currentMatchIndex = matchIndex;
+  private renderSbsHeader(row: SideBySideRow, totalWidth: number, theme: ThemeLike): string {
+    const text = row.headerText || "";
 
-    const match = this.matchPositions[matchIndex];
-    const ch = this.lastContentHeight;
-
-    // Ensure cache is available (use last known width)
-    if (this.cachedWidth > 0) {
-      this.ensureCache(this.cachedWidth);
-    }
-
-    // Find the visual line containing this match
-    let targetVisualLine = match.lineIndex; // fallback: raw index
-    for (let v = 0; v < this.cachedVisualLines.length; v++) {
-      const vl = this.cachedVisualLines[v];
-      if (
-        vl.rawIndex === match.lineIndex &&
-        match.startCol >= vl.colStart &&
-        match.startCol < vl.colEnd
-      ) {
-        targetVisualLine = v;
-        break;
+    if (text.startsWith("@@")) {
+      // Center hunk header between dashes: ─── @@ ... @@ ───
+      const vw = visibleWidth(text);
+      const available = totalWidth - vw - 2; // 2 for spaces around text
+      if (available > 0) {
+        const leftDash = Math.floor(available / 2);
+        const rightDash = available - leftDash;
+        const line = `${"─".repeat(leftDash)} ${text} ${"─".repeat(rightDash)}`;
+        return theme.fg("accent", padToWidth(line, totalWidth));
       }
+      return theme.fg("accent", padToWidth(text, totalWidth));
     }
 
-    // Center in viewport
-    const halfPage = Math.floor(ch / 2);
-    const maxScroll = Math.max(0, this.maxLines - ch);
-    this.scrollOffset = Math.max(0, Math.min(targetVisualLine - halfPage, maxScroll));
+    return theme.fg("dim", padToWidth(text, totalWidth));
   }
 
-  nextMatch(): void {
-    if (this.matchPositions.length === 0) return;
-    const next = (this.currentMatchIndex + 1) % this.matchPositions.length;
-    this.renderVersion++;
-    this.scrollToMatch(next);
+  /**
+   * Render one side (old or new) of a SBS row.
+   * Handles line numbers, word-diff, and optionally search highlighting.
+   */
+  private renderSbsSide(
+    line: SideBySideLine | undefined,
+    rawIndex: number | undefined,
+    sideWidth: number,
+    lineColor: string,
+    withSearch: boolean,
+    theme: ThemeLike
+  ): string {
+    const lineNumW = this.showLineNumbers ? LINE_NUM_W : 0;
+    const contentW = Math.max(1, sideWidth - lineNumW);
+
+    if (!line) {
+      return padToWidth("", sideWidth);
+    }
+
+    // Line number
+    let lineNumStr = "";
+    if (this.showLineNumbers) {
+      lineNumStr =
+        line.lineNum !== undefined
+          ? theme.fg("dim", `${String(line.lineNum).padStart(3)} `)
+          : theme.fg("dim", "    ");
+    }
+
+    // Content
+    let content: string;
+
+    if (withSearch && rawIndex !== undefined) {
+      const matches = this.matchesByRawLine[rawIndex];
+      if (matches && matches.length > 0) {
+        content = this.renderSearchHighlightedText(
+          line.text,
+          matches,
+          1, // colOffset: skip prefix char in raw line
+          contentW,
+          lineColor,
+          theme
+        );
+      } else {
+        content = this.renderSideContent(line.text, rawIndex, contentW, lineColor, theme);
+      }
+    } else {
+      content = this.renderSideContent(line.text, rawIndex, contentW, lineColor, theme);
+    }
+
+    return lineNumStr + content;
   }
 
-  prevMatch(): void {
-    if (this.matchPositions.length === 0) return;
-    const prev =
-      (this.currentMatchIndex - 1 + this.matchPositions.length) % this.matchPositions.length;
-    this.renderVersion++;
-    this.scrollToMatch(prev);
+  /**
+   * Render content for one side — applies word-diff or plain color.
+   */
+  private renderSideContent(
+    text: string,
+    rawIndex: number | undefined,
+    contentW: number,
+    lineColor: string,
+    theme: ThemeLike
+  ): string {
+    const wordHL = rawIndex !== undefined ? this.wordHighlightsByLine[rawIndex] : undefined;
+    if (wordHL) {
+      return this.padStyled(this.renderSbsWordHighlight(wordHL, contentW, theme), contentW);
+    }
+    return theme.fg(lineColor, padToWidth(text, contentW));
   }
 
-  clearMatches(): void {
-    this.matchPositions = [];
-    this.currentMatchIndex = 0;
-    this.renderVersion++;
-  }
+  // ── Word-diff rendering ─────────────────────────────────────────────
 
-  applyFilter(query: string, caseSensitive: boolean): void {
-    this.findMatches(query, caseSensitive);
-  }
+  /**
+   * Render word-highlighted text for side-by-side display.
+   * Segments are in text-space (prefix already stripped).
+   */
+  private renderSbsWordHighlight(
+    highlight: WordHighlight,
+    maxWidth: number,
+    theme: ThemeLike
+  ): string {
+    const fgColor = highlight.type === "deletion" ? "error" : "success";
+    const bgColor = highlight.type === "deletion" ? "toolErrorBg" : "toolSuccessBg";
+    const parts: string[] = [];
+    let col = 0;
 
-  clearFilter(): void {
-    this.clearMatches();
+    for (const segment of highlight.segments) {
+      if (col >= maxWidth) break;
+      const remaining = maxWidth - col;
+      const text =
+        segment.text.length > remaining ? segment.text.substring(0, remaining) : segment.text;
+
+      if (segment.highlight) {
+        parts.push(theme.bg(bgColor, theme.fg("text", text)));
+      } else {
+        parts.push(theme.fg(fgColor, text));
+      }
+      col += text.length;
+    }
+
+    return parts.join("");
   }
 
   // ── Word-diff computation ───────────────────────────────────────────
@@ -374,257 +535,225 @@ export class DiffPanel implements PanelComponent {
     const pairs = this.findModifiedLinePairs(this.cachedRawLines);
     const highlights = this.computeWordDiffs(pairs);
 
-    // Convert Map to array indexed by line number for faster lookup
     this.wordHighlightsByLine = new Array(this.cachedRawLines.length);
     for (const [lineIndex, highlight] of highlights) {
       this.wordHighlightsByLine[lineIndex] = highlight;
     }
   }
 
-  // ── Line number parsing ─────────────────────────────────────────────
+  // ── Scroll clamping ─────────────────────────────────────────────────
 
-  private parseLineNumbers(lines: string[]): LineInfo[] {
-    const result: LineInfo[] = [];
-    let oldLine = 0;
-    let newLine = 0;
+  clampScroll(contentHeight: number): void {
+    const maxScroll = Math.max(0, this.maxLines - contentHeight);
+    this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
+  }
 
-    for (const line of lines) {
-      const hunkMatch = line.match(/^@@ -(\d+),?\d* \+(\d+),?\d* @@/);
-      if (hunkMatch) {
-        oldLine = Number.parseInt(hunkMatch[1], 10);
-        newLine = Number.parseInt(hunkMatch[2], 10);
-        result.push({ text: line });
-        continue;
-      }
+  // ── Search ──────────────────────────────────────────────────────────
 
-      if (line.startsWith("+")) {
-        result.push({ text: line, newLineNum: newLine });
-        newLine++;
-      } else if (line.startsWith("-")) {
-        result.push({ text: line, oldLineNum: oldLine });
-        oldLine++;
-      } else if (line.startsWith(" ")) {
-        result.push({ text: line, oldLineNum: oldLine, newLineNum: newLine });
-        oldLine++;
-        newLine++;
-      } else {
-        result.push({ text: line });
+  findMatches(query: string, caseSensitive: boolean): void {
+    this.matchPositions = [];
+    this.matchesByRawLine = [];
+    if (!query) {
+      this.renderVersion++;
+      return;
+    }
+
+    for (let i = 0; i < this.cachedRawLines.length; i++) {
+      this.matchesByRawLine[i] = [];
+    }
+
+    const needle = caseSensitive ? query : query.toLowerCase();
+    for (let i = 0; i < this.cachedRawLines.length; i++) {
+      const line = caseSensitive ? this.cachedRawLines[i] : this.cachedRawLines[i].toLowerCase();
+      let startIndex = 0;
+      while (true) {
+        const index = line.indexOf(needle, startIndex);
+        if (index === -1) break;
+        const m: LineMatch = { lineIndex: i, startCol: index, length: query.length };
+        this.matchPositions.push(m);
+        this.matchesByRawLine[i].push(m);
+        startIndex = index + 1;
       }
     }
 
-    return result;
+    this.matchIndexMap = new Map();
+    for (let idx = 0; idx < this.matchPositions.length; idx++) {
+      this.matchIndexMap.set(this.matchPositions[idx], idx);
+    }
+
+    this.currentMatchIndex = 0;
+    this.renderVersion++;
+    if (this.matchPositions.length > 0) {
+      this.scrollToMatch(0);
+    }
+  }
+
+  scrollToMatch(matchIndex: number): void {
+    if (matchIndex < 0 || matchIndex >= this.matchPositions.length) return;
+    this.currentMatchIndex = matchIndex;
+
+    const match = this.matchPositions[matchIndex];
+    const ch = this.lastContentHeight;
+
+    // Map raw line index → SBS row index
+    const targetRow = this.rawLineToSbsRow[match.lineIndex] ?? match.lineIndex;
+    const halfPage = Math.floor(ch / 2);
+    const maxScroll = Math.max(0, this.maxLines - ch);
+    this.scrollOffset = Math.max(0, Math.min(targetRow - halfPage, maxScroll));
+  }
+
+  nextMatch(): void {
+    if (this.matchPositions.length === 0) return;
+    const next = (this.currentMatchIndex + 1) % this.matchPositions.length;
+    this.renderVersion++;
+    this.scrollToMatch(next);
+  }
+
+  prevMatch(): void {
+    if (this.matchPositions.length === 0) return;
+    const prev =
+      (this.currentMatchIndex - 1 + this.matchPositions.length) % this.matchPositions.length;
+    this.renderVersion++;
+    this.scrollToMatch(prev);
+  }
+
+  clearMatches(): void {
+    this.matchPositions = [];
+    this.matchesByRawLine = [];
+    this.matchIndexMap = new Map();
+    this.currentMatchIndex = 0;
+    this.renderVersion++;
+  }
+
+  applyFilter(query: string, caseSensitive: boolean): void {
+    this.findMatches(query, caseSensitive);
+  }
+
+  clearFilter(): void {
+    this.clearMatches();
+  }
+
+  // ── Search rendering helpers ────────────────────────────────────────
+
+  /**
+   * Render text with search match highlighting.
+   *
+   * @param text      Displayed text (prefix-stripped for diff content)
+   * @param matches   Matches from matchesByRawLine for the raw line
+   * @param colOffset Column offset (1 for prefix-stripped lines, 0 for headers)
+   * @param maxWidth  Maximum visible width to render
+   * @param lineColor Base color for non-matched text
+   */
+  private renderSearchHighlightedText(
+    text: string,
+    matches: LineMatch[],
+    colOffset: number,
+    maxWidth: number,
+    lineColor: string,
+    theme: ThemeLike
+  ): string {
+    const sorted = [...matches].sort((a, b) => a.startCol - b.startCol);
+    const parts: string[] = [];
+    let cursor = 0;
+
+    for (const match of sorted) {
+      const isCurrentMatch = this.matchIndexMap.get(match) === this.currentMatchIndex;
+      const mStart = Math.max(0, match.startCol - colOffset);
+      const mEnd = Math.max(0, match.startCol + match.length - colOffset);
+
+      if (mEnd <= 0 || mStart >= text.length) continue;
+
+      const effStart = Math.max(mStart, cursor);
+      const effEnd = Math.min(mEnd, text.length);
+
+      if (effStart > cursor) {
+        parts.push(theme.fg(lineColor, text.substring(cursor, effStart)));
+      }
+
+      if (effStart < effEnd) {
+        const matchText = text.substring(effStart, effEnd);
+        if (isCurrentMatch) {
+          parts.push(theme.bg("selectedBg", theme.fg("accent", matchText)));
+        } else {
+          parts.push(theme.bg("warning", theme.fg("text", matchText)));
+        }
+      }
+
+      cursor = effEnd;
+    }
+
+    if (cursor < text.length) {
+      parts.push(theme.fg(lineColor, text.substring(cursor)));
+    }
+
+    return this.padStyled(parts.join(""), maxWidth);
+  }
+
+  /**
+   * Render a SBS row with search highlighting (called when search is active).
+   */
+  private renderSbsLineWithSearch(
+    rowIdx: number,
+    leftWidth: number,
+    rightWidth: number,
+    theme: ThemeLike
+  ): string {
+    const row = this.sbsRows[rowIdx];
+
+    if (row.type === "header") {
+      // Check for matches on the header's raw line
+      const rawIdx = row.rawOldIndex;
+      if (rawIdx !== undefined) {
+        const matches = this.matchesByRawLine[rawIdx];
+        if (matches && matches.length > 0) {
+          const totalW = leftWidth + 1 + rightWidth;
+          const text = row.headerText || "";
+          const color = text.startsWith("@@") ? "accent" : "dim";
+          return this.renderSearchHighlightedText(text, matches, 0, totalW, color, theme);
+        }
+      }
+      return this.precomputedLines[rowIdx];
+    }
+
+    const sep = theme.fg("dim", "│");
+    const oldColor = row.type === "change" && row.old ? "error" : "text";
+    const newColor = row.type === "change" && row.new ? "success" : "text";
+
+    const hasOldMatch =
+      row.rawOldIndex !== undefined && this.matchesByRawLine[row.rawOldIndex]?.length > 0;
+    const hasNewMatch =
+      row.rawNewIndex !== undefined && this.matchesByRawLine[row.rawNewIndex]?.length > 0;
+
+    const oldStr = this.renderSbsSide(
+      row.old,
+      row.rawOldIndex,
+      leftWidth,
+      oldColor,
+      hasOldMatch,
+      theme
+    );
+    const newStr = this.renderSbsSide(
+      row.new,
+      row.rawNewIndex,
+      rightWidth,
+      newColor,
+      hasNewMatch,
+      theme
+    );
+
+    return oldStr + sep + newStr;
   }
 
   // ── Rendering helpers ───────────────────────────────────────────────
 
   /**
-   * Pad styled text to exact visible width, inserting an ANSI reset before
-   * the padding spaces so trailing colors never bleed.
+   * Pad styled text to exact visible width, inserting ANSI reset before
+   * padding spaces so trailing colors never bleed.
    */
   private padStyled(text: string, width: number): string {
     const vw = visibleWidth(text);
     if (vw >= width) return text;
-    // Reset ANSI state, then pad with clean spaces
     return text + RESET + " ".repeat(width - vw);
-  }
-
-  /**
-   * Render a portion of a word-highlight for a visual-line column range.
-   * `colStart`/`colEnd` are string offsets into the raw line text.
-   */
-  private renderWordHighlightSlice(
-    highlight: WordHighlight,
-    colStart: number,
-    colEnd: number,
-    isFirst: boolean,
-    // biome-ignore lint/suspicious/noExplicitAny: Theme type not exported from pi-tui
-    theme: any
-  ): string {
-    const fgColor = highlight.type === "deletion" ? "error" : "success";
-    const bgColor = highlight.type === "deletion" ? "toolErrorBg" : "toolSuccessBg";
-    const parts: string[] = [];
-
-    // The prefix (+/-) is at column 0. Segments start at column 1.
-    const prefixChar = highlight.type === "deletion" ? "-" : "+";
-
-    if (isFirst && colStart === 0) {
-      parts.push(theme.fg(fgColor, prefixChar));
-    }
-
-    // Map segments to column offsets (1-based, after prefix)
-    let segCol = 1; // segments start after the prefix character
-    for (const segment of highlight.segments) {
-      const segEnd = segCol + segment.text.length;
-
-      // Overlap between [segCol, segEnd) and [colStart, colEnd)
-      const overlapStart = Math.max(segCol, colStart);
-      const overlapEnd = Math.min(segEnd, colEnd);
-
-      if (overlapStart < overlapEnd) {
-        const sliceStart = overlapStart - segCol;
-        const sliceEnd = overlapEnd - segCol;
-        const sliceText = segment.text.substring(sliceStart, sliceEnd);
-
-        if (segment.highlight) {
-          parts.push(theme.bg(bgColor, theme.fg("text", sliceText)));
-        } else {
-          parts.push(theme.fg(fgColor, sliceText));
-        }
-      }
-
-      segCol = segEnd;
-      if (segCol >= colEnd) break;
-    }
-
-    return parts.join("");
-  }
-
-  /**
-   * Render a visual line's text portion with search-match highlighting.
-   * The visual line covers raw-line columns [colStart, colEnd).
-   */
-  private renderSearchHighlightSlice(
-    rawText: string,
-    lineMatches: LineMatch[],
-    colStart: number,
-    colEnd: number,
-    lineColor: string,
-    // biome-ignore lint/suspicious/noExplicitAny: Theme type not exported from pi-tui
-    theme: any
-  ): string {
-    // Filter to only overlapping matches (lineMatches is already for this line)
-    const matches = lineMatches.filter(
-      (m) => m.startCol < colEnd && m.startCol + m.length > colStart
-    );
-
-    if (matches.length === 0) {
-      const sliceText = rawText.substring(colStart, colEnd);
-      return theme.fg(lineColor, sliceText);
-    }
-
-    const sorted = matches.sort((a, b) => a.startCol - b.startCol);
-    const parts: string[] = [];
-    let cursor = colStart;
-
-    for (const match of sorted) {
-      const isCurrentMatch = this.matchPositions.indexOf(match) === this.currentMatchIndex;
-      const mStart = Math.max(match.startCol, colStart);
-      const mEnd = Math.min(match.startCol + match.length, colEnd);
-
-      // Text before match
-      if (mStart > cursor) {
-        parts.push(theme.fg(lineColor, rawText.substring(cursor, mStart)));
-      }
-
-      // Highlighted match portion
-      const matchText = rawText.substring(mStart, mEnd);
-      if (isCurrentMatch) {
-        parts.push(theme.bg("selectedBg", theme.fg("accent", matchText)));
-      } else {
-        parts.push(theme.bg("warning", theme.fg("text", matchText)));
-      }
-
-      cursor = mEnd;
-    }
-
-    // Remaining text after last match
-    if (cursor < colEnd) {
-      parts.push(theme.fg(lineColor, rawText.substring(cursor, colEnd)));
-    }
-
-    return parts.join("");
-  }
-
-  // ── Single-line rendering helper ────────────────────────────────────
-
-  private renderSingleLine(
-    lineIdx: number,
-    contentWidth: number,
-    _lineNumWidth: number,
-    thumbPos: number,
-    viewportRow: number,
-    blankGutter: string,
-    blankContent: string,
-    blankLineGutter: string,
-    gutterThumb: string,
-    gutterSpace: string,
-    hasMatches: boolean,
-    hasWordHighlights: boolean,
-    // biome-ignore lint/suspicious/noExplicitAny: Theme type not exported
-    theme: any
-  ): string {
-    const suffix = thumbPos >= 0 && viewportRow === thumbPos ? gutterThumb : gutterSpace;
-
-    if (lineIdx >= this.cachedVisualLines.length) {
-      return blankLineGutter + blankContent + suffix;
-    }
-
-    const vl = this.cachedVisualLines[lineIdx];
-    const rawText = this.cachedRawLines[vl.rawIndex] || "";
-
-    let lineNumStr = "";
-    if (this.showLineNumbers) {
-      if (vl.isFirst) {
-        const info = vl.lineInfo;
-        if (info.oldLineNum !== undefined && info.newLineNum !== undefined) {
-          lineNumStr = theme.fg(
-            "dim",
-            `${String(info.oldLineNum).padStart(3)}|${String(info.newLineNum).padStart(3)} `
-          );
-        } else if (info.oldLineNum !== undefined) {
-          lineNumStr = theme.fg("error", `${String(info.oldLineNum).padStart(3)}|    `);
-        } else if (info.newLineNum !== undefined) {
-          lineNumStr = theme.fg("success", `   |${String(info.newLineNum).padStart(3)} `);
-        } else {
-          lineNumStr = blankGutter;
-        }
-      } else {
-        lineNumStr = blankGutter;
-      }
-    }
-
-    let matchesOnSlice = false;
-    let lineMatches: LineMatch[] | undefined;
-    if (hasMatches) {
-      lineMatches = this.matchesByRawLine[vl.rawIndex];
-      if (lineMatches && lineMatches.length > 0) {
-        matchesOnSlice = lineMatches.some(
-          (m) => m.startCol < vl.colEnd && m.startCol + m.length > vl.colStart
-        );
-      }
-    }
-    const wordHighlight = hasWordHighlights ? this.wordHighlightsByLine[vl.rawIndex] : undefined;
-    let styledLine: string;
-
-    let lineColor: string;
-    if (rawText.startsWith("+")) lineColor = "success";
-    else if (rawText.startsWith("-")) lineColor = "error";
-    else if (rawText.startsWith("@@")) lineColor = "accent";
-    else if (rawText.startsWith("diff ") || rawText.startsWith("index ")) lineColor = "dim";
-    else lineColor = "text";
-
-    if (matchesOnSlice && lineMatches) {
-      styledLine = this.padStyled(
-        this.renderSearchHighlightSlice(
-          rawText,
-          lineMatches,
-          vl.colStart,
-          vl.colEnd,
-          lineColor,
-          theme
-        ),
-        contentWidth
-      );
-    } else if (wordHighlight) {
-      styledLine = this.padStyled(
-        this.renderWordHighlightSlice(wordHighlight, vl.colStart, vl.colEnd, vl.isFirst, theme),
-        contentWidth
-      );
-    } else {
-      styledLine = theme.fg(lineColor, padToWidth(vl.text, contentWidth));
-    }
-
-    return lineNumStr + styledLine + suffix;
   }
 
   // ── Main render ─────────────────────────────────────────────────────
@@ -632,207 +761,46 @@ export class DiffPanel implements PanelComponent {
   render(
     width: number,
     contentHeight: number,
-    // biome-ignore lint/suspicious/noExplicitAny: Theme type not exported from pi-tui
-    theme: any
+    theme: ThemeLike,
+    leftWidth: number,
+    rightWidth: number
   ): string[] {
     this.lastContentHeight = contentHeight;
 
-    // Always reserve 1 char for scrollbar gutter — eliminates width oscillation
-    const effectiveWidth = Math.max(1, width - 1);
-
-    // Recompute wrapping if width changed
-    this.ensureCache(effectiveWidth);
+    // Ensure pre-computed styles are up-to-date
+    this.ensurePrecomputedStyles(leftWidth, rightWidth, theme);
 
     // Clamp scroll
     const maxScroll = Math.max(0, this.maxLines - contentHeight);
     this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
 
-    // ── Render output cache — skip full render if inputs unchanged ────
-    const cacheKey = `${width}|${contentHeight}|${this.scrollOffset}|${this.renderVersion}`;
+    // ── Render cache — skip if inputs unchanged ─────────────────────
+    const cacheKey = `${width}|${contentHeight}|${leftWidth}|${rightWidth}|${this.scrollOffset}|${this.renderVersion}|${this.currentMatchIndex}`;
     if (cacheKey === this.renderCacheKey && this.cachedRenderOutput.length > 0) {
       return this.cachedRenderOutput;
     }
 
-    const lineNumWidth = this.showLineNumbers ? 8 : 0;
-    const contentWidth = Math.max(1, effectiveWidth - lineNumWidth);
-
-    // Scrollbar thumb
+    // ── Build viewport ──────────────────────────────────────────────
     const thumbPos = scrollbarThumbPos(this.scrollOffset, this.maxLines, contentHeight);
-
-    // Pre-compute themed constants used across all lines
-    const blankGutter = this.showLineNumbers ? theme.fg("dim", "        ") : "";
-    const gutterThumb = theme.fg("dim", "█");
-    const gutterSpace = theme.fg("dim", " ");
-
-    // Hoist invariant checks out of the per-line loop
     const hasMatches = this.matchPositions.length > 0;
-    const hasWordHighlights = this.wordHighlightsByLine.length > 0;
+    const gutterThumb = theme.fg("dim", "█");
+    const gutterSpace = " ";
 
-    const blankContent = " ".repeat(contentWidth);
-    const blankLineGutter = this.showLineNumbers ? "        " : "";
-
-    // ── Incremental scroll optimization — shift by 1 line ────────────
-    const canIncrementalScroll =
-      this.cachedRenderOutput.length === contentHeight &&
-      width === this.lastWidth &&
-      contentHeight === this.lastContentHeight &&
-      this.renderVersion === this.lastRenderVersion &&
-      Math.abs(this.scrollOffset - this.lastScrollOffset) === 1;
-
-    if (canIncrementalScroll) {
-      if (this.scrollOffset === this.lastScrollOffset + 1) {
-        // Scrolled down: shift array up, render new bottom line
-        this.cachedRenderOutput.shift();
-        const newLineIdx = this.scrollOffset + contentHeight - 1;
-        const newLine = this.renderSingleLine(
-          newLineIdx,
-          contentWidth,
-          lineNumWidth,
-          thumbPos,
-          contentHeight - 1,
-          blankGutter,
-          blankContent,
-          blankLineGutter,
-          gutterThumb,
-          gutterSpace,
-          hasMatches,
-          hasWordHighlights,
-          theme
-        );
-        this.cachedRenderOutput.push(newLine);
-      } else {
-        // Scrolled up: pop last, unshift new top line
-        this.cachedRenderOutput.pop();
-        const newLineIdx = this.scrollOffset;
-        const newLine = this.renderSingleLine(
-          newLineIdx,
-          contentWidth,
-          lineNumWidth,
-          thumbPos,
-          0,
-          blankGutter,
-          blankContent,
-          blankLineGutter,
-          gutterThumb,
-          gutterSpace,
-          hasMatches,
-          hasWordHighlights,
-          theme
-        );
-        this.cachedRenderOutput.unshift(newLine);
-      }
-
-      // Update scrollbar on shifted lines (thumb position may have changed)
-      for (let i = 0; i < contentHeight; i++) {
-        const line = this.cachedRenderOutput[i];
-        const shouldHaveThumb = thumbPos >= 0 && i === thumbPos;
-        const hasThumb = line.endsWith("█\x1b[0m") || line.endsWith("█");
-
-        if (shouldHaveThumb !== hasThumb) {
-          const suffix = shouldHaveThumb ? gutterThumb : gutterSpace;
-          if (line.endsWith(" ")) {
-            this.cachedRenderOutput[i] = line.slice(0, -1) + (shouldHaveThumb ? "█" : " ");
-          } else if (line.includes("\x1b[2m█\x1b[0m")) {
-            // biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI escape sequences intentionally
-            this.cachedRenderOutput[i] = line.replace(/\x1b\[2m[█ ]\x1b\[0m$/, suffix);
-          }
-        }
-      }
-
-      this.lastScrollOffset = this.scrollOffset;
-      this.renderCacheKey = cacheKey;
-      return this.cachedRenderOutput;
-    }
-
-    // Render visible lines — always exactly contentHeight lines to prevent visual tearing
-    const start = this.scrollOffset;
-    const result: string[] = new Array(contentHeight);
+    const result = new Array<string>(contentHeight);
 
     for (let i = 0; i < contentHeight; i++) {
-      const lineIdx = start + i;
-      const suffix = thumbPos >= 0 && i === thumbPos ? gutterThumb : gutterSpace;
+      const lineIdx = this.scrollOffset + i;
+      const gutter = thumbPos >= 0 && i === thumbPos ? gutterThumb : gutterSpace;
 
-      // Beyond content: render blank filler line
-      if (lineIdx >= this.cachedVisualLines.length) {
-        result[i] = blankLineGutter + blankContent + suffix;
-        continue;
-      }
-
-      const vl = this.cachedVisualLines[lineIdx];
-      const rawText = this.cachedRawLines[vl.rawIndex] || "";
-
-      // ── Line number prefix ───────────────────────────────────────────
-      let lineNumStr = "";
-      if (this.showLineNumbers) {
-        if (vl.isFirst) {
-          const info = vl.lineInfo;
-          if (info.oldLineNum !== undefined && info.newLineNum !== undefined) {
-            lineNumStr = theme.fg(
-              "dim",
-              `${String(info.oldLineNum).padStart(3)}|${String(info.newLineNum).padStart(3)} `
-            );
-          } else if (info.oldLineNum !== undefined) {
-            lineNumStr = theme.fg("error", `${String(info.oldLineNum).padStart(3)}|    `);
-          } else if (info.newLineNum !== undefined) {
-            lineNumStr = theme.fg("success", `   |${String(info.newLineNum).padStart(3)} `);
-          } else {
-            lineNumStr = blankGutter;
-          }
-        } else {
-          lineNumStr = blankGutter;
-        }
-      }
-
-      // ── Styled content ───────────────────────────────────────────────
-      let matchesOnSlice = false;
-      let lineMatches: LineMatch[] | undefined;
-      if (hasMatches) {
-        lineMatches = this.matchesByRawLine[vl.rawIndex];
-        if (lineMatches && lineMatches.length > 0) {
-          matchesOnSlice = lineMatches.some(
-            (m) => m.startCol < vl.colEnd && m.startCol + m.length > vl.colStart
-          );
-        }
-      }
-      const wordHighlight = hasWordHighlights ? this.wordHighlightsByLine[vl.rawIndex] : undefined;
-      let styledLine: string;
-
-      // Determine line-type color
-      let lineColor: string;
-      if (rawText.startsWith("+")) lineColor = "success";
-      else if (rawText.startsWith("-")) lineColor = "error";
-      else if (rawText.startsWith("@@")) lineColor = "accent";
-      else if (rawText.startsWith("diff ") || rawText.startsWith("index ")) lineColor = "dim";
-      else lineColor = "text";
-
-      if (matchesOnSlice && lineMatches) {
-        styledLine = this.padStyled(
-          this.renderSearchHighlightSlice(
-            rawText,
-            lineMatches,
-            vl.colStart,
-            vl.colEnd,
-            lineColor,
-            theme
-          ),
-          contentWidth
-        );
-      } else if (wordHighlight) {
-        styledLine = this.padStyled(
-          this.renderWordHighlightSlice(wordHighlight, vl.colStart, vl.colEnd, vl.isFirst, theme),
-          contentWidth
-        );
+      if (lineIdx >= this.maxLines) {
+        result[i] = this.blankLine + gutter;
+      } else if (hasMatches) {
+        result[i] = this.renderSbsLineWithSearch(lineIdx, leftWidth, rightWidth, theme) + gutter;
       } else {
-        styledLine = theme.fg(lineColor, padToWidth(vl.text, contentWidth));
+        result[i] = this.precomputedLines[lineIdx] + gutter;
       }
-
-      result[i] = lineNumStr + styledLine + suffix;
     }
 
-    this.lastScrollOffset = this.scrollOffset;
-    this.lastWidth = width;
-    this.lastContentHeight = contentHeight;
-    this.lastRenderVersion = this.renderVersion;
     this.renderCacheKey = cacheKey;
     this.cachedRenderOutput = result;
     return result;

@@ -1,6 +1,6 @@
 import type { DiffFile } from "../../services/diff-service.js";
 import { padToWidth, scrollbarThumbPos, wrapLine } from "../text-utils.js";
-import type { Panel, PanelComponent } from "../types.js";
+import type { Panel, PanelComponent, ThemeLike } from "../types.js";
 
 export class FilePanel implements PanelComponent {
   files: DiffFile[] = [];
@@ -91,13 +91,7 @@ export class FilePanel implements PanelComponent {
     }
   }
 
-  render(
-    width: number,
-    contentHeight: number,
-    activePanel: Panel,
-    // biome-ignore lint/suspicious/noExplicitAny: Theme type not exported from pi-tui
-    theme: any
-  ): string[] {
+  render(width: number, contentHeight: number, activePanel: Panel, theme: ThemeLike): string[] {
     const displayFiles = this.getDisplayFiles();
 
     // Always reserve 1 char for scrollbar gutter — eliminates width oscillation

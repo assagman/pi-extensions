@@ -2,6 +2,13 @@ export type Panel = "commits" | "files" | "diff";
 
 export const UNCOMMITTED_SHA = "__uncommitted__";
 
+/**
+ * Opaque theme handle — pi-tui does not export the Theme type.
+ * Using a branded alias keeps `any` confined to one declaration.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: Theme type not exported from pi-tui
+export type ThemeLike = any;
+
 /** Shared interface for all theta panels. */
 export interface PanelComponent {
   /** Number of matches found by the last filter/search. */
@@ -10,6 +17,5 @@ export interface PanelComponent {
   readonly filterCurrentIndex: number;
   applyFilter(query: string, caseSensitive: boolean): void;
   clearFilter(): void;
-  // biome-ignore lint/suspicious/noExplicitAny: Theme type not exported from pi-tui
-  render(width: number, contentHeight: number, ...args: any[]): string[];
+  render(width: number, contentHeight: number, ...args: unknown[]): string[];
 }

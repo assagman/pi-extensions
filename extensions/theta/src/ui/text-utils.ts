@@ -4,6 +4,11 @@ import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
  * Wrap a plain-text line to fit within `width` visible columns.
  * Returns an array of substrings — one per visual line.
  * Uses truncateToWidth for correct handling of wide/multi-byte characters.
+ *
+ * NOTE: Uses `substring(chunk.length)` to advance through the string.
+ * This is correct for BMP characters and simple emoji but may split
+ * complex grapheme clusters (e.g. ZWJ sequences). Acceptable for diff
+ * content which is predominantly ASCII source code.
  */
 export function wrapLine(text: string, width: number): string[] {
   if (width <= 0) return [""];

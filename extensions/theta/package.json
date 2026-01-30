@@ -17,8 +17,7 @@
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
     "@pierre/diffs": "^1.0.8",
-    "diff": "^8.0.2",
-    "shared-tui": "file:../shared/tui"
+    "diff": "^8.0.2"
   },
   "devDependencies": {
     "@types/node": "^25.0.10",
