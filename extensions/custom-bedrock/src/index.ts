@@ -11,9 +11,9 @@
  * Or hardcode values below if you prefer.
  *
  * Usage:
- *   cd ~/.pi/agent/extensions/custom-bedrock && npm install
+ *   cd ~/.pi/agent/extensions/custom-bedrock && bun install
  *   CUSTOM_BEDROCK_URL=https://... CUSTOM_BEDROCK_TOKEN=... pi
- *   Then /model -> select custom-bedrock/anthropic.claude-3-opus-...
+ *   Then /model -> select custom-bedrock/anthropic.claude-opus-4-6-...
  */
 
 import {
@@ -528,24 +528,23 @@ export default function (pi: ExtensionAPI) {
 
 		models: [
 			{
-				id: "anthropic.claude-3-opus-20240229-v1:0",
-				name: "Claude 3 Opus (Custom Bedrock)",
-				reasoning: false,
+				id: "anthropic.claude-opus-4-6-20260115-v1:0",
+				name: "Claude Opus 4.6 (Custom Bedrock)",
+				reasoning: true,
 				input: ["text", "image"],
 				contextWindow: 200000,
-				maxTokens: 4096,
-				cost: { input: 15, output: 75, cacheRead: 0, cacheWrite: 0 },
+				maxTokens: 32000,
+				cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
 			},
-			// Add more models as needed, e.g.:
-			// {
-			//   id: "anthropic.claude-sonnet-4-20250514-v1:0",
-			//   name: "Claude Sonnet 4 (Custom Bedrock)",
-			//   reasoning: true,
-			//   input: ["text", "image"],
-			//   contextWindow: 200000,
-			//   maxTokens: 64000,
-			//   cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-			// },
+			{
+				id: "anthropic.claude-sonnet-4-6-20260115-v1:0",
+				name: "Claude Sonnet 4.6 (Custom Bedrock)",
+				reasoning: true,
+				input: ["text", "image"],
+				contextWindow: 200000,
+				maxTokens: 64000,
+				cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+			},
 		],
 
 		streamSimple: streamCustomBedrock,
