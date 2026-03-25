@@ -2,40 +2,54 @@
 
 ## Overview
 
-Routes AI requests through a custom Bedrock-compatible gateway that speaks the AWS Bedrock Converse protocol but authenticates via Bearer token instead of AWS SigV4.
+Registers one Pi provider per configured custom Bedrock profile. Each profile points at its own Bedrock-compatible gateway endpoint, auth source, headers, and optional model overrides.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `src/index.ts` | Extension entry, provider registration, streaming logic |
+| `src/index.ts` | Extension entry, session startup hook, status command |
+| `src/config.ts` | Config discovery, parsing, validation, value resolution |
+| `src/registration.ts` | Provider registration / reload helpers |
+| `src/stream.ts` | Bedrock Converse streaming implementation |
+| `src/*.test.ts` | Unit tests for config + registration logic |
+| `docs/setup.md` | User setup documentation |
+| `models.example.json` | Example config file |
 
 ## Architecture
 
+```text
+config file -> resolved profiles -> custom-bedrock-<profile> providers -> streamCustomBedrock()
 ```
-pi → custom-bedrock provider → ConverseStream API → custom gateway
-```
 
-1. Extension registers `custom-bedrock` provider with Pi
-2. Requests are routed through AWS SDK's `ConverseStreamCommand`
-3. SigV4 signing is disabled; Bearer token auth is injected via middleware
-4. Streaming responses are converted to Pi's `AssistantMessageEventStream`
+1. On `session_start`, the extension loads config from project or user scope
+2. Each valid profile becomes its own provider (for example `custom-bedrock-prod`)
+3. Requests are routed through AWS SDK `ConverseStreamCommand`
+4. SigV4 signing is bypassed and auth headers are injected manually
+5. `/custom-bedrock-status` shows current load/registration state
 
-## Configuration
+## Config locations
 
-Environment variables:
-- `CUSTOM_BEDROCK_URL` — Gateway base URL
-- `CUSTOM_BEDROCK_TOKEN` — Bearer token for the gateway
+Checked in this order:
+- `.pi/custom-bedrock/models.json`
+- `~/.pi/agent/custom-bedrock/models.json`
 
-## Features
+## Value types
 
-- Full Bedrock Converse protocol support (text, images, tools, thinking)
-- Custom header injection via middleware
-- Extended thinking / reasoning budget support
-- Proper error handling for all Bedrock error types
+For `baseUrl`, `apiKey`, and header values:
+- literal string
+- `{ "env": "VAR_NAME" }`
+- `{ "command": "shell command" }`
+
+## Model behavior
+
+- Built-in defaults: latest global Claude 4.6 profiles
+- `defaults.models` can override the shared model set
+- `profiles.<name>.models` replaces the defaults for that profile
+- Display names get a profile suffix like `[prod]`
 
 ## Constraints
 
-- Requires `@aws-sdk/client-bedrock-runtime` (heavy dependency)
-- Gateway must implement Bedrock Converse protocol
-- SigV4 signing is completely bypassed
+- Requires `@aws-sdk/client-bedrock-runtime`
+- Gateway must implement Bedrock Converse streaming semantics
+- Config errors should skip only the broken profile, not all profiles

@@ -21,3 +21,4 @@ fi
 mkdir -p "$EXT_TARGET"
 ln -sfn "$DIST_DIR" "$EXT_TARGET/$EXT_NAME"
 echo "✅ Extension: $DIST_DIR → $EXT_TARGET/$EXT_NAME"
+echo "ℹ️  Config: project .pi/custom-bedrock/models.json or user ~/.pi/agent/custom-bedrock/models.json"

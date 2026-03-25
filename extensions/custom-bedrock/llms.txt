@@ -1,21 +1,35 @@
 # Custom Bedrock Extension
 
-Routes AI requests through a custom Bedrock-compatible AI gateway.
+Config-driven Bedrock-compatible gateway extension for Pi.
 
 ## Purpose
-Enables Pi to use a custom gateway that speaks the AWS Bedrock
-Converse protocol but authenticates via Bearer token instead of AWS SigV4.
+Loads one or more custom Bedrock profiles from config and exposes each profile
+as its own Pi provider. This allows multiple endpoints, tokens, and headers to
+coexist at the same time.
 
-## Configuration
-- CUSTOM_BEDROCK_URL: Gateway base URL (env var)
-- CUSTOM_BEDROCK_TOKEN: Bearer token (env var)
+## Config locations
+- .pi/custom-bedrock/models.json
+- ~/.pi/agent/custom-bedrock/models.json
+
+Project config wins over user config.
+
+## Value resolution
+For `baseUrl`, `apiKey`, and headers, values can be:
+- literal strings
+- `{ "env": "VAR_NAME" }`
+- `{ "command": "shell command" }`
+
+## Built-in models
+Defaults to latest global Claude Bedrock inference profile IDs:
+- global.anthropic.claude-opus-4-6-v1
+- global.anthropic.claude-sonnet-4-6
 
 ## Key Components
-- Provider: Registers "custom-bedrock" provider with Pi
-- Streaming: Full ConverseStream support (text, images, tools, thinking)
-- Auth: Bearer token injection via AWS SDK middleware (SigV4 bypassed)
+- config.ts: Config loading, validation, resolution
+- registration.ts: Per-profile provider registration
+- stream.ts: Custom Bedrock Converse streaming implementation
+- index.ts: Session startup integration and `/custom-bedrock-status`
 
-## Dependencies
-- @aws-sdk/client-bedrock-runtime: AWS Bedrock SDK
-- @mariozechner/pi-ai: Pi AI types and utilities
-- @mariozechner/pi-coding-agent: Pi extension API
+## Tests
+- config.test.ts: path precedence, value resolution, profile validation
+- registration.test.ts: provider registration and status rendering

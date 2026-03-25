@@ -1,0 +1,31 @@
+{
+  "defaults": {
+    "headers": {
+      "x-api-version": "2026-03-25"
+    }
+  },
+  "profiles": {
+    "prod": {
+      "baseUrl": { "env": "BEDROCK_PROD_URL" },
+      "apiKey": { "env": "BEDROCK_PROD_TOKEN" }
+    },
+    "staging": {
+      "baseUrl": { "env": "BEDROCK_STAGING_URL" },
+      "apiKey": { "env": "BEDROCK_STAGING_TOKEN" },
+      "headers": {
+        "x-tenant": { "command": "op read op://AI/bedrock-staging/tenant" }
+      },
+      "models": [
+        {
+          "id": "global.anthropic.claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 200000,
+          "maxTokens": 64000,
+          "cost": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75 }
+        }
+      ]
+    }
+  }
+}
