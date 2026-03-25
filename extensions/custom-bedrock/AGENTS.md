@@ -24,8 +24,8 @@ pi → custom-bedrock provider → ConverseStream API → custom gateway
 ## Configuration
 
 Environment variables:
-- `CORP_BEDROCK_URL` — Gateway base URL
-- `CORP_BEDROCK_TOKEN` — Bearer token for the gateway
+- `CUSTOM_BEDROCK_URL` — Gateway base URL
+- `CUSTOM_BEDROCK_TOKEN` — Bearer token for the gateway
 
 ## Features
 

@@ -3,12 +3,12 @@
 Routes AI requests through a custom Bedrock-compatible AI gateway.
 
 ## Purpose
-Enables Pi to use a corporate/custom gateway that speaks the AWS Bedrock
+Enables Pi to use a custom gateway that speaks the AWS Bedrock
 Converse protocol but authenticates via Bearer token instead of AWS SigV4.
 
 ## Configuration
-- CORP_BEDROCK_URL: Gateway base URL (env var)
-- CORP_BEDROCK_TOKEN: Bearer token (env var)
+- CUSTOM_BEDROCK_URL: Gateway base URL (env var)
+- CUSTOM_BEDROCK_TOKEN: Bearer token (env var)
 
 ## Key Components
 - Provider: Registers "custom-bedrock" provider with Pi

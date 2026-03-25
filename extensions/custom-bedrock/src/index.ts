@@ -5,15 +5,15 @@
  * Converse protocol but authenticates via token instead of AWS SigV4.
  *
  * Configuration (env vars):
- *   CORP_BEDROCK_URL      - Gateway base URL (e.g. https://gateway.corp.com/bedrock)
- *   CORP_BEDROCK_TOKEN    - Bearer token for the gateway
+ *   CUSTOM_BEDROCK_URL      - Gateway base URL (e.g. https://gateway.example.com/bedrock)
+ *   CUSTOM_BEDROCK_TOKEN    - Bearer token for the gateway
  *
  * Or hardcode values below if you prefer.
  *
  * Usage:
- *   cd ~/.pi/agent/extensions/corp-bedrock && npm install
- *   CORP_BEDROCK_URL=https://... CORP_BEDROCK_TOKEN=... pi
- *   Then /model -> select corp-bedrock/anthropic.claude-3-opus-...
+ *   cd ~/.pi/agent/extensions/custom-bedrock && npm install
+ *   CUSTOM_BEDROCK_URL=https://... CUSTOM_BEDROCK_TOKEN=... pi
+ *   Then /model -> select custom-bedrock/anthropic.claude-3-opus-...
  */
 
 import {
@@ -360,7 +360,7 @@ function handleMetadata(
 // Stream implementation
 // ---------------------------------------------------------------------------
 
-function streamCorpBedrock(
+function streamCustomBedrock(
 	model: Model<Api>,
 	context: Context,
 	options?: SimpleStreamOptions,
@@ -429,7 +429,7 @@ function streamCorpBedrock(
 						}
 						return next(args as any);
 					},
-					{ step: "build", name: "corpBedrockHeadersMiddleware" },
+					{ step: "build", name: "customBedrockHeadersMiddleware" },
 				);
 			}
 
@@ -521,8 +521,8 @@ function streamCorpBedrock(
 
 export default function (pi: ExtensionAPI) {
 	pi.registerProvider("custom-bedrock", {
-		baseUrl: "CORP_BEDROCK_URL",       // env var name -> resolved at runtime
-		apiKey: "CORP_BEDROCK_TOKEN",      // env var name -> resolved at runtime
+		baseUrl: "CUSTOM_BEDROCK_URL",       // env var name -> resolved at runtime
+		apiKey: "CUSTOM_BEDROCK_TOKEN",      // env var name -> resolved at runtime
 		api: "custom-bedrock-converse",
 		authHeader: true,
 
@@ -548,6 +548,6 @@ export default function (pi: ExtensionAPI) {
 			// },
 		],
 
-		streamSimple: streamCorpBedrock,
+		streamSimple: streamCustomBedrock,
 	});
 }
