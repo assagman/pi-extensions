@@ -20,7 +20,7 @@
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
     "@sinclair/typebox": "^0.34.8",
-    "pi-ext-shared": "../shared/core",
+    "pi-ext-shared": "file:../shared/core",
     "shared-tui": "file:../shared/tui"
   },
   "devDependencies": {

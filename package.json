@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "workspaces": ["extensions/*"],
+  "workspaces": ["extensions/*", "extensions/shared/*"],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present",
