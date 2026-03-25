@@ -528,7 +528,7 @@ export default function (pi: ExtensionAPI) {
 
 		models: [
 			{
-				id: "anthropic.claude-opus-4-6-20260115-v1:0",
+				id: "global.anthropic.claude-opus-4-6-v1",
 				name: "Claude Opus 4.6 (Custom Bedrock)",
 				reasoning: true,
 				input: ["text", "image"],
@@ -537,7 +537,7 @@ export default function (pi: ExtensionAPI) {
 				cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
 			},
 			{
-				id: "anthropic.claude-sonnet-4-6-20260115-v1:0",
+				id: "global.anthropic.claude-sonnet-4-6",
 				name: "Claude Sonnet 4.6 (Custom Bedrock)",
 				reasoning: true,
 				input: ["text", "image"],
