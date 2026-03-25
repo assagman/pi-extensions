@@ -8,8 +8,8 @@ DIST_DIR="$SCRIPT_DIR/dist"
 
 # Build
 echo "Building $EXT_NAME..."
-bun install
-bun run build
+npm install
+npm run build
 
 # Verify dist exists
 if [ ! -d "$DIST_DIR" ]; then

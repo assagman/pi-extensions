@@ -43,7 +43,7 @@ delta/
 | Events | `session_start`, `before_agent_start`, `tool_call`, `tool_result`, `session_shutdown` |
 | Auto-capture | Git commits → memories with `["commit", "auto-captured"]` tags |
 | Shared dep | `pi-ext-shared` — repo ID, SQLite helpers, tool factory |
-| Tests | `vitest` — `bun run test` (113 total: 96 db + 17 prune) |
+| Tests | `vitest` — `npm test` (113 total: 96 db + 17 prune) |
 
 ## DB API (db.ts)
 
@@ -62,7 +62,7 @@ delta/
 ## Build
 
 ```bash
-bun install && bun run build
+npm install && npm run build
 ./install.sh
 ```
 

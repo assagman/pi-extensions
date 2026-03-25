@@ -32,12 +32,12 @@ epsilon/
 | System prompt | Injects `<epsilon_tasks>` block with active tasks + status overview |
 | Events | `before_agent_start` (inject context) |
 | Shared dep | `pi-ext-shared` (shared/core) — repo ID, SQLite helpers, tool factory |
-| Tests | `vitest` — `bun run test` |
+| Tests | `vitest` — `npm test` |
 
 ## Build
 
 ```bash
-bun install && bun run build
+npm install && npm run build
 ./install.sh
 ```
 

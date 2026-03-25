@@ -142,4 +142,5 @@ vite.config.ts.timestamp-*
 **/.delta/
 
 # npm
-package-lock.json
+**/package-lock.json
+!package-lock.json

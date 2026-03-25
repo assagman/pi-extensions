@@ -19,7 +19,7 @@ Theta is a Pi extension for interactive code review workflows. It provides a 3-c
 
 ```bash
 # In your pi extensions directory
-bun install
+npm install
 ./install.sh
 ```
 
@@ -96,6 +96,6 @@ Press `/` to search within the active panel:
 ## Development
 
 ```bash
-bun install
-bun run build
+npm install
+npm run build
 ```

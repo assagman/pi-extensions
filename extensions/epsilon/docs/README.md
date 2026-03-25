@@ -17,7 +17,7 @@ Task management extension for Pi coding agent using SQLite.
 
 ```bash
 cd extensions/epsilon
-bun install
+npm install
 ./install.sh
 ```
 

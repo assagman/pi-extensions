@@ -6,7 +6,7 @@ Omega repeats user-defined steps with aggressive compaction between each. Define
 
 ```bash
 cd extensions/omega
-bun install && ./install.sh
+npm install && ./install.sh
 ```
 
 Then in Pi:

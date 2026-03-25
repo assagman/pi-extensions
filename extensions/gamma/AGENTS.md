@@ -46,6 +46,6 @@ Context window token analyzer & visualizer for Pi coding agent.
 ## Testing
 
 ```bash
-bun run test       # vitest run
-bun run test:watch # vitest watch
+npm test              # vitest run
+npm run test:watch    # vitest watch
 ```

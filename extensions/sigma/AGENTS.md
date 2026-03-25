@@ -34,12 +34,12 @@ sigma/
 | System prompt | Injects "Sigma Tool — Usage Guidelines" |
 | TUI pattern | `ctx.ui.custom()` with closure-based state |
 | Dependencies | `@mariozechner/pi-tui`, `@sinclair/typebox`, `shared-tui` |
-| Tests | `vitest` — `bun run test` |
+| Tests | `vitest` — `npm test` |
 
 ## Build
 
 ```bash
-bun install && bun run build    # esbuild bundle
+npm install && npm run build    # esbuild bundle
 ./install.sh                    # build + symlink
 ```
 

@@ -68,14 +68,11 @@ extension/
 
 # Install a specific extension
 ./install.sh <name>
-
-# CI mode (frozen lockfile)
-./install.sh --ci <name>
 ```
 
 The install script:
 1. Builds shared dependencies if needed (`shared/core`, `shared/tui`)
-2. Runs `bun install` + `bun run build` (compiles TypeScript)
+2. Runs `npm install` + `npm run build` (compiles TypeScript)
 3. Creates symlink: `~/.pi/agent/extensions/<name>` → `dist/`
 
 ## Uninstallation
@@ -105,19 +102,22 @@ See each extension's `docs/` directory:
 ## Development
 
 ```bash
+# Install dependencies
+npm install
+
 # Build an extension
 cd extensions/<name>
-bun run build
+npm run build
 
 # Clean build artifacts
-bun run clean
+npm run clean
 
 # Run tests (vitest, Node.js runtime)
-bun run test
+npm test
 
 # Lint/format (biome)
-bun run lint
-bun run format
+npm run lint
+npm run format
 ```
 
 ## License

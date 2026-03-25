@@ -45,7 +45,7 @@ theta/
 ## Build
 
 ```bash
-bun install && bun run build
+npm install && npm run build
 ./install.sh
 ```
 

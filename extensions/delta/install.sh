@@ -10,7 +10,8 @@ SKILL_DIR="$SCRIPT_DIR/skill"
 
 # Build
 echo "Building $EXT_NAME..."
-bun run build
+npm install
+npm run build
 
 # Verify dist exists
 if [ ! -d "$DIST_DIR" ]; then

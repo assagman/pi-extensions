@@ -85,12 +85,12 @@ extension/
 ## Adding a New Extension
 
 1. Create directory: `extensions/<name>/`
-2. Initialize: `bun init`
+2. Initialize: `npm init -y`
 3. Create structure matching convention above
 4. Add dependencies:
    ```bash
-   bun add @mariozechner/pi-coding-agent @mariozechner/pi-tui
-   bun add -d typescript @types/node
+   npm install @mariozechner/pi-coding-agent @mariozechner/pi-tui
+   npm install -D typescript @types/node
    ```
 5. Implement `src/index.ts` exporting Pi extension
 6. Create `install.sh` and `uninstall.sh` (copy from existing)
@@ -101,14 +101,14 @@ extension/
 ```bash
 # Build single extension
 cd extensions/<name>
-bun install
-bun run build
+npm install
+npm run build
 
 # Install (build + symlink)
 ./install.sh
 
 # Clean
-bun run clean
+npm run clean
 ```
 
 ## Key Dependencies
@@ -131,13 +131,13 @@ bun run clean
 
 ## Testing
 
-**Pi runs extensions with Node.js, NOT Bun.** This has critical testing implications:
+**Pi runs extensions with Node.js.** This has critical testing implications:
 
 | Constraint | Detail |
 |-----------|--------|
-| `better-sqlite3` | Cannot load under `bun test` — native bindings are Node-only |
-| `bun:sqlite` | Cannot be used at all — Bun-specific, fails in Pi's Node.js runtime |
-| Test runner | **Use `vitest`** (runs on Node.js), never `bun:test` |
+| `better-sqlite3` | Run tests under Node.js (`npm test`) — native bindings are Node-only |
+| Runtime-specific SQLite APIs | Do not use — Pi runs on Node.js and needs portable deps |
+| Test runner | **Use `vitest`** (runs on Node.js) via `npm test` |
 | Test imports | `import { describe, it, expect } from "vitest"` |
 
 ### Setup
@@ -145,7 +145,7 @@ bun run clean
 Each extension with tests needs:
 
 ```bash
-bun add -d vitest
+npm install -D vitest
 ```
 
 `vitest.config.ts`:
@@ -171,7 +171,7 @@ export default defineConfig({
 
 ```bash
 cd extensions/<name>
-bun run test          # vitest run (Node.js runtime)
+npm test              # vitest run (Node.js runtime)
 ```
 
 ### Manual Testing
@@ -198,7 +198,7 @@ pi  # Start Pi agent, test extension features
 | Task | Command |
 |------|---------|
 | Add extension | Create dir, copy structure, implement |
-| Build | `bun run build` |
+| Build | `npm run build` |
 | Install | `./install.sh` |
 | Remove | `./uninstall.sh` |
-| Clean | `bun run clean` |
+| Clean | `npm run clean` |

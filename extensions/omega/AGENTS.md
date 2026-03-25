@@ -36,12 +36,12 @@ omega/
 | AgentEndAwaiter | Solves `waitForIdle()` race condition |
 | State persistence | `appendEntry` for session interrupt recovery |
 | Context filter | Strips stale omega messages from LLM context |
-| Tests | `vitest` — `bun run test` |
+| Tests | `vitest` — `npm test` |
 
 ## Build
 
 ```bash
-bun install && bun run build
+npm install && npm run build
 ./install.sh
 ```
 

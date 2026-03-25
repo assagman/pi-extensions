@@ -19,7 +19,7 @@ FTS5 full-text search — everything is `content + tags[]`.
 
 ```bash
 cd extensions/delta
-bun install
+npm install
 ./install.sh
 ```
 

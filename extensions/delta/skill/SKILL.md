@@ -98,7 +98,7 @@ All memories use **tags** for classification. No separate tables or rigid types.
 | **When** | After trying something — success or failure |
 | **Store** | `delta_remember content="Tried X — result" tags=["exploration", "outcome:<result>"]` |
 | **Retrieve** | `delta_search(tags=["exploration"])` |
-| **Examples** | "Tried bun:sqlite — fails in Node.js runtime", "d2 renders ASCII diagrams well" |
+| **Examples** | "Tried runtime-specific SQLite API — fails in Node.js runtime", "d2 renders ASCII diagrams well" |
 
 ### 7. Architecture & System Design
 
@@ -116,7 +116,7 @@ All memories use **tags** for classification. No separate tables or rigid types.
 | **When** | Encounter bugs, pitfalls, workarounds |
 | **Store** | `delta_remember content="<issue>" tags=["bug", "<component>"] importance="high"` |
 | **Retrieve** | `delta_search(tags=["bug"])` or `delta_search(tags=["issue"])` |
-| **Examples** | "better-sqlite3 doesn't load under bun test", "Empty IN() causes SQLite syntax error" |
+| **Examples** | "better-sqlite3 doesn't load outside Node.js test runners", "Empty IN() causes SQLite syntax error" |
 
 ### 9. Commits (auto-captured)
 

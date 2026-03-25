@@ -36,14 +36,13 @@ get_extensions() {
 }
 
 usage() {
-  echo "Usage: $(basename "$0") [--ci] [-i | <extension-name>]"
+  echo "Usage: $(basename "$0") [-i | <extension-name>]"
   echo ""
   echo "Build and install pi extensions to ~/.pi/agent/extensions/"
   echo ""
   echo "Options:"
   echo "  <extension-name>   Install a single extension by name"
   echo "  -i, --interactive  Select extensions from an interactive checklist"
-  echo "  --ci               Use bun install --frozen-lockfile"
   echo ""
   echo "Available extensions:"
   local exts
@@ -146,13 +145,16 @@ build_shared_dep() {
   local dep_dir="$1"
   local dep_name
   dep_name=$(basename "$dep_dir")
-  
+
   echo ""
   echo "[shared/$dep_name] (dependency)"
-  echo "  bun install..."
-  (cd "$dep_dir" && bun install --silent "${BUN_INSTALL_FLAGS[@]}")
-  echo "  bun run build..."
-  if ! (cd "$dep_dir" && bun run build 2>&1); then
+  echo "  npm install..."
+  if ! (cd "$dep_dir" && npm install --silent); then
+    echo -e "  ${RED}✗ npm install failed${NC}"
+    return 1
+  fi
+  echo "  npm run build..."
+  if ! (cd "$dep_dir" && npm run build 2>&1); then
     echo -e "  ${RED}✗ shared/$dep_name build failed${NC}"
     return 1
   fi
@@ -180,14 +182,14 @@ install_extension() {
   echo ""
   echo "[$name]"
 
-  echo "  bun install..."
-  if ! (cd "$ext_dir" && bun install --silent "${BUN_INSTALL_FLAGS[@]}"); then
-    echo -e "  ${RED}✗ bun install failed${NC}"
+  echo "  npm install..."
+  if ! (cd "$ext_dir" && npm install --silent); then
+    echo -e "  ${RED}✗ npm install failed${NC}"
     return 1
   fi
 
-  echo "  bun run build..."
-  if ! (cd "$ext_dir" && bun run build 2>&1); then
+  echo "  npm run build..."
+  if ! (cd "$ext_dir" && npm run build 2>&1); then
     echo -e "  ${RED}✗ build failed${NC}"
     return 1
   fi
@@ -211,22 +213,17 @@ install_extension() {
 }
 
 # ── Parse args ─────────────────────────────────────────────────────────
-CI=false
 INTERACTIVE=false
 EXT_NAME=""
 
 for arg in "$@"; do
   case "$arg" in
-    --ci) CI=true ;;
     -i|--interactive) INTERACTIVE=true ;;
     -h|--help) usage ;;
     -*) echo -e "${RED}Unknown option: $arg${NC}"; usage ;;
     *) EXT_NAME="$arg" ;;
   esac
 done
-
-BUN_INSTALL_FLAGS=()
-$CI && BUN_INSTALL_FLAGS+=(--frozen-lockfile)
 
 # ── Interactive mode ───────────────────────────────────────────────────
 if $INTERACTIVE; then
@@ -252,7 +249,7 @@ if $INTERACTIVE; then
     fi
 
     echo ""
-    echo "Pi Extensions Installer${CI:+ (CI mode)}"
+    echo "Pi Extensions Installer"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━"
     mkdir -p "$TARGET_DIR"
 
@@ -293,7 +290,7 @@ for skip in "${SKIP_EXTENSIONS[@]}"; do
   fi
 done
 
-echo "Pi Extensions Installer${CI:+ (CI mode)}"
+echo "Pi Extensions Installer"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━"
 mkdir -p "$TARGET_DIR"
 

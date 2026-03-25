@@ -119,7 +119,7 @@ The architecture consists of four main subsystems:
     *   **Error Handling**: If a tool fails (`result.isError`), `mu` extracts the error text and exit code, then `throw`s an `Error`. Pi catches this and renders the standard red error box. This ensures errors are always visible.
 *   **Rendering (`renderCall`)**:
     *   Returns a `BoxedToolCard` component.
-    *   Generates a compact, one-line summary (e.g., `󰆍 bash $ bun test`, `󰈙 read src/index.ts @L1-50`).
+    *   Generates a compact, one-line summary (e.g., `󰆍 bash $ npm test`, `󰈙 read src/index.ts @L1-50`).
     *   Bash commands render as multiline with full command text (no truncation).
 *   **Rendering (`renderResult`)**:
     *   **Collapsed (Default)**: Returns an empty `Text("")` component (effectively hidden).
